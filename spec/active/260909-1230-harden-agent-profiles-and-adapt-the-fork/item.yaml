@@ -1,0 +1,20 @@
+schema_version: 1
+id: 260909-1230-harden-agent-profiles-and-adapt-the-fork
+title: Harden agent profiles and adapt the fork
+kind: work-item
+work_type: refactor
+parent: null
+route: quick-plan
+status: planned
+created_at: '2026-09-09T12:30:24+02:00'
+updated_at: '2026-09-09T12:30:24+02:00'
+external_refs:
+- system: github
+  type: repository
+  key: amos-upstream
+  url: https://github.com/amosblomqvist/pi-interactive-subagents
+wiki_refs:
+- wiki/architecture.md
+- wiki/development.md
+- wiki/conventions/agent-profiles.md
+- wiki/conventions/runtime-safety.md

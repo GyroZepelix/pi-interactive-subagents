@@ -6,7 +6,7 @@
  * No LLM calls — fast and free.
  *
  * Run inside tmux:
- *   tmux new 'npm run test:integration'
+ *   tmux new 'node --test test/integration/tmux-surface.test.ts'
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -36,6 +36,15 @@ import {
 
 const backends = getAvailableBackends();
 const FOCUS_TEST_SHELL_READY_DELAY_MS = Number(process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS ?? "2500");
+
+function screenContainsMarker(screen: string, marker: string): boolean {
+  return screen.replace(/\s+/g, "").includes(marker);
+}
+
+function wrappedMarkerPattern(marker: string): RegExp {
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(escaped.split("").join("\\s*"));
+}
 
 if (backends.length === 0) {
   console.log("⚠️  tmux is not available — skipping tmux-surface integration tests");
@@ -75,8 +84,8 @@ for (const backend of backends) {
       sendCommand(childB, `echo "FOCUS_B_${markerB}"`);
 
       await Promise.all([
-        waitForScreen(childA, new RegExp(`FOCUS_A_${markerA}`), 20_000, 50),
-        waitForScreen(childB, new RegExp(`FOCUS_B_${markerB}`), 20_000, 50),
+        waitForScreen(childA, wrappedMarkerPattern(`FOCUS_A_${markerA}`), 20_000, 50),
+        waitForScreen(childB, wrappedMarkerPattern(`FOCUS_B_${markerB}`), 20_000, 50),
       ]);
       assert.equal(getFocusedSurface(), anchor);
     });
@@ -91,7 +100,7 @@ for (const backend of backends) {
 
       const screen = readScreen(surface, 50);
       assert.ok(
-        screen.includes(`MARKER_${marker}`),
+        screenContainsMarker(screen, `MARKER_${marker}`),
         `Expected screen to contain MARKER_${marker}. Got:\n${screen}`,
       );
 
@@ -110,12 +119,12 @@ for (const backend of backends) {
 
       const screen = readScreen(surface, 50);
       assert.ok(
-        screen.includes(`SPEC_${marker}`),
+        screenContainsMarker(screen, `SPEC_${marker}`),
         `Expected special-char output. Got:\n${screen}`,
       );
       // $ should be literal inside single quotes
       assert.ok(
-        screen.includes("$HOME"),
+        screenContainsMarker(screen, "$HOME"),
         `Expected literal $HOME in output. Got:\n${screen}`,
       );
     });
@@ -133,11 +142,11 @@ for (const backend of backends) {
 
       const screen = readScreen(surface, 50);
       assert.ok(
-        screen.includes(`LONG_${marker}`),
+        screenContainsMarker(screen, `LONG_${marker}`),
         `Expected long command output. Got:\n${screen.slice(0, 300)}...`,
       );
       assert.ok(
-        screen.includes("_END"),
+        screenContainsMarker(screen, "_END"),
         `Expected full output (not truncated). Got:\n${screen.slice(-300)}`,
       );
     });
@@ -152,7 +161,7 @@ for (const backend of backends) {
 
       const screen = await readScreenAsync(surface, 50);
       assert.ok(
-        screen.includes(`ASYNC_${marker}`),
+        screenContainsMarker(screen, `ASYNC_${marker}`),
         `Async read should find marker. Got:\n${screen}`,
       );
     });
@@ -171,8 +180,8 @@ for (const backend of backends) {
       const screen1 = readScreen(s1, 50);
       const screen2 = readScreen(s2, 50);
 
-      assert.ok(screen1.includes(`S1_${m1}`), `Surface 1 missing marker. Got:\n${screen1}`);
-      assert.ok(screen2.includes(`S2_${m2}`), `Surface 2 missing marker. Got:\n${screen2}`);
+      assert.ok(screenContainsMarker(screen1, `S1_${m1}`), `Surface 1 missing marker. Got:\n${screen1}`);
+      assert.ok(screenContainsMarker(screen2, `S2_${m2}`), `Surface 2 missing marker. Got:\n${screen2}`);
     });
 
     it("writes output to a file and verifies via surface", async () => {
@@ -184,7 +193,7 @@ for (const backend of backends) {
 
       sendCommand(surface, `echo "FILE_${marker}" > ${filePath} && echo "WRITTEN_${marker}"`);
 
-      await waitForScreen(surface, new RegExp(`WRITTEN_${marker}`), 10_000, 50);
+      await waitForScreen(surface, wrappedMarkerPattern(`WRITTEN_${marker}`), 10_000, 50);
       const content = await waitForFile(filePath, 10_000, new RegExp(`FILE_${marker}`));
       assert.ok(content.includes(`FILE_${marker}`), `File content wrong. Got: ${content}`);
 

@@ -1,11 +1,11 @@
 ---
 name: test-echo
-description: Integration test agent — completes simple file-writing tasks
+description: Integration test agent that completes simple file-writing tasks
 model: anthropic/claude-haiku-4-5
-tools: read, bash, write, edit
-spawning: false
+tools: [read, bash, write, edit]
+session-mode: lineage-only
+system-prompt: append
 auto-exit: true
-disable-model-invocation: true
 ---
 
 You are a test agent. Complete the task given to you immediately. Be direct and concise.

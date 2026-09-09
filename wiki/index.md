@@ -19,12 +19,16 @@ Durable current-state codebase knowledge. Read this file first when answering co
 ## Conventions
 
 - [Conventions index](./conventions/index.md): Routing for repository-specific working rules.
-- [Agent profiles](./conventions/agent-profiles.md): Profile fields, discovery precedence, and bundled roles.
+- [Agent profiles](./conventions/agent-profiles.md): Validated user-managed profiles, trust-aware discovery, precedence, and nesting.
 - [Runtime safety](./conventions/runtime-safety.md): Tool isolation, resume invariants, and shell boundaries.
 - [TypeScript modules](./conventions/typescript-modules.md): ESM imports, module boundaries, and test seams.
 
+## Reflection and recall
+
+- [Observation queue](./observations.md): Tentative findings for later Dream comparison; not normal implementation guidance.
+- [Profile-hardening implementation session](./dreams/2026-09-09-1616-completed-session.md): Completed user-managed profile migration, fail-closed runtime hardening, repeated review corrections, verification, and checkpoint handoff.
+
 ## Stale or needs review
 
-- Needs review: `package.json` version `3.7.2` disagrees with the lockfile root version `1.6.0`.
-- Needs review: integration fixtures still reference removed `fork`, `systemPrompt`, and `caller_ping` interfaces.
 - Unverified: no tracked CI, release, formatter, linter, type-check configuration, or preexisting architectural history is available.
+- Deferred: stop/interrupt controls, acknowledged transport, shell-readiness redesign, broader configuration, orchestration modularization, and unrelated dead-code cleanup.

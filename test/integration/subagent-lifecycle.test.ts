@@ -201,9 +201,9 @@ for (const backend of backends) {
       const task = [
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Fork-${id}"`,
-        `  fork: true`,
+        `  agent: "test-fork"`,
         `  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'"`,
-        `Do not set the agent parameter. Just set name, fork, and task.`,
+        `The profile defines session-mode: fork. Do not pass removed runtime overrides.`,
         `After you receive the result, say FORK_COMPLETE.`,
       ].join("\n");
 
@@ -238,9 +238,9 @@ for (const backend of backends) {
       }
     });
 
-    // ── caller_ping ──
+    // ── ask_question ──
 
-    it("subagent caller_ping sends notification back to the parent", async () => {
+    it("subagent ask_question sends a question back to the parent", async () => {
       const id = uniqueId();
 
       const surface = createTrackedSurface(env, `ping-${id}`);
@@ -256,17 +256,18 @@ for (const backend of backends) {
 
       startPi(surface, env.dir, task);
 
-      // The test-ping agent calls caller_ping, which steers a "needs help" message
-      // back to the outer pi. Look for it on screen.
-      const screen = await waitForScreen(
-        surface,
-        /needs help|PING|caller_ping|ping/i,
-        PI_TIMEOUT,
+      // The test-ping profile calls ask_question, which notifies the outer pi
+      // and keeps the child parked until a reply arrives.
+      const questionPattern = new RegExp(
+        `Ping-${id}[\\s\\S]*asks a question[\\s\\S]*PING_TEST_${id}`,
+        "i",
       );
+      const screen = await waitForScreen(surface, questionPattern, PI_TIMEOUT, 300);
 
-      assert.ok(
-        /needs help|PING/i.test(screen),
-        `Screen should show ping notification. Got:\n${screen.slice(-800)}`,
+      assert.match(
+        screen,
+        questionPattern,
+        `Screen should show the subagent question notification. Got:\n${screen.slice(-800)}`,
       );
     });
 
@@ -300,7 +301,7 @@ for (const backend of backends) {
 
     // ── Subagent with custom system prompt ──
 
-    it("passes systemPrompt to subagent", async () => {
+    it("applies the profile-defined system prompt", async () => {
       const id = uniqueId();
       const markerFile = `/tmp/pi-integ-sysprompt-${id}.txt`;
       trackTempFile(env, markerFile);
@@ -311,9 +312,9 @@ for (const backend of backends) {
       const task = [
         `Call the subagent tool with these parameters:`,
         `  name: "SysP-${id}"`,
-        `  agent: "test-echo"`,
-        `  systemPrompt: "Always start your response with CUSTOM_PROMPT_ACTIVE."`,
+        `  agent: "test-system-prompt"`,
         `  task: "Write 'SYSPROMPT_${id}' to ${markerFile} using bash: echo 'SYSPROMPT_${id}' > '${markerFile}'"`,
+        `The agent profile defines its system prompt. Do not pass removed runtime overrides.`,
         `After the subagent completes, say SYSPROMPT_TEST_DONE.`,
       ].join("\n");
 
@@ -321,6 +322,8 @@ for (const backend of backends) {
 
       const content = await waitForFile(markerFile, PI_TIMEOUT, /SYSPROMPT/);
       assert.ok(content.includes(`SYSPROMPT_${id}`), `System prompt test marker should exist`);
+      const screen = await waitForScreen(surface, /CUSTOM_PROMPT_ACTIVE/, PI_TIMEOUT, 300);
+      assert.match(screen, /CUSTOM_PROMPT_ACTIVE/);
     });
   });
 }

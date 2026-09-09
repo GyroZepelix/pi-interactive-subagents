@@ -1,6 +1,6 @@
 ---
 name: scout
-description: Fast codebase recon — explores files, finds patterns, maps architecture
+description: Fast codebase recon - explores files, finds patterns, maps architecture
 tools: read, grep, find, ls
 model: openrouter/z-ai/glm-5.3
 thinking: low
@@ -27,8 +27,8 @@ Your FINAL assistant message is your entire deliverable — it must stand alone,
 
 ## Files Found
 List with exact line ranges:
-1. `path/to/file.ts` (lines 10-50) — Description
-2. `path/to/other.ts` (lines 100-150) — Description
+1. `path/to/file.ts` (lines 10-50) - Description
+2. `path/to/other.ts` (lines 100-150) - Description
 
 ## Key Code
 Critical types, interfaces, or functions with actual code snippets.

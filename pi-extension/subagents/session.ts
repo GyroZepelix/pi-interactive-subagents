@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export interface SessionEntry {
   type: string;
@@ -82,12 +82,13 @@ export function seedSubagentSessionFile(params: {
 
 /**
  * A snapshot of everything needed to reconstruct a subagent's sandbox when its
- * session is later resumed via `subagent_message({ sessionId })`.
+ * session is later resumed via `subagent_message({ name })`.
  *
  * Written next to the session file as `<sessionFile>.loadout.json` at spawn
  * time. Resume replays this exact snapshot so the reincarnated process gets the
- * same `--no-extensions` + `--tools` restriction, model, identity, spawn
- * whitelist, cwd, and config dir it originally ran with — instead of falling
+ * same `--no-extensions` + `--tools` restriction, exact backing extension
+ * paths, model, identity, spawn whitelist, cwd, and config dir it originally
+ * ran with instead of falling
  * back to pi's default (all global extensions + full toolset). Storing the
  * resolved loadout (rather than re-deriving from the agent `.md` by name) keeps
  * resume faithful even if the agent definition is later edited, moved, or
@@ -96,8 +97,10 @@ export function seedSubagentSessionFile(params: {
 export interface SubagentLoadout {
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
-  /** The `--tools` allowlist string, or null when the spawn was unrestricted. */
+  /** Explicit `--tools` allowlist. Null is legacy-only and rejected on resume. */
   toolAllowlist: string | null;
+  /** Exact extension files loaded to back the allowlisted custom tools. */
+  extensionPaths: string[] | null;
   /** Model id (without thinking suffix), or null to use the session default. */
   model: string | null;
   /** Thinking level appended to the model as `model:level`, or null. */
@@ -110,9 +113,9 @@ export interface SubagentLoadout {
   spawnable: string[] | null;
   /** Whether the agent auto-exits (informational; resume forces autonomous). */
   autoExit: boolean;
-  /** Working directory the subagent ran in, or null. */
+  /** Absolute working directory the subagent ran in. */
   cwd: string | null;
-  /** PI_CODING_AGENT_DIR the subagent resolved config/extensions from, or null. */
+  /** Absolute PI_CODING_AGENT_DIR used by the subagent. */
   agentDir: string | null;
 }
 
@@ -131,21 +134,104 @@ export function writeSubagentLoadout(sessionFile: string, loadout: SubagentLoado
   }
 }
 
-/** Read a subagent's loadout snapshot, or null if absent/unparseable. */
+const SPAWNING_TOOL_NAMES = ["subagent", "subagent_message", "subagents_list"] as const;
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+const LOADOUT_FIELDS = new Set([
+  "agent",
+  "toolAllowlist",
+  "extensionPaths",
+  "model",
+  "thinking",
+  "systemPromptMode",
+  "identity",
+  "spawnable",
+  "autoExit",
+  "cwd",
+  "agentDir",
+]);
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const loadout = value as Record<string, unknown>;
+  if (Object.keys(loadout).some((key) => !LOADOUT_FIELDS.has(key))) return false;
+  if (!isNullableString(loadout.agent)) return false;
+  if (
+    typeof loadout.agent === "string" &&
+    (!loadout.agent.trim() || /[\x00-\x1f\x7f,]/.test(loadout.agent))
+  ) return false;
+  if (typeof loadout.toolAllowlist !== "string" || !loadout.toolAllowlist.trim()) return false;
+  const allowlistedTools = loadout.toolAllowlist.split(",");
+  if (
+    allowlistedTools.some((tool) =>
+      !tool.trim() || tool !== tool.trim() || /[\x00-\x1f\x7f]/.test(tool)
+    ) ||
+    new Set(allowlistedTools).size !== allowlistedTools.length
+  ) return false;
+  if (
+    !isStringArray(loadout.extensionPaths) ||
+    loadout.extensionPaths.some((path) => !path || !isAbsolute(path))
+  ) return false;
+  if (!isNullableString(loadout.model)) return false;
+  if (typeof loadout.model === "string" && !loadout.model.trim()) return false;
+  if (!isNullableString(loadout.thinking)) return false;
+  if (typeof loadout.thinking === "string" && !THINKING_LEVELS.has(loadout.thinking)) return false;
+  if (
+    loadout.systemPromptMode !== null &&
+    loadout.systemPromptMode !== "append" &&
+    loadout.systemPromptMode !== "replace"
+  ) return false;
+  if (!isNullableString(loadout.identity)) return false;
+  if (typeof loadout.identity === "string" && !loadout.identity.trim()) return false;
+  if ((loadout.systemPromptMode === null) !== (loadout.identity === null)) return false;
+  if (loadout.spawnable !== null && !isStringArray(loadout.spawnable)) return false;
+  const spawnable = loadout.spawnable ?? [];
+  if (
+    spawnable.some((name) =>
+      !name.trim() ||
+      name !== name.trim() ||
+      /[\x00-\x1f\x7f,/\\]/.test(name) ||
+      name === "." ||
+      name === ".."
+    )
+  ) return false;
+  if (new Set(spawnable).size !== spawnable.length) return false;
+  const toolNames = new Set(allowlistedTools);
+  const hasAnySpawningTool = SPAWNING_TOOL_NAMES.some((name) => toolNames.has(name));
+  const hasEverySpawningTool = SPAWNING_TOOL_NAMES.every((name) => toolNames.has(name));
+  if (spawnable.length > 0 ? !hasEverySpawningTool : hasAnySpawningTool) return false;
+  if (typeof loadout.autoExit !== "boolean") return false;
+  if (typeof loadout.cwd !== "string" || !loadout.cwd || !isAbsolute(loadout.cwd)) return false;
+  if (
+    typeof loadout.agentDir !== "string" ||
+    !loadout.agentDir ||
+    !isAbsolute(loadout.agentDir)
+  ) return false;
+  return true;
+}
+
+/** Read and structurally validate a subagent loadout snapshot. */
 export function readSubagentLoadout(sessionFile: string): SubagentLoadout | null {
   try {
     const p = loadoutSidecarPath(sessionFile);
     if (!existsSync(p)) return null;
     const parsed = JSON.parse(readFileSync(p, "utf8"));
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed as SubagentLoadout;
+    return isSubagentLoadout(parsed) ? parsed : null;
   } catch {
     return null;
   }
 }
 
 // ── Name registry ────────────────────────────────────────────────────────────
-// Each spawner session (the top-level pi session, or a worker that spawns its
+// Each spawner session (the top-level Pi session, or any agent that spawns its
 // own children) gets a registry mapping a subagent's display name to the
 // session file it ran in. Names are unique per spawner session and persist on
 // disk, so `subagent_message({ name })` can steer a running subagent or resume
@@ -162,6 +248,25 @@ export interface NameRegistryEntry {
 
 export type NameRegistry = Record<string, NameRegistryEntry>;
 
+const NAME_REGISTRY_ENTRY_FIELDS = new Set(["sessionFile", "sessionId"]);
+
+function isPersistedRuntimeName(name: string): boolean {
+  return !!name && name === name.trim() && !/[\x00-\x1f\x7f]/.test(name);
+}
+
+function isNameRegistryEntry(value: unknown): value is NameRegistryEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  if (Object.keys(entry).some((key) => !NAME_REGISTRY_ENTRY_FIELDS.has(key))) return false;
+  return (
+    typeof entry.sessionFile === "string" &&
+    !!entry.sessionFile &&
+    isAbsolute(entry.sessionFile) &&
+    (entry.sessionId === null ||
+      (typeof entry.sessionId === "string" && !!entry.sessionId.trim()))
+  );
+}
+
 /** Path of the name registry for a given spawner session's artifact dir. */
 export function nameRegistryPath(artifactDir: string): string {
   return join(artifactDir, "subagent-registry.json");
@@ -174,7 +279,15 @@ export function readNameRegistry(artifactDir: string): NameRegistry {
     if (!existsSync(p)) return {};
     const parsed = JSON.parse(readFileSync(p, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed as NameRegistry;
+    const entries = Object.entries(parsed);
+    if (
+      entries.some(([name, entry]) =>
+        !isPersistedRuntimeName(name) || !isNameRegistryEntry(entry)
+      )
+    ) return {};
+    // Object.fromEntries creates own data properties even for names such as
+    // "__proto__", avoiding prototype setter semantics on registry updates.
+    return Object.fromEntries(entries) as NameRegistry;
   } catch {
     return {};
   }
@@ -192,8 +305,14 @@ export function registerName(
 ): void {
   try {
     mkdirSync(artifactDir, { recursive: true });
+    if (!isPersistedRuntimeName(name) || !isNameRegistryEntry(entry)) return;
     const registry = readNameRegistry(artifactDir);
-    registry[name] = entry;
+    Object.defineProperty(registry, name, {
+      value: entry,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
     const p = nameRegistryPath(artifactDir);
     const tmp = `${p}.tmp-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
     writeFileSync(tmp, JSON.stringify(registry, null, 2), "utf8");
@@ -209,8 +328,9 @@ export function resolveNameInRegistry(
   artifactDir: string,
   name: string,
 ): NameRegistryEntry | null {
-  const entry = readNameRegistry(artifactDir)[name];
-  return entry && typeof entry.sessionFile === "string" ? entry : null;
+  const registry = readNameRegistry(artifactDir);
+  if (!Object.prototype.hasOwnProperty.call(registry, name)) return null;
+  return registry[name] ?? null;
 }
 
 function readEntries(sessionFile: string): SessionEntry[] {
@@ -524,7 +644,7 @@ export function appendBranchSummary(
 }
 
 /**
- * Copy the session file to destDir for parallel worker isolation.
+ * Copy the session file to destDir for parallel process isolation.
  * Returns the path of the copy.
  */
 export function copySessionFile(sessionFile: string, destDir: string): string {

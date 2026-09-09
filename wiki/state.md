@@ -12,7 +12,7 @@ Last lint date: 2026-09-09
 - Working-tree snapshot: clean at capture; baseline outside `wiki/` was clean.
 - Output pages: `wiki/overview.md`, `wiki/map.md`, `wiki/architecture.md`, `wiki/development.md`, `wiki/conventions/index.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/conventions/typescript-modules.md`, `wiki/index.md`, `wiki/log.md`, `wiki/state.md`.
 - Allowed checks: none run; no lint, formatter-check, non-emitting type-check, or CI command is configured, and `node_modules/` was absent.
-- Unresolved gaps: package version metadata and stale integration interfaces need review; CI, release, lint, format, type-check, and earlier design rationale are unverified.
+- Unresolved gaps: CI, release, lint, format, type-check, and earlier design rationale are unverified. The working-tree profile-hardening implementation is not represented by a committed ingest checkpoint.
 
 ## Processed inputs
 
@@ -20,6 +20,8 @@ Last lint date: 2026-09-09
 | --- | --- | --- | --- | --- | --- |
 | `https://git.dgjalic.com/dgjalic/repo-wiki-template` | Protocol version 1 template installer | Forgejo repository | 2026-09-09 | `AGENTS.md`, `spec/`, `wiki/` | Installed lean repo wiki template. |
 | `e17580a389d2157629a594c706ccadb972c213ef` | Initial full codebase ingest | Clean Git working tree | 2026-09-09 | Core pages, focused conventions, navigation, and completion records | Complete; no eligible safe project check; metadata and integration drift need review. |
+| `spec/active/260909-1230-harden-agent-profiles-and-adapt-the-fork/plan.md` | Confirmed plan plus implementation working tree | Active work item and source paths listed in `wiki/log.md` | 2026-09-09 | Profile, architecture, development, runtime safety, map, overview, and navigation pages | Durable behavior updated; no commit checkpoint advanced. |
+| `spec/active/260909-1230-harden-agent-profiles-and-adapt-the-fork/verification.md` | Focused review findings and source corrections | Active verification evidence plus corrected source and tests | 2026-09-09 | `wiki/architecture.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/log.md`, `wiki/state.md` | Review corrections reflected; no commit checkpoint advanced. |
 
 ## Maintenance policy
 

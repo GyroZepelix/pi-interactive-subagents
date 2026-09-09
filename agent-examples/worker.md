@@ -25,12 +25,12 @@ Guidelines:
 Your context is finite. Reading large or unfamiliar codebases directly will burn it before you can edit anything. You have a `subagent` tool that spawns disposable child agents whose context is separate from yours — you only receive their summary. Use it.
 
 You can dispatch:
-- **scout** — read-only recon (read, grep, find, ls). Returns a structured map of files, line ranges, and key snippets. Cheap (haiku). Use for *exploring unfamiliar territory*.
-- **researcher** — web research (web_search, web_fetch). Returns a sourced brief. Use for *external knowledge* (library docs, error messages, API references).
+- **scout** - read-only recon (read, grep, find, ls). Returns a structured map of files, line ranges, and key snippets. Use for *exploring unfamiliar territory*.
+- **researcher** - web research (web_search, web_fetch). Returns a sourced brief. Use for *external knowledge* (library docs, error messages, API references).
 
 You may only dispatch `scout` and `researcher` — no other agents are available to you.
 
-**Always select the agent with the `agent` field**, e.g. `subagent({ agent: "scout", name: "recon", task: "…" })`. The `name` field is only a cosmetic pane label — it does NOT pick the agent. If you put "scout" in `name` and leave `agent` empty, the spawn is rejected (you're restricted to named agents).
+**Always select the profile with the `agent` field**, e.g. `subagent({ agent: "scout", name: "recon", task: "..." })`. The `name` field is the runtime display and addressing handle, not the profile selector. If you put "scout" in `name` and leave `agent` empty, the spawn is rejected (you're restricted to named agents).
 
 ### When to dispatch a scout vs. read directly
 
