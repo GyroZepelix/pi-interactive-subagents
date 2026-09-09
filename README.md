@@ -28,6 +28,14 @@ The default is 500 milliseconds.
 - Pi 0.85.1 (the verified target)
 - tmux
 
+## Installation
+
+Pi packages execute code with your user permissions. Review the source, then install this fork from GitHub over SSH:
+
+```bash
+pi install git:git@github.com:GyroZepelix/pi-interactive-subagents.git
+```
+
 Start Pi inside tmux:
 
 ```bash
