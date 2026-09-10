@@ -84,7 +84,33 @@ Expand verification to whole-plan acceptance and full relevant regression checks
 
 ## Attempt log
 
-No attempts recorded.
+### Attempt 1 - 2026-09-10T19:49:28+0200
+
+Starting HEAD: `8037ba8ad8822f65b7e92db4859c933d07a3b473`
+
+Changes:
+
+- Replaced stale profile `tools` and strict-launch documentation in `README.md` and `docs/agent-definitions.md` with the verified `builtin-tools`, configured package `extensions`, trust scope, ordering, arbitrary-code, activation, migration, Claude, and resume contracts.
+- Updated durable architecture, map, agent-profile, and TypeScript-module wiki guidance and recorded the maintenance in `wiki/log.md`.
+- Corrected two stale comments in `pi-extension/subagents/index.ts`; runtime behavior did not change.
+
+Checks:
+
+- Focused removed-interface, Markdown path/fence/ASCII, and scoped diff checks: PASS.
+- `npm test`: PASS, 198 tests.
+- Controlled isolated tmux surface suite: PASS, 7 tests.
+- `npm pack --dry-run --json`: PASS, 18 intended runtime and user-documentation files; `spec/`, `wiki/`, tests, and `AGENTS.md` excluded.
+- Spec validation, stale-wiki search, removed-interface search, changed-Markdown checks, and `git diff --check`: PASS.
+
+Failures and resolutions:
+
+- Initial Focused review blocked a premature wiki verification claim. The log now records only evidence available at that point; targeted retry 1 passed.
+- Initial expanded Standards and Spec reviews both found indexed wiki pages that still described the deleted child control and retired strict registration model. The narrow sections were synchronized with verified source, and both targeted retry 1 reviews passed.
+- The first final all-changed Markdown helper passed Git status prefixes as filenames and failed before inspecting content. The corrected helper used tracked and untracked path lists and passed all 11 changed Markdown files.
+
+Blockers: none.
+
+Exact next action: Record final completion evidence, consolidate `verification.md`, mark T03 and Current complete, then run archive preflight without archiving until the user explicitly approves.
 
 For each interrupted or failed attempt, append without rewriting earlier entries:
 
@@ -100,4 +126,56 @@ Exact next action: <single resumable action>
 
 ## Completion and handoff
 
-On success, record the implementation and segment starting checkpoints, changed paths, focused/segment/whole-plan acceptance evidence, every check result, package inspection, and separate Focused plus expanded Standards and Spec reviewer outputs and resolutions. Check off 03.01 and plan task T03, then set `Current: complete` only after every final gate passes. Stop for a user-controlled Git checkpoint and suggest Dream; do not commit or invoke Dream automatically.
+### Completion - 2026-09-10T19:49:28+0200
+
+Assurance: high - final documentation and review cover trusted extension execution, default-deny capabilities, trust-scoped package resolution, persisted resume state, packaging, and the complete implementation boundary.
+
+Implementation starting checkpoint: `486f582398eb6a79666e3ec05e868d33546c49eb`
+
+T03 segment starting checkpoint: `8037ba8ad8822f65b7e92db4859c933d07a3b473`
+
+Current-slice changed paths:
+
+- `README.md`
+- `docs/agent-definitions.md`
+- `pi-extension/subagents/index.ts` (comments only)
+- `wiki/architecture.md`
+- `wiki/map.md`
+- `wiki/conventions/agent-profiles.md`
+- `wiki/conventions/typescript-modules.md`
+- `wiki/log.md`
+- `spec/active/260909-1952-profile-extension-loading/implementation/03-01-documentation-and-final-verification.md`
+- `spec/active/260909-1952-profile-extension-loading/implementation/index.md`
+- `spec/active/260909-1952-profile-extension-loading/plan.md`
+- `spec/active/260909-1952-profile-extension-loading/verification.md`
+
+Acceptance evidence:
+
+- User documentation now describes the complete strict profile syntax, default-deny built-ins, exact configured package and selector matching, enabled-resource and canonical ordering, trusted code boundary, framework controls, diagnostics, migration, Claude rejection, and new/legacy resume behavior.
+- Indexed durable wiki pages now agree with verified source on package extension resolution, launch ordering, module ownership, activation, and versioned resume. `wiki/state.md` did not require an ingest, lint, or dedupe checkpoint update.
+- The package dry run contains the intended runtime files, README, license, example configuration, and agent-definition reference while excluding repository-only specification, wiki, test, and instruction files.
+- Checkpoint `486f582398eb6a79666e3ec05e868d33546c49eb` is a strict ancestor of HEAD. Its complete committed range plus the complete Current diff covers the implementation and final reviews.
+- No global profiles, user/global settings, dependencies, third-party packages, or blocked-profile implementation files changed in Current.
+
+Checks:
+
+- `npm test`: PASS, 198 tests.
+- Controlled isolated tmux `node --test test/integration/tmux-surface.test.ts`: PASS, 7 tests.
+- `npm pack --dry-run --json`: PASS, 18 intended files and no excluded repository-only paths.
+- Removed-interface and stale-indexed-wiki searches: PASS, no matches.
+- Changed-Markdown relative-path, fence-balance, and ASCII checks: PASS, all 11 changed Markdown files.
+- `uv run spec/scripts/manage-spec-item.py --root . validate --item 260909-1952-profile-extension-loading`: PASS.
+- `git diff --check`: PASS.
+
+Reviews:
+
+- Focused: initial BLOCK on premature wiki provenance; corrected. Targeted retry 1 PASS with no findings.
+- Expanded Standards: initial BLOCK on stale indexed wiki guidance; corrected. Targeted retry 1 PASS with no findings.
+- Expanded Spec: initial BLOCK on the same R13 durable-memory gap; corrected. Targeted retry 1 PASS with no findings.
+
+Residual uncertainty:
+
+- Configured-model lifecycle testing was not run because it remains explicitly approval-gated. Real Pi 0.85.1 non-model lifecycle fixtures and the controlled tmux suite cover the safe available lifecycle surfaces.
+- The tool widget can omit tools registered by later profile `session_start` handlers; this remains a documented display-only observation and does not affect active capabilities.
+
+Handoff: T03 and the complete sliced implementation are verified. Archive preflight is blocked because `manage-spec-item.py` has no `archive` command; `archive --help` returned an invalid-choice error listing only `create`, `resolve`, `transition`, `validate`, and `index`. No outcome was created and no lifecycle transition ran. Upgrade or restore archive support, then rerun Implement to execute `archive --check` and request explicit terminal approval. Do not commit, archive, push, or invoke Dream automatically.

@@ -2,7 +2,7 @@
 
 Plan: `../plan.md`
 Mode: sliced
-Current: `03.01`
+Current: `complete`
 Expected implementation sessions: 5
 Implementation starting checkpoint: `486f582398eb6a79666e3ec05e868d33546c49eb`
 
@@ -78,10 +78,11 @@ Segment starting checkpoint: unrecorded
 Segment acceptance: User documentation and durable wiki memory match verified source, package output remains correct, all safe regressions and structural checks pass, and no global profiles or third-party settings change.
 Final gate: Expand the T03 segment gate to whole-plan acceptance, all relevant safe regression checks, package inspection, Markdown and removed-interface checks, and one independent Standards and one independent Spec review covering both final-segment and whole-plan scope.
 
-- [ ] 03.01: Update documentation and run final verification (packet: `./03-01-documentation-and-final-verification.md`)
+- [x] 03.01: Update documentation and run final verification (packet: `./03-01-documentation-and-final-verification.md`)
 
 ## Discoveries and blockers
 
 - `01.02` attempt 1's package-identity blocker was resolved by using Pi-equivalent identity comparison for project `autoload: false` delta bases. Focused, Standards, and Spec reviews passed; T01 is complete.
 - `02.01` attempt 1 found that Pi's extension-ordered lifecycle dispatch prevents a first-loaded handler from activating same-event profile overrides. The user approved D16 and the control rename on 2026-09-10. Attempt 2 implemented the split and resolved spawning-path, parent-import, lifecycle-test, and inherited-environment findings. Focused review passed after 90 focused and 195 full tests.
-- `02.02` added the strict versioned/legacy snapshot union and exact snapshot-driven resume. Focused review plus targeted re-review, integrated checks, controlled tmux validation, and separate Standards and Spec reviews passed; T02 is complete and Current is `03.01`.
+- `02.02` added the strict versioned/legacy snapshot union and exact snapshot-driven resume. Focused review plus targeted re-review, integrated checks, controlled tmux validation, and separate Standards and Spec reviews passed.
+- `03.01` synchronized user and durable documentation, corrected stale indexed wiki guidance, and passed unit, isolated tmux, package, structural, Focused, expanded Standards, and expanded Spec gates. T03 and the whole plan are complete.

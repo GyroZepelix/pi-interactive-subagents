@@ -5,12 +5,14 @@
 | Path | Responsibility |
 | --- | --- |
 | `pi-extension/subagents/index.ts` | Main Pi extension entry point, tool schemas, canonical profile selection, launch/resume orchestration, watchers, widgets, and message renderers. |
-| `pi-extension/subagents/agents.ts` | YAML profile parsing, validation, diagnostics, trusted nearest-project discovery, global/project precedence, and canonical definitions. |
+| `pi-extension/subagents/agents.ts` | YAML profile parsing, validation, diagnostics, trusted nearest-project discovery, package extension resolution, global/project precedence, and canonical definitions. |
 | `pi-extension/subagents/tmux.ts` | tmux availability, pane lifecycle, command delivery, screen capture, layout balancing, and completion polling. |
 | `pi-extension/subagents/session.ts` | Session JSONL helpers, session seeding, persistent name registry, sandbox loadout sidecars, result extraction, and usage summaries. |
 | `pi-extension/subagents/activity.ts` | Versioned activity snapshot schema, validation, and atomic recorder. |
 | `pi-extension/subagents/status.ts` | Strict status config and the starting/active/waiting/stalled/running state machine. |
-| `pi-extension/subagents/subagent-done.ts` | Child-side lifecycle hooks, tools widget, auto-exit decisions, activity events, and `ask_question`. |
+| `pi-extension/subagents/subagent-runtime-control.ts` | Child-side tools widget, auto-exit decisions, activity events, protected `ask_question`, and parent-question signaling. |
+| `pi-extension/subagents/subagent-capability-activation.ts` | Child-only trailing lifecycle control that activates selected Pi built-ins and declared extension tools. |
+| `pi-extension/subagents/subagent-protocol.ts` | Shared private launch protocol constants used without importing child extension registration into the parent. |
 | `pi-extension/subagents/tools/safe-bash.ts` | Optional Bash wrapper that rejects a fixed set of dangerous command patterns. |
 | `pi-extension/subagents/plugin/` | Claude Code Stop hook used by `cli: claude` profiles to signal completion and expose the transcript path. |
 | `test/test.ts` | Main source-coupled unit and regression suite. |
@@ -30,7 +32,7 @@ The main extension registers these parent-session interfaces (`pi-extension/suba
 - `/subagent <agent> <task>`: converts a command into a spawn request.
 - Renderers for subagent results, status transitions, and questions.
 
-The child extension registers `ask_question` and `Ctrl+Alt+O` for the tools widget (`pi-extension/subagents/subagent-done.ts`).
+The runtime control registers protected `ask_question` and `Ctrl+Alt+O` for the tools widget. The trailing capability control registers no tools and applies the resolved profile capability set (`pi-extension/subagents/subagent-runtime-control.ts`, `pi-extension/subagents/subagent-capability-activation.ts`).
 
 ## Common change locations
 
@@ -38,5 +40,5 @@ The child extension registers `ask_question` and `Ctrl+Alt+O` for the tools widg
 - Tool contract, launch, resume, or TUI behavior: start in `pi-extension/subagents/index.ts`, then update focused helpers and `test/test.ts`.
 - Pane behavior or shell delivery: `pi-extension/subagents/tmux.ts` and `test/integration/tmux-surface.test.ts`.
 - Persistence or session compatibility: `pi-extension/subagents/session.ts` and its unit-test sections in `test/test.ts`.
-- Activity/status behavior: `activity.ts`, `status.ts`, `subagent-done.ts`, and corresponding unit tests.
+- Activity/status behavior: `activity.ts`, `status.ts`, `subagent-runtime-control.ts`, and corresponding unit tests.
 - Status configuration: `config.json.example` and `pi-extension/subagents/status.ts`.

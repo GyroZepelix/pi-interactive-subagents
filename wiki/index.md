@@ -30,6 +30,7 @@ Durable current-state codebase knowledge. Read this file first when answering co
 - [Profile capability-resolution session](./dreams/2026-09-10-1503-completed-session.md): Completed and independently verified T01 profile schema and asynchronous package resolution; Current advanced to `02.01` with T02 and T03 pending.
 - [Child capability-launch session](./dreams/2026-09-10-1752-completed-session.md): Completed and independently verified slice 02.01 child isolation, protected extension ordering, dynamic activation, and nesting inheritance; Current advanced to `02.02`.
 - [Versioned resume session](./dreams/2026-09-10-1843-completed-session.md): Completed slice 02.02 and the high-assurance T02 gate with strict versioned snapshots, exact new-mode resume, legacy compatibility, and Current advanced to `03.01`.
+- [Final profile-extension verification session](./dreams/2026-09-10-1958-completed-session.md): Completed Current 03.01 and whole-plan verification, synchronized user and indexed wiki guidance, and stopped with archive preflight blocked by missing helper support.
 
 ## Stale or needs review
 

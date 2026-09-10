@@ -41,5 +41,6 @@ No lint, formatter-check, non-emitting type-check, or CI command is defined.
 
 ## Current limitations
 
+- `spec/scripts/manage-spec-item.py` exposes `create`, `resolve`, `transition`, `validate`, and `index`, but no `archive` command. A workflow that requires deterministic archive preflight must stop for a helper upgrade rather than manually moving an item or emulating the lifecycle transition (`spec/scripts/manage-spec-item.py`, `spec/active/260909-1952-profile-extension-loading/verification.md`).
 - There is no tracked CI, release automation, formatter, linter, or non-emitting type-check configuration.
 - Stop/interrupt controls, acknowledged transport, shell-readiness redesign, broader configuration, orchestration modularization, and unrelated dead-code cleanup remain deferred.

@@ -56,7 +56,10 @@ Project definitions override global definitions with the same effective name. Pr
 name: inspector
 description: Examines a codebase without changing it
 model: openrouter/example-model
-tools: [read, grep, find, ls]
+builtin-tools: [read, grep, find, ls]
+extensions:
+  - package: npm:@example/pi-web-tools
+    paths: [index.ts]
 session-mode: lineage-only
 system-prompt: append
 auto-exit: true
@@ -105,8 +108,9 @@ Names are unique within one parent session and remain registered after a child f
 
 - A running Pi or Claude child receives the message in its live pane.
 - A finished Pi child resumes asynchronously and later reports another result.
-- Pi resume replays the launch-time sandbox snapshot.
-- Pi resume is refused when the session file or sandbox snapshot is missing.
+- Pi resume replays a strictly validated launch-time capability snapshot. It does not reread the profile or package settings.
+- New snapshots retain selected built-ins and ordered canonical profile extension paths. Resume uses the current contents at those paths and is refused before pane creation if required state or files are missing, malformed, non-canonical, duplicated, or reserved.
+- Existing valid strict `toolAllowlist` snapshots remain resumable through their legacy `--tools` path and are not rewritten automatically.
 - A finished `cli: claude` child cannot be resumed through `subagent_message`.
 
 ### Ask the parent
@@ -115,13 +119,19 @@ Every Pi child receives `ask_question`, even when its profile has no ordinary to
 
 ## Security model
 
-Profiles are parsed as YAML and validated before use. Unknown keys, conflicting aliases, invalid enum values, pseudo-booleans, malformed list values, and malformed YAML exclude the definition with a file-and-field diagnostic.
+Profiles are parsed as YAML and validated before use. Unknown keys, conflicting aliases, invalid enum values, pseudo-booleans, malformed list values, and malformed YAML exclude the definition with a file-and-field diagnostic. Legacy profile `tools` is rejected with guidance to split Pi built-ins into `builtin-tools` and custom capabilities into package `extensions`.
 
-Every named Pi child launches with `--no-extensions` and an explicit `--tools` value. Missing or empty `tools` grants no ordinary tools. A requested custom tool must have a resolvable backing extension before any pane is created.
+Every new named Pi child launches with global extension discovery and initial built-ins disabled. Missing or empty `builtin-tools` grants no Pi built-ins. The only accepted names are `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`; `ask_question` remains available through the package's protected runtime control.
 
-Nested spawning is granted only by a non-empty `subagent_agents` profile field. `PI_SUBAGENT_ALLOWED` pins the child to those effective agent names. Listing spawning tools directly under `tools` is invalid.
+`extensions` is an optional YAML array of package mappings. Each `package` must exactly match a source configured in Pi settings. Omit `paths` to select every enabled extension resource from that package in Pi's resolved order, or provide a non-empty array of exact package-relative resource paths. Absolute paths, `.` or `..` segments, duplicate packages or selectors, disabled resources, root escapes, missing files, and empty selections invalidate the profile. Package order and explicit selector order are preserved; canonical duplicate files keep their first occurrence.
 
-Project-controlled prompts are read only when `ctx.isProjectTrusted()` is true.
+Package lookup is read-only and never installs or updates packages, accesses the network, or writes settings. Global profiles use global package settings only. Profiles from the nearest trusted project prefer matching project package sources and may fall back to global sources. Untrusted project profiles and package settings are ignored. Resolution failures exclude the profile from listing and spawning before pane creation.
+
+A declared extension is a grant to execute the complete trusted extension with the user's permissions. It is not a per-tool sandbox. The extension may register tools, hooks, commands, or providers and may change active tools dynamically. It may override built-in names; when custom tool names collide, the first declared extension wins.
+
+Child extension order is protected runtime control first, optional spawning control second, selected profile extensions in resolved order, and tool-free capability activation last. This keeps framework tool names protected while activating selected built-ins and extension tools before model requests. Nested spawning is granted only by a non-empty `subagent_agents` field, and `PI_SUBAGENT_ALLOWED` pins the child to those effective names. Listing spawning controls under `builtin-tools` is invalid.
+
+Project-controlled prompts are read only when `ctx.isProjectTrusted()` is true. `builtin-tools` and `extensions` are Pi-only and make a `cli: claude` profile invalid, even when explicitly empty.
 
 ## Runtime names
 

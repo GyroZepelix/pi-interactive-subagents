@@ -67,3 +67,19 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/dreams/2026-09-10-1843-completed-session.md`, `wiki/conventions/runtime-safety.md`, `wiki/observations.md`, `wiki/index.md`, and `wiki/log.md`.
 - Verification: claims checked against source and spec evidence; focused, integrated, full unit, controlled tmux, Standards, and Spec gates had passed; changed wiki files were re-read, links and tier separation checked, memory safety scans run, and `git diff --check` passed.
 - Notes: Current is 03.01 for documentation and final whole-plan verification; configured-model lifecycle testing remains approval-gated; no `MEMORY.md` pointer was needed because the existing runtime-safety route covers the durable update.
+
+## [2026-09-10] update | finalized profile extension contract
+
+- Trigger: final documentation slice for `260909-1952-profile-extension-loading` synchronized durable profile guidance with the verified capability-resolution and resume implementation.
+- Inputs: implementation range `486f582398eb6a79666e3ec05e868d33546c49eb..8037ba8ad8822f65b7e92db4859c933d07a3b473`, Current 03.01, `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`, and the completed T01/T02 evidence.
+- Wiki pages changed: `wiki/architecture.md`, `wiki/map.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/typescript-modules.md`, and `wiki/log.md`.
+- Verification: claims were compared with source at HEAD; 198 unit tests, 7 isolated tmux tests, package inspection, removed-interface and stale-wiki searches, Markdown checks, spec validation, diff validation, and final expanded Standards and Spec reviews passed.
+- Notes: `wiki/conventions/runtime-safety.md` already describes verified launch, activation, and resume invariants. `wiki/state.md` was unchanged because no ingest, lint, or dedupe checkpoint advanced. Configured-model lifecycle testing remains approval-gated.
+
+## [2026-09-10] dream | final profile-extension verification
+
+- Trigger: `/dream` run after completing Current 03.01 and the whole-plan profile-extension-loading verification gate.
+- Inputs: current conversation, `spec/active/260909-1952-profile-extension-loading/verification.md`, its 03.01 packet, final documentation and wiki diffs, review verdicts, and the failed archive capability check.
+- Wiki pages changed: `wiki/dreams/2026-09-10-1958-completed-session.md`, `wiki/development.md`, `wiki/index.md`, and `wiki/log.md`.
+- Verification: re-read changed wiki files, checked relative links and tier separation, ran memory safety scans, confirmed wiki-only Dream write scope, and ran `git diff --check`.
+- Notes: implementation and whole-plan verification are complete, but the item remains active because the repository helper lacks `archive`; configured-model lifecycle testing remains approval-gated; no `MEMORY.md` pointer was needed because `wiki/development.md` is already routed from the index.

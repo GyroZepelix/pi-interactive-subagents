@@ -22,7 +22,10 @@ Every file must begin with YAML frontmatter delimited by opening and closing `--
 name: code-review
 description: Reviews a change without editing it
 model: openrouter/example-model
-tools: [read, grep, find, ls]
+builtin-tools: [read, grep, find, ls]
+extensions:
+  - package: npm:@example/pi-review-tools
+    paths: [index.ts]
 skills: [review]
 thinking: medium
 session-mode: lineage-only
@@ -42,7 +45,8 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `name` | String without commas, path separators, or control characters, and not `.` or `..` | Trimmed. When omitted, the trimmed filename without `.md` is used. The declared name may differ from the filename. |
 | `description` | Non-empty string | Optional text shown by `subagents_list`. |
 | `model` | Non-empty string | Optional child model. When omitted, the child Pi process uses its configured default. |
-| `tools` | Comma-delimited string or YAML string array | Empty list. Pi children still receive `ask_question`. See [Tool isolation](#tool-isolation). |
+| `builtin-tools` | Comma-delimited string or YAML string array containing only `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, or `ls` | Empty list, which grants no Pi built-ins. Pi children still receive `ask_question`. See [Tool isolation](#tool-isolation). |
+| `extensions` | YAML array of mappings containing exactly `package` and optional `paths` | Empty list. Selects installed, enabled extension resources from exact configured Pi package sources. See [Package extension selection](#package-extension-selection). |
 | `skill` | Comma-delimited string or YAML string array | Empty list of skill prompts. Alias of `skills`. |
 | `skills` | Comma-delimited string or YAML string array | Empty list. Do not use together with `skill`. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | Optional. Applied with a profile model. |
@@ -62,7 +66,7 @@ Only actual YAML booleans are accepted. For example, `auto-exit: true` is valid 
 List fields accept either form:
 
 ```yaml
-tools: read, bash, web_search
+builtin-tools: read, bash
 skills: [review, test]
 subagent_agents:
   - inspector
@@ -70,6 +74,27 @@ subagent_agents:
 ```
 
 Every array member must be a string and must not contain commas. Each `subagent_agents` entry must also satisfy the effective `name` restrictions. Empty strings are removed and duplicate entries are collapsed.
+
+## Package extension selection
+
+`extensions` is structured separately because loading an extension grants executable code, not an individual tool name:
+
+```yaml
+extensions:
+  - package: npm:@example/pi-web-tools
+  - package: git:git@github.com:example/pi-search.git
+    paths:
+      - extensions/web-search.ts
+      - extensions/codex-search.ts
+```
+
+Each entry must contain exactly one non-empty `package` string and may contain one non-empty `paths` array of non-empty strings. The `package` value is matched exactly against a source in Pi's configured `packages` list, including protocol, version, or ref text. Duplicate package strings and duplicate path selectors are invalid.
+
+When `paths` is omitted, the profile selects all enabled extension resources exposed by that package in Pi's resolved resource order. When present, each selector must be an exact package-relative enabled extension resource. Selectors cannot be absolute or drive-qualified and cannot contain `.` or `..` path segments. Globs, standalone filesystem paths, disabled resources, missing files, and paths that escape the canonical package root are not accepted.
+
+Profile package order and explicit selector order are preserved. If different selections resolve to the same canonical file, only the first occurrence is loaded.
+
+Resolution is read-only. It does not install or update packages, access the network, or write settings. A global profile can select only global package settings. A profile from the nearest trusted project first uses an exact source from that project's settings and may fall back to an exact global source. Untrusted project profiles and package settings are ignored. Invalid settings, an unconfigured or uninstalled package, a resolution error, or a selection with no enabled extension files excludes the profile before pane creation. `subagents_list` reports the profile file and relevant extension field or selector in its diagnostics.
 
 ## Body routing
 
@@ -86,11 +111,15 @@ Every array member must be a string and must not contain commas. Each `subagent_
 
 ## Tool isolation
 
-Every named Pi profile launches with `--no-extensions` and an explicit `--tools` allowlist. Missing or empty `tools` therefore means no ordinary tools, not Pi's default tool set.
+Every new named Pi profile launches with `--no-extensions --no-builtin-tools` and no strict `--tools` argument. Missing or empty `builtin-tools` therefore means no Pi built-ins, not Pi's default set. The accepted built-in vocabulary is `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`.
 
-The extension always adds `ask_question`, which is registered by the child-control extension. A non-empty `subagent_agents` also adds `subagent`, `subagent_message`, and `subagents_list` and loads their backing extension. Listing those spawning tools directly in `tools` is invalid; `subagent_agents` is the only nested-spawn grant.
+The package loads its protected runtime control first, its spawning control second only when nesting is granted, selected profile extensions in their resolved order, and a tool-free capability activation control last. Before the first model request, activation enables the selected built-ins plus tools registered by the declared extensions. Later extension tools are activated at subsequent pre-model lifecycle checkpoints. Profile extensions may override built-in tool names, while first-loaded custom-tool registrations win duplicate custom names. The protected framework controls retain precedence over ordinary profile extensions.
 
-Pi built-ins include `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`. The retired tool-name compatibility mappings and process-global extension registration hook are no longer supported.
+Every Pi child still receives `ask_question`. A non-empty `subagent_agents` grants `subagent`, `subagent_message`, and `subagents_list` and restricts them to the declared effective profile names. Listing those spawning controls under `builtin-tools` is invalid; `subagent_agents` is the only nested-spawn grant.
+
+A declared extension runs as trusted arbitrary code with the user's permissions. Selecting it grants its complete behavior, including startup and dynamic tools, hooks, commands, providers, and active-tool changes. This mechanism does not sandbox an extension or filter its individual tools. Review extension packages before granting them.
+
+The legacy profile field `tools` is invalid. Migrate Pi built-in names to `builtin-tools`, move custom capabilities to configured package `extensions`, and use `subagent_agents` only for nested spawning. The retired hardcoded custom-tool mappings and process-global extension registration hook are not supported.
 
 ## Nested spawning
 
@@ -99,7 +128,7 @@ Only a non-empty `subagent_agents` field grants the spawning tools. The parent l
 ```markdown
 ---
 name: coordinator
-tools: [read, edit]
+builtin-tools: [read, edit]
 subagent_agents: [inspector, implementer]
 auto-exit: true
 ---
@@ -111,11 +140,15 @@ Coordinate the task and delegate only when useful.
 
 `name` in a `subagent` tool call is a runtime display and addressing name, separate from the profile's effective name. If omitted, the extension uses the profile name and adds `-2`, `-3`, and so on when needed. An explicit name is never auto-suffixed: it is rejected when already running, reserved by an in-flight launch, or registered in the current parent session.
 
-Each Pi launch snapshots its resolved model, thinking level, system prompt, tool allowlist, exact extension paths, spawn targets, cwd, and agent directory beside the child session. `subagent_message` structurally validates and preflights that snapshot before creating a pane, then replays it when resuming a finished Pi child. A Pi session with an invalid snapshot or a missing snapshotted extension is refused rather than resumed with broader defaults.
+Each new Pi launch stores a strict version 1 `extension-grants` snapshot beside the child session. It contains selected built-ins, ordered canonical profile extension paths, explicit spawning state and targets, model, thinking level, system prompt state, cwd, and agent directory. `subagent_message` structurally validates this exact state and preflights profile and framework extension files before creating a resume pane.
+
+Resume does not reread the profile or package settings. It reconstructs the protected framework controls, preserves profile extension order, and uses the current installed contents at valid stored paths. Missing, malformed, relative, non-canonical, duplicate-canonical, reserved-framework, or nesting-inconsistent state fails closed rather than falling back to broader defaults.
+
+Existing valid strict snapshots remain a separate legacy shape with `toolAllowlist`. They continue to resume with `--no-extensions --tools` and their stored extension paths, and reading them does not rewrite them into the new format.
 
 ## Claude CLI limitations
 
-`cli: claude` uses the existing Claude Code launch path rather than a Pi child. It applies `model`, `cwd`, the Markdown body as an appended system prompt, and lifecycle tracking. Pi-specific `tools`, `skills`, `thinking`, `session-mode`, `system-prompt` mode selection, nested-spawn allowlists, and resume snapshots do not configure Claude Code. Running Claude children can receive live messages, but finished Claude children cannot be resumed through `subagent_message`. Use `cli: pi` when those isolation and resume guarantees are required.
+`cli: claude` uses the existing Claude Code launch path rather than a Pi child. It applies `model`, `cwd`, the Markdown body as an appended system prompt, and lifecycle tracking. Pi-specific `skills`, `thinking`, `session-mode`, `system-prompt` mode selection, nested-spawn allowlists, and resume snapshots do not configure Claude Code. Declaring `builtin-tools` or `extensions` on a `cli: claude` profile is invalid, even when the value is explicitly empty, because those capability fields cannot be enforced for Claude Code. Running Claude children can receive live messages, but finished Claude children cannot be resumed through `subagent_message`. Use `cli: pi` when those isolation and resume guarantees are required.
 
 ## Troubleshooting
 

@@ -127,7 +127,7 @@ Diagnostics identify the profile file and relevant field or selector and explain
   - Acceptance: New launches and resumes replay the same runtime-control-first, activation-control-last extension grant and built-in subset; extension behavior follows the confirmed collision semantics; missing paths fail before pane creation; valid legacy strict snapshots still resume; removed interfaces have no remaining runtime or test references.
   - Verification: `node --test --test-name-pattern='session.ts|subagent discovery|subagent runtime control|capability activation|tool registration' test/test.ts`, `npm test`, and the controlled non-model tmux surface suite where available
 
-- [ ] T03: Document the final contract and prove the complete change
+- [x] T03: Document the final contract and prove the complete change
   - Depends on: T02
   - Scope: Update user documentation and durable wiki conventions, verify migration guidance and trusted-code warnings, inspect package contents, run all safe checks, and complete whole-plan review.
   - Expected areas: `README.md`, `docs/agent-definitions.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/log.md`, `wiki/state.md`, tests or source only for final corrections
@@ -189,9 +189,9 @@ Diagnostics identify the profile file and relevant field or selector and explain
 ## Progress
 
 - [x] Planning complete and confirmed.
-- [x] Implementation in progress through T02.
-- [x] T01 and T02 segment verification passed.
-- [ ] Final whole-plan verification not run.
+- [x] Implementation complete through T03.
+- [x] T01, T02, and T03 segment verification passed.
+- [x] Final whole-plan verification passed.
 
 ## Execution handoff
 

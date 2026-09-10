@@ -20,13 +20,14 @@ An omitted `name` falls back to the filename without `.md`. Explicit names may d
 
 Require opening and closing `---` delimiters, a mapping-valued YAML frontmatter root, and a non-empty Markdown body. Use Pi's exported YAML `parseFrontmatter`, not line-oriented regular expressions. Unknown keys, malformed YAML, invalid field types, invalid enums, non-string list members, pseudo-booleans, and simultaneous `skill` plus `skills` exclude the whole profile with a file-and-field diagnostic.
 
-Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`, `skill` or `skills`, and `subagent_agents`; YAML array entries may not contain commas, and nested target entries follow effective-name validation. `extensions` is a YAML array of exact configured package sources with optional exact package-relative `paths`; selectors must stay within enabled package resources. Legacy `tools` is rejected rather than reinterpreted. `docs/agent-definitions.md` is the complete user-facing field and default reference.
+Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`, `skill` or `skills`, and `subagent_agents`; YAML array entries may not contain commas, and nested target entries follow effective-name validation. `extensions` is a YAML array of exact configured package sources with optional exact package-relative `paths`; selectors must stay within enabled package resources. Reject duplicate package strings and selectors, absolute or drive-qualified selectors, `.` or `..` path segments, and explicitly empty `paths`. Legacy `tools` is rejected rather than reinterpreted. Declaring `builtin-tools` or `extensions` on `cli: claude`, even with an empty value, invalidates the profile. `docs/agent-definitions.md` is the complete user-facing field and default reference.
 
 ## Built-ins, extensions, and nesting
 
 - Missing or empty `builtin-tools` grants no Pi built-ins. Only the validated built-in vocabulary can appear there.
 - Declaring `extensions` grants each selected extension's complete executable behavior and all tools it registers at startup or later. Extensions are trusted code, not per-tool grants.
-- Extension packages resolve without installation against the profile's permitted settings scope. Missing, disabled, escaping, nonexistent, or empty selections exclude the profile before pane creation.
+- Extension packages resolve read-only without installation, network access, or settings writes. Global profiles use global package settings only; trusted project profiles prefer the nearest project's exact source and may fall back to global settings. Missing, disabled, escaping, nonexistent, or empty selections exclude the profile before pane creation.
+- Omitting `paths` selects all enabled extension resources in Pi's resolved order. Explicit selectors preserve their order, package declarations preserve package order, and canonical duplicate files keep their first occurrence.
 - Every named Pi child still receives `ask_question`.
 - A non-empty `subagent_agents` grants spawning tools and pins nested targets. Spawning tool names under `builtin-tools` invalidate the profile.
 

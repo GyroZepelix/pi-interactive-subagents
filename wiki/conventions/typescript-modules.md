@@ -9,7 +9,7 @@
 
 ## Extension pattern
 
-Pi extension modules export a default registration function that receives `ExtensionAPI`. Runtime schemas use TypeBox, while renderers use Pi TUI components (`pi-extension/subagents/index.ts`, `pi-extension/subagents/subagent-done.ts`, `pi-extension/subagents/tools/safe-bash.ts`).
+Pi extension modules export a default registration function that receives `ExtensionAPI`. Runtime schemas use TypeBox, while renderers use Pi TUI components. Keep shared parent/child protocol data in registration-free modules so importing a constant does not activate child behavior (`pi-extension/subagents/index.ts`, `pi-extension/subagents/subagent-runtime-control.ts`, `pi-extension/subagents/subagent-capability-activation.ts`, `pi-extension/subagents/subagent-protocol.ts`, `pi-extension/subagents/tools/safe-bash.ts`).
 
 ## Test seams
 

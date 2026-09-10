@@ -1837,10 +1837,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     runningSubagents.clear();
   });
 
-  // The spawning tools are always registered here. Whether a child process can
-  // actually see/use them is governed by the parent's `--tools` allowlist and
-  // by which extensions are loaded into the child (default-deny --no-extensions
-  // + explicit -e). See launchSubagent().
+  // The spawning tools are always registered here. A new child process can
+  // see them only when subagent_agents grants the spawning extension and pins
+  // PI_SUBAGENT_ALLOWED. Legacy strict resumes retain their stored --tools
+  // allowlist. See launchSubagent().
 
   // ── subagent tool ──
   pi.registerTool({
@@ -2730,4 +2730,3 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   });
 
 }
-// test
