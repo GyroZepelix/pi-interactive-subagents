@@ -31,6 +31,10 @@ Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`,
 - Every named Pi child still receives `ask_question`.
 - A non-empty `subagent_agents` grants spawning tools and pins nested targets. Spawning tool names under `builtin-tools` invalidate the profile.
 
+## Model provider selection
+
+- Model identifiers and effort encoding are provider-specific. After replacing a provider extension, rediscover the live registry with `pi --list-models`; do not carry old suffixes forward by analogy. When a provider collapses effort variants, use its canonical model ID plus the profile `thinking` field (`spec/archive/260909-1928-create-global-scout-researcher-and-worker-profiles/verification.md`).
+
 ## Session and prompt behavior
 
 `session-mode` defaults to `standalone`; `lineage-only` and `fork` are profile-defined rather than public tool arguments. `system-prompt: append` or `replace` routes the body through the corresponding Pi flag; without the field, the body is part of the task wrapper.

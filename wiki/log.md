@@ -83,3 +83,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/dreams/2026-09-10-1958-completed-session.md`, `wiki/development.md`, `wiki/index.md`, and `wiki/log.md`.
 - Verification: re-read changed wiki files, checked relative links and tier separation, ran memory safety scans, confirmed wiki-only Dream write scope, and ran `git diff --check`.
 - Notes: implementation and whole-plan verification are complete, but the item remains active because the repository helper lacks `archive`; configured-model lifecycle testing remains approval-gated; no `MEMORY.md` pointer was needed because `wiki/development.md` is already routed from the index.
+
+## [2026-09-10] dream | global profiles and provider safety
+
+- Trigger: `/dream` run after completing and archiving the global five-profile configuration and safe Cursor provider migration.
+- Inputs: current conversation, `spec/archive/260909-1928-create-global-scout-researcher-and-worker-profiles/{plan,verification,outcome}.md`, installed provider source, `docs/agent-definitions.md`, and current profile/runtime convention pages.
+- Wiki pages changed: `wiki/dreams/2026-09-10-2217-completed-session.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/index.md`, and `wiki/log.md`.
+- Verification: re-read all five changed wiki files; memory safety, relative-link, ASCII, fence, tier-separation, wiki-only write-scope, and diff checks passed.
+- Notes: user-specific profile contents and external staged state remain episodic; no observation, `MEMORY.md` pointer, or state checkpoint update qualified.

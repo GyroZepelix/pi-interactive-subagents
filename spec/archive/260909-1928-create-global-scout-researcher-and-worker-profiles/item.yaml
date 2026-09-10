@@ -1,13 +1,13 @@
 schema_version: 1
 id: 260909-1928-create-global-scout-researcher-and-worker-profiles
-title: Create global scout, researcher, and worker profiles
+title: Create global scout, researcher, worker, flash-reviewer, and twin profiles
 kind: work-item
 work_type: operations
 parent: null
 route: quick-plan
-status: planned
+status: completed
 created_at: '2026-09-09T19:28:14+02:00'
-updated_at: '2026-09-09T19:28:14+02:00'
+updated_at: '2026-09-10T22:03:35+02:00'
 external_refs:
 - system: web
   type: documentation
@@ -17,6 +17,10 @@ external_refs:
   type: benchmark
   key: cursorbench
   url: https://cursor.com/cursorbench
+- system: web
+  type: model-card
+  key: gemini-3.8-flash
+  url: https://deepmind.google/models/model-cards/gemini-3-8-flash/
 - system: web
   type: release
   key: gpt-5.6-sol

@@ -6,6 +6,10 @@ New named Pi profile launches use `--no-extensions --no-builtin-tools` and do no
 
 Validated `builtin-tools` cross the child boundary through a private package-owned environment value. The trailing activation control enables that subset plus tools registered by declared profile extensions; undeclared built-ins remain inactive. Declared extensions are trusted executable grants, not per-tool sandboxes (`pi-extension/subagents/subagent-capability-activation.ts`).
 
+For model-provider extensions in restricted profiles, `builtin-tools` constrains only Pi's built-in surface. Audit both tools registered with Pi and the provider's internal subprocess or protocol path; hiding registered tools does not prevent a provider from executing native file or shell operations itself. A read-only provider must reject its native mutating operations and bridge only the profile's active Pi tools (`spec/archive/260909-1928-create-global-scout-researcher-and-worker-profiles/verification.md`).
+
+Match provider verification to the real child environment. A non-TTY SDK session can miss TTY-gated registrations that appear in tmux panes, so inspect the applicable TTY branch or run a TTY-equivalent check before claiming a provider adds no tools (`spec/archive/260909-1928-create-global-scout-researcher-and-worker-profiles/verification.md`).
+
 Pi 0.85.1 dispatches lifecycle handlers in extension load order. Keep protected tool registration controls first so ordinary profile collisions cannot replace framework tools, and keep the tool-free activation control last so it observes same-event profile registrations before the next model request. Do not merge these roles without re-verifying Pi's lifecycle semantics (`spec/archive/260909-1952-profile-extension-loading/plan.md`, Decision D16).
 
 Resolved profile extension files are preflighted before pane creation. This package's spawning extension is reserved: it is rejected from the profile slot without non-empty `subagent_agents`, then filtered and loaded once in the protected spawning slot when granted (`pi-extension/subagents/index.ts`).
