@@ -72,7 +72,33 @@ Run the segment's integrated acceptance and appropriate regression checks, then 
 
 ## Attempt log
 
-No attempts recorded.
+### Attempt 1 - 2026-09-10T18:36:17+0200
+
+Starting HEAD: `9e31c2a2bba19838598dce80e6a9691c0dd01c0e`
+
+Changes:
+
+- Added a strict sidecar union in `pi-extension/subagents/session.ts`: unchanged legacy strict snapshots and version 1 `extension-grants` snapshots with selected built-ins, ordered canonical profile extension paths, explicit spawning state, and existing launch state.
+- Updated `pi-extension/subagents/index.ts` so new launch writes the versioned snapshot, launch and resume share one mode-aware command builder, new resume reconstructs the exact built-in/nesting environment without profile or settings reads, and both modes preflight required files before pane creation.
+- Added snapshot structure, compatibility, exact replay, current-contents, path, public refusal, nesting, command order, and environment regressions in `test/test.ts`; removed the now-dead strict allowlist construction seam.
+
+Checks:
+
+- Focused slice suite: PASS, 126 tests.
+- Integrated T02 pattern: PASS, 133 tests.
+- Full `npm test`: PASS, 198 tests.
+- Controlled tmux surface suite: PASS, 7 tests.
+- Spec validation, removed-interface/old-filename searches, and scoped/full diff checks: PASS.
+
+Failures and resolutions:
+
+- The first focused run after removing the dead strict allowlist builder exposed one stale test reference. The test now asserts the protected spawning sandbox directly.
+- A later focused run exposed that macOS temporary paths use the `/var` alias while new replay correctly requires canonical stored paths. The fixture now snapshots `realpathSync(...)`, and a separate symlink regression proves non-canonical aliases fail closed.
+- The initial focused reviewer passed the slice before the final canonicalization refinement. Targeted focused re-review retry 1 covered that refinement and passed.
+
+Blockers: none.
+
+Exact next action: Record completion, check off T02, advance Current to `03.01`, and stop for a user-controlled Git checkpoint.
 
 For each interrupted or failed attempt, append without rewriting earlier entries:
 
@@ -88,4 +114,49 @@ Exact next action: <single resumable action>
 
 ## Completion and handoff
 
-On success, record the segment starting checkpoint, changed paths, focused and integrated acceptance evidence, check results, and separate Focused, Standards, and Spec reviewer outputs and resolutions. Check off 02.02 and plan task T02 only after the segment gate passes, then advance Current exactly to `03.01`. Stop for a user-controlled Git checkpoint and suggest Dream; do not commit or invoke Dream automatically.
+### Completion - 2026-09-10T18:36:17+0200
+
+Assurance: high - the slice changes security-sensitive persisted capability state and backward-compatible resume, and the packet requires focused plus separate Standards and Spec gates.
+
+Segment starting checkpoint: `ee89f3c3cd1c2d0f7091f0cfcdb4bb54d760a25a`
+
+Current-slice changed paths:
+
+- `pi-extension/subagents/session.ts`
+- `pi-extension/subagents/index.ts`
+- `test/test.ts`
+- `spec/active/260909-1952-profile-extension-loading/implementation/02-02-versioned-resume.md`
+- `spec/active/260909-1952-profile-extension-loading/implementation/index.md`
+- `spec/active/260909-1952-profile-extension-loading/plan.md`
+
+Acceptance evidence:
+
+- New sidecars use strict `version: 1` and `capabilityMode: extension-grants` fields and preserve selected built-ins, canonical ordered profile paths, explicit spawning state, model, thinking, identity, cwd, and agent directory.
+- The reader rejects unknown, mixed, incomplete, malformed, duplicate, relative, non-canonical, and nesting-inconsistent new snapshots. Existing valid strict snapshots still round-trip and read without rewrite.
+- Initial launch and new resume call the same snapshot-driven command builder, preserving runtime-control-first, optional spawning control, profile path order, and activation-control-last while omitting strict `--tools` in new mode.
+- New resume reconstructs selected built-ins and always overrides nested-agent inheritance from the snapshot. Legacy resume retains strict `--tools`, exact legacy extension paths, and explicit nested deny-all when no targets were stored.
+- Resume does not discover profiles or packages, uses current contents at valid stored paths, and refuses missing, non-file, non-canonical, duplicate-canonical, reserved-framework, or unavailable framework paths before pane creation.
+- The complete T02 boundary is proven from strict ancestor checkpoint `ee89f3c3cd1c2d0f7091f0cfcdb4bb54d760a25a` through HEAD plus the complete unstaged Current diff.
+
+Checks:
+
+- `node --test --test-name-pattern='session.ts|subagent discovery|subagent runtime control|capability activation' test/test.ts`: PASS, 126 tests.
+- `node --test --test-name-pattern='session.ts|subagent discovery|subagent runtime control|capability activation|tool registration' test/test.ts`: PASS, 133 tests.
+- `npm test`: PASS, 198 tests.
+- `node --test test/integration/tmux-surface.test.ts` in controlled tmux: PASS, 7 tests. The tmux implementation remained unchanged after this run.
+- `uv run spec/scripts/manage-spec-item.py --root . validate --item 260909-1952-profile-extension-loading`: PASS.
+- Removed-interface and old-filename grep: PASS, no matches.
+- Scoped and full `git diff --check`: PASS.
+
+Reviews:
+
+- Focused: PASS with no findings over the complete Current slice. After the final path-canonicalization refinement, targeted re-review retry 1 also passed with no findings.
+- Standards: PASS with no blockers. The only non-blocking note was the already-recorded display-only widget freshness issue; capability behavior is unaffected.
+- Spec: PASS with no blocking or non-blocking findings across R06-R10, R12, D10, D14-D16, and complete T02 acceptance.
+
+Residual uncertainty:
+
+- Configured-model lifecycle testing was not run because it remains explicitly approval-gated and out of scope. Real Pi 0.85.1 SDK fixtures cover lifecycle activation without model consumption.
+- T03 documentation and final whole-plan verification remain pending.
+
+Handoff: `02.02` and T02 are complete. Current advances exactly to `03.01`; do not begin it in this invocation. Preserve a user-controlled Git checkpoint, then run Implement on Current `03.01`.

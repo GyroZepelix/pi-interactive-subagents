@@ -18,7 +18,11 @@ Omitted runtime names are auto-suffixed across running, in-flight, and registere
 
 ## Resume safety
 
-For Pi children, build and structurally validate the fully resolved loadout before pane creation, then persist it with exact backing extension paths next to the child session. Preflight every stored extension path before resume. A finished Pi session must not resume without this valid snapshot, and canonical session paths are reserved while a resume is launching so concurrent calls cannot open the same JSONL twice (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`). Finished Claude children are not resumable. These constraints prevent silent privilege expansion and concurrent JSONL mutation.
+New Pi profile launches persist a strict version 1 `extension-grants` snapshot containing selected built-ins, ordered canonical profile extension paths, explicit spawning state and targets, and the existing model, identity, cwd, and agent-directory state. New launch and resume use the same snapshot-driven command builder and capability-environment encoding, including explicit empty nested-agent deny-all (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`).
+
+Snapshot parsing is a strict union. Reject unknown, mixed, incomplete, malformed, duplicate, relative, non-canonical, or nesting-inconsistent new snapshots. Existing valid legacy snapshots remain a separate strict `toolAllowlist` shape, replay through `--no-extensions --tools` with their stored extension paths, and are read without automatic rewriting (`pi-extension/subagents/session.ts`).
+
+Resume never re-reads profiles or package settings. It intentionally executes current contents at valid stored paths, but preflights profile and required framework files before pane creation and refuses missing, non-file, non-canonical, duplicate-canonical, or reserved-framework paths. A finished Pi session must not resume without a valid snapshot, and canonical session paths are reserved while a resume is launching so concurrent calls cannot open the same JSONL twice. Finished Claude children are not resumable (`pi-extension/subagents/index.ts`).
 
 ## Shell boundaries
 

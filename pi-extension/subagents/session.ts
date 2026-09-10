@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export interface SessionEntry {
   type: string;
@@ -84,23 +84,16 @@ export function seedSubagentSessionFile(params: {
  * A snapshot of everything needed to reconstruct a subagent's sandbox when its
  * session is later resumed via `subagent_message({ name })`.
  *
- * Written next to the session file as `<sessionFile>.loadout.json` at spawn
- * time. Resume replays this exact snapshot so the reincarnated process gets the
- * same `--no-extensions` + `--tools` restriction, exact backing extension
- * paths, model, identity, spawn whitelist, cwd, and config dir it originally
- * ran with instead of falling
- * back to pi's default (all global extensions + full toolset). Storing the
- * resolved loadout (rather than re-deriving from the agent `.md` by name) keeps
- * resume faithful even if the agent definition is later edited, moved, or
- * deleted.
+ * New snapshots explicitly identify the extension-grant capability mode.
+ * Legacy snapshots keep their original strict `--tools` shape. Both modes
+ * persist resolved paths instead of re-reading profiles or package settings,
+ * so resume remains faithful if those definitions later change or disappear.
  */
-export interface SubagentLoadout {
+interface SubagentLoadoutBase {
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
-  /** Explicit `--tools` allowlist. Null is legacy-only and rejected on resume. */
-  toolAllowlist: string | null;
-  /** Exact extension files loaded to back the allowlisted custom tools. */
-  extensionPaths: string[] | null;
+  /** Exact ordered extension files captured when the child was launched. */
+  extensionPaths: string[];
   /** Model id (without thinking suffix), or null to use the session default. */
   model: string | null;
   /** Thinking level appended to the model as `model:level`, or null. */
@@ -114,10 +107,25 @@ export interface SubagentLoadout {
   /** Whether the agent auto-exits (informational; resume forces autonomous). */
   autoExit: boolean;
   /** Absolute working directory the subagent ran in. */
-  cwd: string | null;
+  cwd: string;
   /** Absolute PI_CODING_AGENT_DIR used by the subagent. */
-  agentDir: string | null;
+  agentDir: string;
 }
+
+/** Existing strict-tool sidecars. Their shape and command replay stay compatible. */
+export interface LegacySubagentLoadout extends SubagentLoadoutBase {
+  toolAllowlist: string;
+}
+
+/** Version 1 sidecars for profile built-ins plus trusted extension grants. */
+export interface VersionedSubagentLoadout extends SubagentLoadoutBase {
+  version: 1;
+  capabilityMode: "extension-grants";
+  builtinTools: string[];
+  grantSpawning: boolean;
+}
+
+export type SubagentLoadout = LegacySubagentLoadout | VersionedSubagentLoadout;
 
 /** Path of the loadout sidecar written next to a subagent session file. */
 export function loadoutSidecarPath(sessionFile: string): string {
@@ -136,10 +144,19 @@ export function writeSubagentLoadout(sessionFile: string, loadout: SubagentLoado
 
 const SPAWNING_TOOL_NAMES = ["subagent", "subagent_message", "subagents_list"] as const;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const PROFILE_BUILTIN_TOOLS = new Set([
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "powershell",
+  "grep",
+  "find",
+  "ls",
+]);
 
-const LOADOUT_FIELDS = new Set([
+const COMMON_LOADOUT_FIELDS = [
   "agent",
-  "toolAllowlist",
   "extensionPaths",
   "model",
   "thinking",
@@ -149,6 +166,14 @@ const LOADOUT_FIELDS = new Set([
   "autoExit",
   "cwd",
   "agentDir",
+] as const;
+const LEGACY_LOADOUT_FIELDS = new Set([...COMMON_LOADOUT_FIELDS, "toolAllowlist"]);
+const VERSIONED_LOADOUT_FIELDS = new Set([
+  ...COMMON_LOADOUT_FIELDS,
+  "version",
+  "capabilityMode",
+  "builtinTools",
+  "grantSpawning",
 ]);
 
 function isNullableString(value: unknown): value is string | null {
@@ -159,22 +184,16 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
-export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const loadout = value as Record<string, unknown>;
-  if (Object.keys(loadout).some((key) => !LOADOUT_FIELDS.has(key))) return false;
+function hasExactFields(loadout: Record<string, unknown>, fields: ReadonlySet<string>): boolean {
+  const keys = Object.keys(loadout);
+  return keys.length === fields.size && keys.every((key) => fields.has(key));
+}
+
+function hasValidCommonLoadoutFields(loadout: Record<string, unknown>): boolean {
   if (!isNullableString(loadout.agent)) return false;
   if (
     typeof loadout.agent === "string" &&
     (!loadout.agent.trim() || /[\x00-\x1f\x7f,]/.test(loadout.agent))
-  ) return false;
-  if (typeof loadout.toolAllowlist !== "string" || !loadout.toolAllowlist.trim()) return false;
-  const allowlistedTools = loadout.toolAllowlist.split(",");
-  if (
-    allowlistedTools.some((tool) =>
-      !tool.trim() || tool !== tool.trim() || /[\x00-\x1f\x7f]/.test(tool)
-    ) ||
-    new Set(allowlistedTools).size !== allowlistedTools.length
   ) return false;
   if (
     !isStringArray(loadout.extensionPaths) ||
@@ -204,10 +223,6 @@ export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     )
   ) return false;
   if (new Set(spawnable).size !== spawnable.length) return false;
-  const toolNames = new Set(allowlistedTools);
-  const hasAnySpawningTool = SPAWNING_TOOL_NAMES.some((name) => toolNames.has(name));
-  const hasEverySpawningTool = SPAWNING_TOOL_NAMES.every((name) => toolNames.has(name));
-  if (spawnable.length > 0 ? !hasEverySpawningTool : hasAnySpawningTool) return false;
   if (typeof loadout.autoExit !== "boolean") return false;
   if (typeof loadout.cwd !== "string" || !loadout.cwd || !isAbsolute(loadout.cwd)) return false;
   if (
@@ -216,6 +231,53 @@ export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     !isAbsolute(loadout.agentDir)
   ) return false;
   return true;
+}
+
+function isLegacySubagentLoadout(loadout: Record<string, unknown>): boolean {
+  if (!hasExactFields(loadout, LEGACY_LOADOUT_FIELDS)) return false;
+  if (!hasValidCommonLoadoutFields(loadout)) return false;
+  if (typeof loadout.toolAllowlist !== "string" || !loadout.toolAllowlist.trim()) return false;
+  const allowlistedTools = loadout.toolAllowlist.split(",");
+  if (
+    allowlistedTools.some((tool) =>
+      !tool.trim() || tool !== tool.trim() || /[\x00-\x1f\x7f]/.test(tool)
+    ) ||
+    new Set(allowlistedTools).size !== allowlistedTools.length
+  ) return false;
+  const spawnable = (loadout.spawnable as string[] | null) ?? [];
+  const toolNames = new Set(allowlistedTools);
+  const hasAnySpawningTool = SPAWNING_TOOL_NAMES.some((name) => toolNames.has(name));
+  const hasEverySpawningTool = SPAWNING_TOOL_NAMES.every((name) => toolNames.has(name));
+  return spawnable.length > 0 ? hasEverySpawningTool : !hasAnySpawningTool;
+}
+
+function isVersionedSubagentLoadout(loadout: Record<string, unknown>): boolean {
+  if (!hasExactFields(loadout, VERSIONED_LOADOUT_FIELDS)) return false;
+  if (!hasValidCommonLoadoutFields(loadout)) return false;
+  if (loadout.version !== 1 || loadout.capabilityMode !== "extension-grants") return false;
+  if (!isStringArray(loadout.builtinTools)) return false;
+  if (
+    loadout.builtinTools.some((tool) => !PROFILE_BUILTIN_TOOLS.has(tool)) ||
+    new Set(loadout.builtinTools).size !== loadout.builtinTools.length
+  ) return false;
+  const extensionPaths = loadout.extensionPaths as string[];
+  if (
+    extensionPaths.some((path) =>
+      path !== path.trim() || /[\x00-\x1f\x7f]/.test(path) || resolve(path) !== path
+    ) ||
+    new Set(extensionPaths.map((path) => resolve(path))).size !== extensionPaths.length
+  ) return false;
+  if (typeof loadout.grantSpawning !== "boolean") return false;
+  const spawnable = loadout.spawnable as string[] | null;
+  return loadout.grantSpawning
+    ? spawnable !== null && spawnable.length > 0
+    : spawnable === null;
+}
+
+export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const loadout = value as Record<string, unknown>;
+  return isLegacySubagentLoadout(loadout) || isVersionedSubagentLoadout(loadout);
 }
 
 /** Read and structurally validate a subagent loadout snapshot. */

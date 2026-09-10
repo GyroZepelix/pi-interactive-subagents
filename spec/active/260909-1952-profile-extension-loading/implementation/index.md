@@ -2,7 +2,7 @@
 
 Plan: `../plan.md`
 Mode: sliced
-Current: `02.02`
+Current: `03.01`
 Expected implementation sessions: 5
 Implementation starting checkpoint: `486f582398eb6a79666e3ec05e868d33546c49eb`
 
@@ -65,7 +65,7 @@ Segment acceptance: New launch and resume use the same runtime-control-first, ac
 Segment gate: Run focused and full unit checks plus the controlled non-model tmux surface suite where available, prove launch/activation/snapshot/resume acceptance, then obtain independent Standards and Spec reviews.
 
 - [x] 02.01: Implement isolated child launch and capability activation (packet: `./02-01-child-capability-launch.md`)
-- [ ] 02.02: Add versioned snapshots and safe legacy/new resume (packet: `./02-02-versioned-resume.md`)
+- [x] 02.02: Add versioned snapshots and safe legacy/new resume (packet: `./02-02-versioned-resume.md`)
 
 Boundary 02.01 -> 02.02: Launch and child-startup behavior needs focused runtime review before persistence compatibility is layered onto it; combining both materially increases security-sensitive review and correction scope.
 
@@ -83,4 +83,5 @@ Final gate: Expand the T03 segment gate to whole-plan acceptance, all relevant s
 ## Discoveries and blockers
 
 - `01.02` attempt 1's package-identity blocker was resolved by using Pi-equivalent identity comparison for project `autoload: false` delta bases. Focused, Standards, and Spec reviews passed; T01 is complete.
-- `02.01` attempt 1 found that Pi's extension-ordered lifecycle dispatch prevents a first-loaded handler from activating same-event profile overrides. The user approved D16 and the control rename on 2026-09-10. Attempt 2 implemented the split and resolved spawning-path, parent-import, lifecycle-test, and inherited-environment findings. Focused review passed after 90 focused and 195 full tests; `02.01` is complete and Current is `02.02`.
+- `02.01` attempt 1 found that Pi's extension-ordered lifecycle dispatch prevents a first-loaded handler from activating same-event profile overrides. The user approved D16 and the control rename on 2026-09-10. Attempt 2 implemented the split and resolved spawning-path, parent-import, lifecycle-test, and inherited-environment findings. Focused review passed after 90 focused and 195 full tests.
+- `02.02` added the strict versioned/legacy snapshot union and exact snapshot-driven resume. Focused review plus targeted re-review, integrated checks, controlled tmux validation, and separate Standards and Spec reviews passed; T02 is complete and Current is `03.01`.

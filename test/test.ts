@@ -387,7 +387,7 @@ describe("session.ts", () => {
   });
 
   describe("subagent loadout snapshot", () => {
-    const sample: SubagentLoadout = {
+    const legacySample: SubagentLoadout = {
       agent: "implementer",
       toolAllowlist: "read,write,edit,safe_bash,web_search,subagent,subagent_message,subagents_list,ask_question",
       extensionPaths: ["/extensions/safe-bash.ts", "/extensions/web-search.ts"],
@@ -400,76 +400,108 @@ describe("session.ts", () => {
       cwd: "/work/dir",
       agentDir: "/home/u/.pi/agent",
     };
+    const versionedSample: SubagentLoadout = {
+      version: 1,
+      capabilityMode: "extension-grants",
+      agent: "researcher",
+      builtinTools: ["read", "grep"],
+      extensionPaths: ["/extensions/web-search.ts", "/extensions/codex-search.ts"],
+      grantSpawning: true,
+      model: "cursor/research-model",
+      thinking: "high",
+      systemPromptMode: "replace",
+      identity: "You are a researcher agent.",
+      spawnable: ["scout"],
+      autoExit: true,
+      cwd: "/work/research",
+      agentDir: "/home/u/.pi/agent",
+    };
 
-    it("writes the sidecar next to the session file", () => {
+    it("writes the versioned sidecar next to the session file", () => {
       const sf = join(dir, "s1.jsonl");
-      writeSubagentLoadout(sf, sample);
+      writeSubagentLoadout(sf, versionedSample);
       assert.equal(loadoutSidecarPath(sf), sf + ".loadout.json");
       assert.ok(existsSync(sf + ".loadout.json"));
     });
 
-    it("round-trips the full loadout", () => {
-      const sf = join(dir, "s2.jsonl");
-      writeSubagentLoadout(sf, sample);
-      assert.deepEqual(readSubagentLoadout(sf), sample);
+    it("round-trips new versioned and valid legacy strict loadouts", () => {
+      for (const [name, sample] of [["versioned", versionedSample], ["legacy", legacySample]] as const) {
+        const sf = join(dir, `${name}.jsonl`);
+        writeSubagentLoadout(sf, sample);
+        assert.deepEqual(readSubagentLoadout(sf), sample);
+      }
+    });
+
+    it("reads a legacy strict sidecar without rewriting it", () => {
+      const sf = join(dir, "legacy-preserved.jsonl");
+      const original = JSON.stringify(legacySample, null, 2) + "\n";
+      writeFileSync(loadoutSidecarPath(sf), original, "utf8");
+      assert.deepEqual(readSubagentLoadout(sf), legacySample);
+      assert.equal(readFileSync(loadoutSidecarPath(sf), "utf8"), original);
     });
 
     it("returns null when the sidecar is absent", () => {
       assert.equal(readSubagentLoadout(join(dir, "missing.jsonl")), null);
     });
 
-    it("returns null when the sidecar is corrupt or structurally invalid", () => {
-      const corrupt = join(dir, "s3.jsonl");
+    it("rejects corrupt, unknown, incomplete, and mixed snapshot modes", () => {
+      const corrupt = join(dir, "corrupt.jsonl");
       writeFileSync(corrupt + ".loadout.json", "not json{", "utf8");
       assert.equal(readSubagentLoadout(corrupt), null);
 
-      const missingPaths = join(dir, "s4.jsonl");
-      writeFileSync(
-        missingPaths + ".loadout.json",
-        JSON.stringify({ ...sample, extensionPaths: undefined }),
-        "utf8",
-      );
-      assert.equal(readSubagentLoadout(missingPaths), null);
-
-      const malformedField = join(dir, "s5.jsonl");
-      writeFileSync(
-        malformedField + ".loadout.json",
-        JSON.stringify({ ...sample, autoExit: "yes" }),
-        "utf8",
-      );
-      assert.equal(readSubagentLoadout(malformedField), null);
-
-      const unrestrictedNamed = join(dir, "s6.jsonl");
-      writeFileSync(
-        unrestrictedNamed + ".loadout.json",
-        JSON.stringify({ ...sample, toolAllowlist: null, extensionPaths: null }),
-        "utf8",
-      );
-      assert.equal(readSubagentLoadout(unrestrictedNamed), null);
+      const cases = [
+        { ...versionedSample, version: 2 },
+        { ...versionedSample, capabilityMode: "strict-tools" },
+        { ...versionedSample, capabilityMode: undefined },
+        { ...versionedSample, toolAllowlist: "read" },
+        { ...legacySample, version: 1 },
+        { ...legacySample, extensionPaths: undefined },
+        { ...legacySample, autoExit: "yes" },
+        { ...legacySample, toolAllowlist: null },
+        { ...versionedSample, unexpected: true },
+      ];
+      for (const [index, value] of cases.entries()) {
+        const sf = join(dir, `invalid-mode-${index}.jsonl`);
+        writeFileSync(sf + ".loadout.json", JSON.stringify(value), "utf8");
+        assert.equal(readSubagentLoadout(sf), null, `expected case ${index} to fail closed`);
+      }
     });
 
-    it("rejects mismatched nested-spawn snapshots", () => {
+    it("rejects malformed built-ins and versioned extension paths", () => {
       const cases = [
-        { spawnable: null },
-        { spawnable: [] },
-        { spawnable: ["   "] },
-        {
-          spawnable: ["inspector"],
-          toolAllowlist: "read,subagent,ask_question",
-        },
-        {
-          spawnable: ["inspector"],
-          toolAllowlist: "read,ask_question",
-        },
+        { builtinTools: ["read", "unknown"] },
+        { builtinTools: ["read", "read"] },
+        { builtinTools: "read" },
+        { extensionPaths: ["relative/extension.ts"] },
+        { extensionPaths: ["/extensions/a.ts", "/extensions/a.ts"] },
+        { extensionPaths: ["/extensions/../extensions/a.ts"] },
       ];
-
       for (const [index, overrides] of cases.entries()) {
-        const sf = join(dir, `spawn-mismatch-${index}.jsonl`);
+        const sf = join(dir, `invalid-capability-${index}.jsonl`);
         writeFileSync(
           sf + ".loadout.json",
-          JSON.stringify({ ...sample, ...overrides }),
+          JSON.stringify({ ...versionedSample, ...overrides }),
           "utf8",
         );
+        assert.equal(readSubagentLoadout(sf), null, `expected case ${index} to fail closed`);
+      }
+    });
+
+    it("rejects inconsistent nesting in both snapshot modes", () => {
+      const cases = [
+        { ...versionedSample, grantSpawning: false },
+        { ...versionedSample, spawnable: null },
+        { ...versionedSample, spawnable: [] },
+        { ...versionedSample, spawnable: ["   "] },
+        { ...legacySample, spawnable: null },
+        { ...legacySample, spawnable: [] },
+        { ...legacySample, toolAllowlist: "read,subagent,ask_question" },
+        { ...legacySample, toolAllowlist: "read,ask_question" },
+      ];
+
+      for (const [index, value] of cases.entries()) {
+        const sf = join(dir, `spawn-mismatch-${index}.jsonl`);
+        writeFileSync(sf + ".loadout.json", JSON.stringify(value), "utf8");
         assert.equal(readSubagentLoadout(sf), null, `expected case ${index} to fail closed`);
       }
     });
@@ -1297,7 +1329,7 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("grants spawning tools only from subagent_agents", async () => {
+  it("grants spawning controls only from subagent_agents", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(
         projectAgentsDir,
@@ -1312,12 +1344,10 @@ describe("subagent discovery", () => {
       assert.ok(coordinator);
       assert.deepEqual(coordinator.subagentAgents, ["inspector", "implementer"]);
 
-      const allowlist = testApi.buildSubagentToolAllowlist(coordinator.builtinTools, { grantSpawning: true });
-      const tools = new Set(allowlist.split(","));
-      for (const tool of ["subagent", "subagent_message", "subagents_list", "ask_question"]) {
-        assert.ok(tools.has(tool), `expected ${tool} in coordinator allowlist`);
-      }
-      assert.ok(tools.has("bash"));
+      const prepared = testApi.prepareAgentSandbox(coordinator);
+      assert.ok("sandbox" in prepared);
+      assert.equal(prepared.sandbox.grantSpawning, true);
+      assert.deepEqual(prepared.sandbox.builtinTools, ["read", "bash"]);
     });
   });
 
@@ -2390,9 +2420,12 @@ describe("subagent discovery", () => {
         "PI_SUBAGENT_ALLOWED='child-agent'",
       ]);
       assert.deepEqual(launch.loadout, {
+        version: 1,
+        capabilityMode: "extension-grants",
         agent: "declared-name",
-        toolAllowlist: "read,subagent,subagent_message,subagents_list,ask_question",
-        extensionPaths: [fileURLToPath(new URL("../pi-extension/subagents/index.ts", import.meta.url))],
+        builtinTools: ["read"],
+        extensionPaths: [],
+        grantSpawning: true,
         model: "provider/restricted",
         thinking: "medium",
         systemPromptMode: "replace",
@@ -2408,7 +2441,6 @@ describe("subagent discovery", () => {
         artifactDir: projectDir,
         name: "runtime-name",
         artifactId: "canonical-launch",
-        capabilities: launch.capabilities,
       });
       assert.deepEqual(commandParts.slice(0, 2), ["--model", "'provider/restricted:medium'"]);
       assert.ok(commandParts.includes("--no-extensions"));
@@ -2728,18 +2760,6 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("buildSubagentToolAllowlist preserves legacy snapshot tools and child controls", () => {
-    assert.equal(
-      testApi.buildSubagentToolAllowlist(["read", "bash"], { grantSpawning: true }),
-      "read,bash,subagent,subagent_message,subagents_list,ask_question",
-    );
-  });
-
-  it("buildSubagentToolAllowlist fails closed when ordinary tools are omitted", () => {
-    assert.equal(testApi.buildSubagentToolAllowlist(undefined), "ask_question");
-    assert.equal(testApi.buildSubagentToolAllowlist([]), "ask_question");
-  });
-
   it("builds the private capability environment and pins nesting targets", () => {
     assert.deepEqual(
       testApi.buildProfileCapabilityEnvironment(
@@ -2770,6 +2790,47 @@ describe("subagent discovery", () => {
     );
   });
 
+  it("replays versioned capability environment and explicit nested deny-all from snapshots", () => {
+    assert.deepEqual(
+      testApi.buildResumeCapabilityEnvironment({
+        version: 1,
+        capabilityMode: "extension-grants",
+        agent: "scout",
+        builtinTools: ["read", "grep"],
+        extensionPaths: [],
+        grantSpawning: false,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: "/work",
+        agentDir: "/agent",
+      }),
+      [
+        `${SUBAGENT_BUILTIN_TOOLS_ENV}='read,grep'`,
+        "PI_SUBAGENT_ALLOWED=''",
+      ],
+    );
+    assert.deepEqual(
+      testApi.buildResumeCapabilityEnvironment({
+        agent: "legacy",
+        toolAllowlist: "read,ask_question",
+        extensionPaths: [],
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: "/work",
+        agentDir: "/agent",
+      }),
+      ["PI_SUBAGENT_ALLOWED=''"],
+    );
+  });
+
   it("treats an explicit empty nested-agent allowlist as deny-all", () => {
     assert.equal(testApi.parseSubagentAllowlist(undefined), null);
 
@@ -2791,9 +2852,12 @@ describe("subagent discovery", () => {
       testApi.applySandboxToParts(
         parts,
         {
+          version: 1,
+          capabilityMode: "extension-grants",
           agent: "researcher",
-          toolAllowlist: "read,subagent,subagent_message,subagents_list,ask_question",
-          extensionPaths: [],
+          builtinTools: ["read"],
+          extensionPaths: [profileOne, profileTwo],
+          grantSpawning: true,
           model: null,
           thinking: null,
           systemPromptMode: null,
@@ -2807,11 +2871,6 @@ describe("subagent discovery", () => {
           artifactDir: d,
           name: "researcher",
           artifactId: "profile-launch",
-          capabilities: {
-            builtinTools: ["read"],
-            grantSpawning: true,
-            extensionPaths: [profileOne, profileTwo],
-          },
         },
       );
 
@@ -2837,9 +2896,12 @@ describe("subagent discovery", () => {
       testApi.applySandboxToParts(
         parts,
         {
+          version: 1,
+          capabilityMode: "extension-grants",
           agent: "scout",
-          toolAllowlist: "read,ask_question",
-          extensionPaths: [],
+          builtinTools: ["read"],
+          extensionPaths: [profileExtension],
+          grantSpawning: false,
           model: null,
           thinking: null,
           systemPromptMode: null,
@@ -2853,11 +2915,6 @@ describe("subagent discovery", () => {
           artifactDir: d,
           name: "scout",
           artifactId: "non-nesting-launch",
-          capabilities: {
-            builtinTools: ["read"],
-            grantSpawning: false,
-            extensionPaths: [profileExtension],
-          },
         },
       );
 
@@ -2886,10 +2943,10 @@ describe("subagent discovery", () => {
           identity: "You are a implementer.",
           spawnable: ["inspector"],
           autoExit: true,
-          cwd: null,
-          agentDir: null,
+          cwd: d,
+          agentDir: d,
         },
-        { artifactDir: d, name: "implementer", artifactId: "initial-launch" },
+        { artifactDir: d, name: "implementer", artifactId: "legacy-replay" },
       );
       const joined = parts.join(" ");
       // Model with thinking suffix.
@@ -2906,9 +2963,12 @@ describe("subagent discovery", () => {
         parts[toolsIdx + 1].includes("read,write,safe_bash"),
         "expected the tool allowlist as the --tools value",
       );
-      const extensionIdx = parts.indexOf("-e");
-      assert.ok(extensionIdx >= 0, "expected the snapshotted extension path");
-      assert.ok(parts[extensionIdx + 1].includes("/extensions/safe-bash.ts"));
+      const extensionValues = parts
+        .flatMap((part, index) => part === "-e" ? [parts[index + 1]] : []);
+      assert.ok(
+        extensionValues.some((value) => value.includes("/extensions/safe-bash.ts")),
+        "expected the snapshotted extension path",
+      );
     });
   });
 
@@ -2971,30 +3031,6 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("applySandboxToParts omits restriction flags when the loadout was unrestricted", () => {
-    withTempDir((d) => {
-      const parts: string[] = [];
-      testApi.applySandboxToParts(
-        parts,
-        {
-          agent: null,
-          toolAllowlist: null,
-          extensionPaths: null,
-          model: null,
-          thinking: null,
-          systemPromptMode: null,
-          identity: null,
-          spawnable: null,
-          autoExit: false,
-          cwd: null,
-          agentDir: null,
-        },
-        { artifactDir: d, name: "fork", artifactId: "legacy-replay" },
-      );
-      assert.deepEqual(parts, []);
-    });
-  });
-
   it("keeps a profile body in a fork task when system-prompt is omitted", () => {
     const task = testApi.buildSubagentTask({
       task: "Do the work",
@@ -3014,21 +3050,152 @@ describe("subagent discovery", () => {
     assert.equal(systemPromptTask, "Do the work");
   });
 
-  it("refuses replay when a snapshotted extension path disappeared", () => {
+  it("replays exact versioned paths with current contents and no profile lookup", () => {
+    withTempDir((d) => {
+      const extensionFixture = join(d, "profile-extension.ts");
+      const sessionFile = join(d, "child.jsonl");
+      writeFileSync(extensionFixture, "export default 'first';", "utf8");
+      const extensionPath = realpathSync(extensionFixture);
+      const snapshot: SubagentLoadout = {
+        version: 1,
+        capabilityMode: "extension-grants",
+        agent: "researcher",
+        builtinTools: ["read"],
+        extensionPaths: [extensionPath],
+        grantSpawning: false,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: d,
+        agentDir: d,
+      };
+      writeSubagentLoadout(sessionFile, snapshot);
+
+      // Profile and package settings are intentionally absent. Replay consumes
+      // only the sidecar and executes whatever currently exists at its path.
+      writeFileSync(extensionPath, "export default 'updated';", "utf8");
+      const read = readSubagentLoadout(sessionFile);
+      assert.ok(read && "version" in read);
+      assert.equal(testApi.validateLoadoutExtensionPaths(read), null);
+      const parts: string[] = [];
+      testApi.applySandboxToParts(parts, read, {
+        artifactDir: d,
+        name: "researcher",
+        artifactId: "snapshot-replay",
+      });
+      const extensionValues = parts
+        .flatMap((part, index) => part === "-e" ? [parts[index + 1].slice(1, -1)] : []);
+      assert.ok(extensionValues.includes(extensionPath));
+      assert.equal(readFileSync(extensionPath, "utf8"), "export default 'updated';");
+    });
+  });
+
+  it("refuses missing and non-file versioned extension paths", () => {
+    withTempDir((d) => {
+      const base: SubagentLoadout = {
+        version: 1,
+        capabilityMode: "extension-grants",
+        agent: "restricted",
+        builtinTools: ["read"],
+        extensionPaths: [join(d, "missing.ts")],
+        grantSpawning: false,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: d,
+        agentDir: d,
+      };
+      assert.match(testApi.validateLoadoutExtensionPaths(base), /sandbox extension is missing/);
+
+      const directoryPath = join(d, "not-a-file.ts");
+      mkdirSync(directoryPath);
+      assert.match(
+        testApi.validateLoadoutExtensionPaths({ ...base, extensionPaths: [directoryPath] }),
+        /sandbox extension is missing/,
+      );
+
+      const canonicalPath = join(d, "canonical.ts");
+      const aliasPath = join(d, "alias.ts");
+      writeFileSync(canonicalPath, "export default {};", "utf8");
+      symlinkSync(canonicalPath, aliasPath);
+      assert.match(
+        testApi.validateLoadoutExtensionPaths({ ...base, extensionPaths: [aliasPath] }),
+        /not canonical/,
+      );
+    });
+  });
+
+  it("rejects reserved framework controls from versioned profile extension paths", () => {
+    const runtimeControlPath = fileURLToPath(
+      new URL("../pi-extension/subagents/subagent-runtime-control.ts", import.meta.url),
+    );
     const error = testApi.validateLoadoutExtensionPaths({
+      version: 1,
+      capabilityMode: "extension-grants",
       agent: "restricted",
-      toolAllowlist: "read,missing_tool,ask_question",
-      extensionPaths: ["/definitely/missing/extension.ts"],
+      builtinTools: [],
+      extensionPaths: [runtimeControlPath],
+      grantSpawning: false,
       model: null,
       thinking: null,
       systemPromptMode: null,
       identity: null,
       spawnable: null,
       autoExit: true,
-      cwd: null,
-      agentDir: null,
+      cwd: "/tmp",
+      agentDir: "/tmp/agent",
     });
-    assert.match(error, /sandbox extension is missing/);
+    assert.match(error, /reserved framework path/);
+  });
+
+  it("refuses a missing snapshotted path through the public resume tool before pane creation", async () => {
+    const d = createTestDir();
+    try {
+      const sessionPath = join(d, "finished-child.jsonl");
+      writeFileSync(sessionPath, '{"type":"session","id":"child-session"}\n', "utf8");
+      writeSubagentLoadout(sessionPath, {
+        version: 1,
+        capabilityMode: "extension-grants",
+        agent: "researcher",
+        builtinTools: ["read"],
+        extensionPaths: [join(d, "removed-extension.ts")],
+        grantSpawning: false,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: d,
+        agentDir: d,
+      });
+      registerName(join(d, "artifacts", "test-session"), "researcher", {
+        sessionFile: sessionPath,
+        sessionId: "child-session",
+      });
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+      assert.ok(messageTool);
+
+      const result = await messageTool.execute(
+        "resume-missing-path",
+        { name: "researcher", message: "Continue" },
+        undefined,
+        undefined,
+        createMockContext(d, true),
+      );
+      assert.equal(result.details?.error, result.content[0].text);
+      assert.match(result.content[0].text, /sandbox extension is missing/);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 
   it("requires the spawning extension path when a legacy snapshot grants nesting", () => {

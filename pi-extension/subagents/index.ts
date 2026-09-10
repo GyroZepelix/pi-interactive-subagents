@@ -688,28 +688,14 @@ function updateWidget() {
  */
 const SUBAGENT_CONTROL_TOOLS = ["ask_question"] as const;
 
-/**
- * Build the child --tools allowlist.
- *
- * Pi 0.70+ applies --tools to built-in, extension, and custom tools. If a
- * subagent definition restricts tools to e.g. "read,bash,write", the child
- * control tools from subagent-runtime-control.ts would otherwise be hidden, leaving a
- * manually resumed or user-touched subagent unable to call ask_question.
- */
-function buildSubagentToolAllowlist(
-  effectiveTools: readonly string[] = [],
-  opts?: { grantSpawning?: boolean },
-): string {
-  const grantSpawning = opts?.grantSpawning ?? false;
-  const allow = new Set(effectiveTools);
-  if (grantSpawning) {
-    for (const tool of SPAWNING_TOOLS) allow.add(tool);
-  }
-  for (const tool of SUBAGENT_CONTROL_TOOLS) {
-    allow.add(tool);
-  }
-
-  return [...allow].join(",");
+function buildVersionedCapabilityEnvironment(
+  builtinTools: readonly string[],
+  allowedAgents: readonly string[],
+): string[] {
+  return [
+    `${SUBAGENT_BUILTIN_TOOLS_ENV}=${shellEscape(builtinTools.join(","))}`,
+    `PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`,
+  ];
 }
 
 function buildProfileCapabilityEnvironment(
@@ -719,10 +705,15 @@ function buildProfileCapabilityEnvironment(
   if (capabilities.grantSpawning !== (allowedAgents.length > 0)) {
     throw new Error("Profile capability environment has inconsistent nested-spawn state");
   }
-  return [
-    `${SUBAGENT_BUILTIN_TOOLS_ENV}=${shellEscape(capabilities.builtinTools.join(","))}`,
-    `PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`,
-  ];
+  return buildVersionedCapabilityEnvironment(capabilities.builtinTools, allowedAgents);
+}
+
+function buildResumeCapabilityEnvironment(loadout: SubagentLoadout): string[] {
+  const allowedAgents = loadout.spawnable ?? [];
+  if ("version" in loadout) {
+    return buildVersionedCapabilityEnvironment(loadout.builtinTools, allowedAgents);
+  }
+  return [`PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`];
 }
 
 interface PreparedAgentSandbox {
@@ -827,25 +818,22 @@ function prepareAgentLaunch(
     inheritsConversationContext: launchBehavior.inheritsConversationContext,
   });
 
-  const legacySnapshotExtensionPaths = [
-    ...(grantSpawning ? [SPAWNING_EXTENSION_PATH] : []),
-    ...sandbox.extensionPaths,
-  ].filter((extensionPath, index, paths) =>
-    paths.findIndex((candidate) => resolve(candidate) === resolve(extensionPath)) === index
-  );
   const capabilityEnvironment = buildProfileCapabilityEnvironment(
     sandbox,
     grantSpawning ? agent.subagentAgents : [],
   );
   const loadout: SubagentLoadout | null = agent.cli === "claude" ? null : {
+    version: 1,
+    capabilityMode: "extension-grants",
     agent: normalizedParams.agent ?? null,
-    toolAllowlist: buildSubagentToolAllowlist(sandbox.builtinTools, { grantSpawning }),
-    extensionPaths: legacySnapshotExtensionPaths,
+    builtinTools: [...sandbox.builtinTools],
+    extensionPaths: [...sandbox.extensionPaths],
+    grantSpawning,
     model: effectiveModel ?? null,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,
     identity: systemPromptMode && identity ? identity : null,
-    spawnable: grantSpawning ? agent.subagentAgents : null,
+    spawnable: grantSpawning ? [...agent.subagentAgents] : null,
     autoExit: agent.autoExit ?? false,
     cwd: targetCwdForSession,
     agentDir: effectiveAgentDir,
@@ -856,6 +844,16 @@ function prepareAgentLaunch(
         `Agent "${agent.name}" produced an invalid sandbox snapshot. ` +
         `Check its model, nested agent names, working directory, and tool configuration in ${agent.filePath}.`,
     };
+  }
+  if (loadout) {
+    const replayError = validateLoadoutExtensionPaths(loadout);
+    if (replayError) {
+      return {
+        error:
+          `Agent "${agent.name}" cannot create a safe sandbox snapshot: ${replayError}. ` +
+          `Restore the required extension file or update ${agent.filePath}.`,
+      };
+    }
   }
 
   return {
@@ -880,23 +878,65 @@ function prepareAgentLaunch(
 }
 
 function validateLoadoutExtensionPaths(loadout: SubagentLoadout): string | null {
-  if (loadout.toolAllowlist === null) return "sandbox snapshot has no explicit tool allowlist";
-  const tools = loadout.toolAllowlist.split(",");
-  const needsExtension = tools.some((tool) =>
-    !BUILTIN_TOOLS.has(tool) && !(SUBAGENT_CONTROL_TOOLS as readonly string[]).includes(tool),
-  );
-  if (needsExtension && (loadout.extensionPaths?.length ?? 0) === 0) {
-    return "sandbox snapshot has extension-backed tools but no extension paths";
+  const runtimeControlPath = join(SUBAGENTS_DIR, "subagent-runtime-control.ts");
+  if (!isExistingFile(runtimeControlPath)) {
+    return `sandbox runtime control is missing: ${runtimeControlPath}`;
   }
-  const grantsSpawning = SPAWNING_TOOLS.every((tool) => tools.includes(tool));
-  if (grantsSpawning) {
-    if (!loadout.extensionPaths?.some((path) => resolve(path) === SPAWNING_EXTENSION_PATH)) {
+
+  const activationControlPath = join(SUBAGENTS_DIR, "subagent-capability-activation.ts");
+  if ("version" in loadout) {
+    if (!isExistingFile(activationControlPath)) {
+      return `sandbox capability activation control is missing: ${activationControlPath}`;
+    }
+    if (loadout.grantSpawning && !isExistingFile(SPAWNING_EXTENSION_PATH)) {
+      return `sandbox spawning control is missing: ${SPAWNING_EXTENSION_PATH}`;
+    }
+  } else {
+    const tools = loadout.toolAllowlist.split(",");
+    const needsExtension = tools.some((tool) =>
+      !BUILTIN_TOOLS.has(tool) && !(SUBAGENT_CONTROL_TOOLS as readonly string[]).includes(tool),
+    );
+    if (needsExtension && loadout.extensionPaths.length === 0) {
+      return "sandbox snapshot has extension-backed tools but no extension paths";
+    }
+    const grantsSpawning = SPAWNING_TOOLS.every((tool) => tools.includes(tool));
+    if (
+      grantsSpawning &&
+      !loadout.extensionPaths.some((path) => resolve(path) === SPAWNING_EXTENSION_PATH)
+    ) {
       return "sandbox snapshot grants spawning without the spawning extension path";
     }
   }
-  for (const extensionPath of loadout.extensionPaths ?? []) {
+
+  for (const extensionPath of loadout.extensionPaths) {
     if (!isExistingFile(extensionPath)) {
       return `sandbox extension is missing: ${extensionPath}`;
+    }
+  }
+
+  if ("version" in loadout) {
+    try {
+      const canonicalProfilePaths = loadout.extensionPaths.map((path) => realpathSync(path));
+      const nonCanonicalIndex = canonicalProfilePaths.findIndex(
+        (canonicalPath, index) => canonicalPath !== loadout.extensionPaths[index],
+      );
+      if (nonCanonicalIndex >= 0) {
+        return `sandbox extension path is not canonical: ${loadout.extensionPaths[nonCanonicalIndex]}`;
+      }
+      if (new Set(canonicalProfilePaths).size !== canonicalProfilePaths.length) {
+        return "sandbox snapshot has duplicate canonical extension paths";
+      }
+      const reservedPaths = new Set([
+        realpathSync(runtimeControlPath),
+        SPAWNING_EXTENSION_PATH,
+        realpathSync(activationControlPath),
+      ]);
+      const reservedProfilePath = canonicalProfilePaths.find((path) => reservedPaths.has(path));
+      if (reservedProfilePath) {
+        return `sandbox snapshot includes reserved framework path as a profile extension: ${reservedProfilePath}`;
+      }
+    } catch {
+      return "sandbox extension path could not be canonicalized";
     }
   }
   return null;
@@ -933,12 +973,7 @@ function buildArtifactPath(opts: {
   );
 }
 
-/**
- * Apply model, identity, and a capability restriction to a Pi command.
- * New launches use the framework-first extension-grant branch. Existing
- * snapshots retain the legacy strict branch until slice 02.02 introduces the
- * versioned launch/resume union. Environment values and cwd remain caller-owned.
- */
+/** Apply model, identity, and the snapshot's exact capability mode to a Pi command. */
 function applySandboxToParts(
   parts: string[],
   loadout: SubagentLoadout,
@@ -946,7 +981,6 @@ function applySandboxToParts(
     artifactDir: string;
     name: string;
     artifactId: string;
-    capabilities?: PreparedAgentSandbox;
   },
 ): void {
   if (loadout.model) {
@@ -969,34 +1003,22 @@ function applySandboxToParts(
     parts.push(flag, shellEscape(spPath));
   }
 
-  if (opts.capabilities) {
-    parts.push("--no-extensions", "--no-builtin-tools");
+  const runtimeControlPath = join(SUBAGENTS_DIR, "subagent-runtime-control.ts");
+  parts.push("-e", shellEscape(runtimeControlPath));
 
-    const orderedExtensionPaths = [
-      join(SUBAGENTS_DIR, "subagent-runtime-control.ts"),
-      ...(opts.capabilities.grantSpawning ? [SPAWNING_EXTENSION_PATH] : []),
-      ...opts.capabilities.extensionPaths,
-      join(SUBAGENTS_DIR, "subagent-capability-activation.ts"),
-    ];
-    const seen = new Set<string>();
-    for (const extensionPath of orderedExtensionPaths) {
-      const canonicalPath = resolve(extensionPath);
-      if (seen.has(canonicalPath)) continue;
-      seen.add(canonicalPath);
+  if ("version" in loadout) {
+    parts.push("--no-extensions", "--no-builtin-tools");
+    if (loadout.grantSpawning) parts.push("-e", shellEscape(SPAWNING_EXTENSION_PATH));
+    for (const extensionPath of loadout.extensionPaths) {
       parts.push("-e", shellEscape(extensionPath));
     }
+    parts.push("-e", shellEscape(join(SUBAGENTS_DIR, "subagent-capability-activation.ts")));
     return;
   }
 
-  // Legacy strict snapshots retain their exact --tools replay until the
-  // versioned capability union is introduced in slice 02.02.
-  if (loadout.toolAllowlist !== null) {
-    parts.push("--no-extensions");
-    parts.push("--tools", shellEscape(loadout.toolAllowlist));
-
-    for (const extensionPath of loadout.extensionPaths ?? []) {
-      parts.push("-e", shellEscape(extensionPath));
-    }
+  parts.push("--no-extensions", "--tools", shellEscape(loadout.toolAllowlist));
+  for (const extensionPath of loadout.extensionPaths) {
+    parts.push("-e", shellEscape(extensionPath));
   }
 }
 
@@ -1304,7 +1326,6 @@ export const __test__ = {
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
-  buildSubagentToolAllowlist,
   buildProfileCapabilityEnvironment,
   parseSubagentAllowlist,
   buildSubagentTask,
@@ -1313,6 +1334,7 @@ export const __test__ = {
   validateLoadoutExtensionPaths,
   buildArtifactPath,
   applySandboxToParts,
+  buildResumeCapabilityEnvironment,
   buildPiPromptArgs,
   formatWidgetRightLabel,
   observeRunningSubagent,
@@ -1372,7 +1394,6 @@ async function launchSubagent(
     identity,
     fullTask,
     loadout,
-    capabilities,
     capabilityEnvironment,
   } = prepared;
 
@@ -1492,17 +1513,13 @@ async function launchSubagent(
   // resume snapshot agree.
   const resolvedAgentDir = effectiveAgentDir;
 
-  // Keep writing the compile-compatible strict sidecar during this launch-only
-  // slice. Slice 02.02 replaces it with the versioned extension-grant snapshot.
+  // Persist and apply the same versioned capability snapshot used by resume.
   if (!loadout) throw new Error(`Pi agent "${agentDefs.name}" has no sandbox snapshot`);
   writeSubagentLoadout(subagentSessionFile, loadout);
-
-  // Apply model, identity, and the new framework-first capability grant.
   applySandboxToParts(parts, loadout, {
     artifactDir,
     name: params.name,
     artifactId: id,
-    capabilities,
   });
 
   // Build env prefix: subagent identity + config dir propagation + spawn allowlist
@@ -2343,11 +2360,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Build pi resume command
         const parts = ["pi", "--session", shellEscape(sessionPath)];
 
-        // Legacy strict resumes keep their existing runtime control path. The
-        // trailing capability activator belongs only to new versioned mode.
-        const runtimeControlPath = join(SUBAGENTS_DIR, "subagent-runtime-control.ts");
-        parts.push("-e", shellEscape(runtimeControlPath));
-
         const sessionId = ctx.sessionManager.getSessionId();
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
         activityFile = getSubagentActivityFile(artifactDir, id);
@@ -2371,17 +2383,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           parts.push(shellEscape(`@${resumeMsgFile}`));
         }
 
-        // Build env prefix — replay the snapshot's config dir + spawn whitelist
-        // so the resumed process resolves the same agents/extensions and keeps
-        // the same nested-spawn restriction it originally ran with.
+        // Build env prefix from the snapshot only. New-mode capability values
+        // use the same encoding as initial launch; both modes explicitly
+        // override nested-agent inheritance, including deny-all.
         const resumeEnvParts: string[] = [];
-        const resumeAgentDir = loadout.agentDir ?? process.env.PI_CODING_AGENT_DIR ?? null;
-        if (resumeAgentDir) {
-          resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellEscape(resumeAgentDir)}`);
-        }
-        if (loadout.spawnable && loadout.spawnable.length > 0) {
-          resumeEnvParts.push(`PI_SUBAGENT_ALLOWED=${shellEscape(loadout.spawnable.join(","))}`);
-        }
+        resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellEscape(loadout.agentDir)}`);
+        resumeEnvParts.push(...buildResumeCapabilityEnvironment(loadout));
         if (loadout.agent) {
           resumeEnvParts.push(`PI_SUBAGENT_AGENT=${shellEscape(loadout.agent)}`);
         }

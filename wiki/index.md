@@ -29,6 +29,7 @@ Durable current-state codebase knowledge. Read this file first when answering co
 - [Profile-hardening implementation session](./dreams/2026-09-09-1616-completed-session.md): Completed user-managed profile migration, fail-closed runtime hardening, repeated review corrections, verification, and checkpoint handoff.
 - [Profile capability-resolution session](./dreams/2026-09-10-1503-completed-session.md): Completed and independently verified T01 profile schema and asynchronous package resolution; Current advanced to `02.01` with T02 and T03 pending.
 - [Child capability-launch session](./dreams/2026-09-10-1752-completed-session.md): Completed and independently verified slice 02.01 child isolation, protected extension ordering, dynamic activation, and nesting inheritance; Current advanced to `02.02`.
+- [Versioned resume session](./dreams/2026-09-10-1843-completed-session.md): Completed slice 02.02 and the high-assurance T02 gate with strict versioned snapshots, exact new-mode resume, legacy compatibility, and Current advanced to `03.01`.
 
 ## Stale or needs review
 

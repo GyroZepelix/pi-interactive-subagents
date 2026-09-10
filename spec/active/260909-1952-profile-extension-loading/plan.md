@@ -120,7 +120,7 @@ Diagnostics identify the profile file and relevant field or selector and explain
   - Acceptance: Valid profiles resolve deterministic built-in and extension loadouts; every malformed, unavailable, disabled, escaping, or out-of-scope grant is excluded before pane creation without package installation or fallback privilege expansion.
   - Verification: `node --test --test-name-pattern='subagent discovery' test/test.ts`, then `npm test`
 
-- [ ] T02: Implement and verify the complete capability lifecycle
+- [x] T02: Implement and verify the complete capability lifecycle
   - Depends on: T01
   - Scope: Apply resolved capabilities to isolated child startup, activate selected built-ins before model invocation, preserve extension ordering and nesting controls, remove legacy mappings/hooks, add versioned snapshots, and support safe new and legacy resume.
   - Expected areas: `pi-extension/subagents/index.ts`, `pi-extension/subagents/subagent-runtime-control.ts`, `pi-extension/subagents/subagent-capability-activation.ts`, `pi-extension/subagents/session.ts`, `test/test.ts`
@@ -189,8 +189,9 @@ Diagnostics identify the profile file and relevant field or selector and explain
 ## Progress
 
 - [x] Planning complete and confirmed.
-- [ ] Implementation not started.
-- [ ] Verification not run.
+- [x] Implementation in progress through T02.
+- [x] T01 and T02 segment verification passed.
+- [ ] Final whole-plan verification not run.
 
 ## Execution handoff
 
