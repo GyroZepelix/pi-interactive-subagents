@@ -5,13 +5,18 @@ import {
   writeFileSync,
   readFileSync,
   mkdirSync,
+  realpathSync,
   rmSync,
   existsSync,
   symlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  DefaultPackageManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import {
@@ -176,6 +181,23 @@ function writeAgentFile(
 ) {
   mkdirSync(agentsDir, { recursive: true });
   writeFileSync(join(agentsDir, `${name}.md`), `---\n${frontmatter}\n---\n\n${body}\n`);
+}
+
+function writePackageFixture(packageRoot: string, extensionPaths: readonly string[]) {
+  mkdirSync(packageRoot, { recursive: true });
+  writeFileSync(
+    join(packageRoot, "package.json"),
+    JSON.stringify({
+      name: "profile-extension-fixture",
+      version: "1.0.0",
+      pi: { extensions: extensionPaths },
+    }),
+  );
+  for (const extensionPath of extensionPaths) {
+    const absolutePath = join(packageRoot, extensionPath);
+    mkdirSync(dirname(absolutePath), { recursive: true });
+    writeFileSync(absolutePath, "export default function () {}\n");
+  }
 }
 
 async function withIsolatedAgentEnv(
@@ -1175,7 +1197,7 @@ describe("subagent discovery", () => {
         ].join("\n"),
       );
 
-      const loaded = testApi.findAgentDefinition("lineage-mode-test-agent");
+      const loaded = await testApi.findAgentDefinition("lineage-mode-test-agent");
       assert.ok(loaded, "expected agent to load");
       assert.equal(loaded.sessionMode, "lineage-only");
     });
@@ -1202,10 +1224,10 @@ describe("subagent discovery", () => {
         ].join("\n"),
       );
 
-      const loadedTrue = testApi.findAgentDefinition("interactive-true-test-agent");
+      const loadedTrue = await testApi.findAgentDefinition("interactive-true-test-agent");
       assert.equal(loadedTrue?.interactive, true);
 
-      const loadedFalse = testApi.findAgentDefinition("interactive-false-test-agent");
+      const loadedFalse = await testApi.findAgentDefinition("interactive-false-test-agent");
       assert.equal(loadedFalse?.interactive, false);
     });
   });
@@ -1221,7 +1243,7 @@ describe("subagent discovery", () => {
         ].join("\n"),
       );
 
-      const loaded = testApi.findAgentDefinition("interactive-unset-test-agent");
+      const loaded = await testApi.findAgentDefinition("interactive-unset-test-agent");
       assert.equal(loaded?.interactive, undefined);
     });
   });
@@ -1278,7 +1300,7 @@ describe("subagent discovery", () => {
           "subagent_agents: [inspector, implementer]",
         ].join("\n"),
       );
-      const coordinator = testApi.findAgentDefinition("coordinator");
+      const coordinator = await testApi.findAgentDefinition("coordinator");
       assert.ok(coordinator);
       assert.deepEqual(coordinator.subagentAgents, ["inspector", "implementer"]);
 
@@ -1396,6 +1418,712 @@ describe("subagent discovery", () => {
     ]);
   });
 
+  it("resolves enabled global package resources with selector order and canonical deduplication", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir, globalAgentsDir }) => {
+      const source = "./packages/global-tools";
+      const packageRoot = join(globalDir, "packages", "global-tools");
+      const absoluteSource = packageRoot;
+      const otherSource = "./packages/other-tools";
+      const otherRoot = join(globalDir, "packages", "other-tools");
+      writePackageFixture(packageRoot, [
+        "extensions/one.ts",
+        "extensions/two.ts",
+        "extensions/disabled.ts",
+      ]);
+      writePackageFixture(otherRoot, ["extensions/other.ts"]);
+      const enabledFilter = ["extensions/*.ts", "!extensions/disabled.ts"];
+      writeFileSync(
+        join(globalDir, "settings.json"),
+        JSON.stringify({
+          packages: [
+            { source, extensions: enabledFilter },
+            { source: absoluteSource, extensions: enabledFilter },
+            otherSource,
+          ],
+        }),
+      );
+
+      writeAgentFile(globalAgentsDir, "all", `name: all\nextensions:\n  - package: ${source}`);
+      writeAgentFile(
+        globalAgentsDir,
+        "ordered",
+        `name: ordered\nextensions:\n  - package: ${source}\n    paths: [extensions/two.ts, extensions/one.ts]`,
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "deduped",
+        [
+          "name: deduped",
+          "extensions:",
+          `  - package: ${source}`,
+          `  - package: ${JSON.stringify(absoluteSource)}`,
+        ].join("\n"),
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "package-order",
+        [
+          "name: package-order",
+          "extensions:",
+          `  - package: ${otherSource}`,
+          `  - package: ${source}`,
+        ].join("\n"),
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "disabled",
+        `name: disabled\nextensions:\n  - package: ${source}\n    paths: [extensions/disabled.ts]`,
+      );
+
+      const discovery = await discoverAgentDefinitions({
+        cwd: globalDir,
+        projectTrusted: false,
+      });
+      const one = realpathSync(join(packageRoot, "extensions", "one.ts"));
+      const two = realpathSync(join(packageRoot, "extensions", "two.ts"));
+      const other = realpathSync(join(otherRoot, "extensions", "other.ts"));
+      assert.deepEqual(
+        discovery.agents.find((agent) => agent.name === "all")?.extensionPaths,
+        [one, two],
+      );
+      assert.deepEqual(
+        discovery.agents.find((agent) => agent.name === "ordered")?.extensionPaths,
+        [two, one],
+      );
+      assert.deepEqual(
+        discovery.agents.find((agent) => agent.name === "deduped")?.extensionPaths,
+        [one, two],
+      );
+      assert.deepEqual(
+        discovery.agents.find((agent) => agent.name === "package-order")?.extensionPaths,
+        [other, one, two],
+      );
+      assert.equal(discovery.agents.some((agent) => agent.name === "disabled"), false);
+      assert.ok(
+        discovery.diagnostics.some((entry) =>
+          entry.filePath.endsWith("disabled.md") &&
+          entry.field === "extensions[0].paths[0]" &&
+          /not an enabled extension resource/.test(entry.message)
+        ),
+      );
+    });
+  });
+
+  it("contains global and trusted project package scope with project-first fallback", async () => {
+    await withIsolatedAgentEnv(async ({
+      projectDir,
+      projectAgentsDir,
+      globalDir,
+      globalAgentsDir,
+    }) => {
+      const sharedSource = "./packages/shared";
+      const fallbackSource = "./packages/fallback";
+      const projectOnlySource = "./packages/project-only";
+      const globalSharedRoot = join(globalDir, "packages", "shared");
+      const projectSharedRoot = join(projectDir, ".pi", "packages", "shared");
+      const projectOnlyRoot = join(projectDir, ".pi", "packages", "project-only");
+      const fallbackRoot = join(globalDir, "packages", "fallback");
+      writePackageFixture(globalSharedRoot, ["extensions/global.ts"]);
+      writePackageFixture(projectSharedRoot, ["extensions/project.ts"]);
+      writePackageFixture(projectOnlyRoot, ["extensions/project-only.ts"]);
+      writePackageFixture(fallbackRoot, ["extensions/fallback.ts"]);
+      writeFileSync(
+        join(globalDir, "settings.json"),
+        JSON.stringify({ packages: [sharedSource, fallbackSource] }),
+      );
+      writeFileSync(
+        join(projectDir, ".pi", "settings.json"),
+        JSON.stringify({ packages: [sharedSource, projectOnlySource] }),
+      );
+
+      writeAgentFile(
+        globalAgentsDir,
+        "global-scope",
+        `name: global-scope\nextensions:\n  - package: ${sharedSource}`,
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "project-package-from-global-profile",
+        `name: project-package-from-global-profile\nextensions:\n  - package: ${projectOnlySource}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "project-scope",
+        `name: project-scope\nextensions:\n  - package: ${sharedSource}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "global-fallback",
+        `name: global-fallback\nextensions:\n  - package: ${fallbackSource}`,
+      );
+
+      const nestedCwd = join(projectDir, "src", "nested");
+      mkdirSync(nestedCwd, { recursive: true });
+      const trusted = await discoverAgentDefinitions({ cwd: nestedCwd, projectTrusted: true });
+      assert.equal(trusted.projectAgentsDir, projectAgentsDir);
+      assert.deepEqual(
+        trusted.agents.find((agent) => agent.name === "global-scope")?.extensionPaths,
+        [realpathSync(join(globalSharedRoot, "extensions", "global.ts"))],
+      );
+      assert.deepEqual(
+        trusted.agents.find((agent) => agent.name === "project-scope")?.extensionPaths,
+        [realpathSync(join(projectSharedRoot, "extensions", "project.ts"))],
+      );
+      assert.deepEqual(
+        trusted.agents.find((agent) => agent.name === "global-fallback")?.extensionPaths,
+        [realpathSync(join(fallbackRoot, "extensions", "fallback.ts"))],
+      );
+      assert.equal(
+        trusted.agents.some((agent) => agent.name === "project-package-from-global-profile"),
+        false,
+      );
+      assert.ok(trusted.diagnostics.some((entry) =>
+        entry.filePath.endsWith("project-package-from-global-profile.md") &&
+        /permitted global settings/.test(entry.message)
+      ));
+
+      const untrusted = await discoverAgentDefinitions({ cwd: nestedCwd, projectTrusted: false });
+      assert.equal(untrusted.projectAgentsDir, null);
+      assert.equal(untrusted.agents.some((agent) => agent.name === "project-scope"), false);
+      assert.deepEqual(
+        untrusted.agents.find((agent) => agent.name === "global-scope")?.extensionPaths,
+        [realpathSync(join(globalSharedRoot, "extensions", "global.ts"))],
+      );
+    });
+  });
+
+  it("preserves inherited resources and exclusions for project autoload deltas", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir }) => {
+      const packageRoot = join(globalDir, "packages", "delta-tools");
+      const source = packageRoot;
+      const filePackageRoot = join(globalDir, "packages", "file-delta-tools");
+      const fileSource = pathToFileURL(filePackageRoot).href;
+      writePackageFixture(packageRoot, ["extensions/one.ts", "extensions/two.ts"]);
+      writePackageFixture(filePackageRoot, ["extensions/one.ts", "extensions/two.ts"]);
+      writeFileSync(
+        join(globalDir, "settings.json"),
+        JSON.stringify({ packages: [source, fileSource] }),
+      );
+      writeFileSync(
+        join(projectDir, ".pi", "settings.json"),
+        JSON.stringify({
+          packages: [
+            {
+              source,
+              autoload: false,
+              extensions: ["-extensions/two.ts"],
+            },
+            {
+              source: fileSource,
+              autoload: false,
+              extensions: ["-extensions/two.ts"],
+            },
+          ],
+        }),
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "delta-inherited",
+        `name: delta-inherited\nextensions:\n  - package: ${JSON.stringify(source)}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "file-delta-inherited",
+        `name: file-delta-inherited\nextensions:\n  - package: ${JSON.stringify(fileSource)}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "delta-excluded",
+        [
+          "name: delta-excluded",
+          "extensions:",
+          `  - package: ${JSON.stringify(source)}`,
+          "    paths: [extensions/two.ts]",
+        ].join("\n"),
+      );
+
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.deepEqual(
+        discovery.agents.find((agent) => agent.name === "delta-inherited")?.extensionPaths,
+        [realpathSync(join(packageRoot, "extensions", "one.ts"))],
+      );
+      assert.deepEqual(
+        discovery.agents.find((agent) => agent.name === "file-delta-inherited")?.extensionPaths,
+        [realpathSync(join(filePackageRoot, "extensions", "one.ts"))],
+      );
+      assert.equal(discovery.agents.some((agent) => agent.name === "delta-excluded"), false);
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("delta-excluded.md") &&
+        entry.field === "extensions[0].paths[0]" &&
+        /not an enabled extension resource/.test(entry.message)
+      ));
+    });
+  });
+
+  it("uses Pi package identity for autoload delta inheritance", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir }) => {
+      const previousHome = process.env.HOME;
+      const isolatedHome = join(dirname(projectDir), "home");
+      process.env.HOME = isolatedHome;
+
+      try {
+        const npmSource = "npm:@profile-fixture/delta@1.0.0";
+        const npmRoot = join(globalDir, "npm", "node_modules", "@profile-fixture", "delta");
+        const gitSource = "git:https://github.com/profile-fixture/delta.git";
+        const gitRoot = join(globalDir, "git", "github.com", "profile-fixture", "delta");
+        const versionedNpmGlobalSource = "npm:@profile-fixture/versioned-delta@1.0.0";
+        const versionedNpmProjectSource = "npm:@profile-fixture/versioned-delta@2.0.0";
+        const versionedNpmRoot = join(
+          globalDir,
+          "npm",
+          "node_modules",
+          "@profile-fixture",
+          "versioned-delta",
+        );
+        const protocolGitGlobalSource =
+          "git:https://github.com/profile-fixture/protocol-delta.git";
+        const protocolGitProjectSource =
+          "git:ssh://git@github.com/profile-fixture/protocol-delta.git";
+        const protocolGitRoot = join(
+          globalDir,
+          "git",
+          "github.com",
+          "profile-fixture",
+          "protocol-delta",
+        );
+        const tildeSource = "~/delta-tools";
+        const tildeRoot = join(isolatedHome, "delta-tools");
+        const invalidGitSource = "git:https://";
+        const windowsAbsoluteSource = "C:\\delta-tools";
+        const windowsTildeSource = "~\\delta-tools";
+        const sources = [
+          npmSource,
+          gitSource,
+          tildeSource,
+          invalidGitSource,
+          windowsAbsoluteSource,
+          windowsTildeSource,
+        ];
+
+        writePackageFixture(npmRoot, ["extensions/one.ts", "extensions/two.ts"]);
+        writePackageFixture(gitRoot, ["extensions/one.ts", "extensions/two.ts"]);
+        writePackageFixture(versionedNpmRoot, ["extensions/one.ts", "extensions/two.ts"]);
+        writePackageFixture(protocolGitRoot, ["extensions/one.ts", "extensions/two.ts"]);
+        writePackageFixture(tildeRoot, ["extensions/one.ts", "extensions/two.ts"]);
+        writePackageFixture(resolve(globalDir, invalidGitSource), ["extensions/global.ts"]);
+        writePackageFixture(resolve(globalDir, windowsAbsoluteSource), ["extensions/global.ts"]);
+        writePackageFixture(resolve(globalDir, windowsTildeSource), ["extensions/global.ts"]);
+
+        writeFileSync(
+          join(globalDir, "settings.json"),
+          JSON.stringify({
+            packages: [
+              ...sources,
+              versionedNpmGlobalSource,
+              protocolGitGlobalSource,
+            ],
+          }),
+        );
+        writeFileSync(
+          join(projectDir, ".pi", "settings.json"),
+          JSON.stringify({
+            packages: [
+              ...sources.map((source) => ({
+                source,
+                autoload: false,
+                extensions: ["-extensions/two.ts"],
+              })),
+              {
+                source: versionedNpmProjectSource,
+                autoload: false,
+                extensions: ["-extensions/two.ts"],
+              },
+              {
+                source: protocolGitProjectSource,
+                autoload: false,
+                extensions: ["-extensions/two.ts"],
+              },
+            ],
+          }),
+        );
+
+        for (const [name, source] of [
+          ["npm-delta", npmSource],
+          ["git-delta", gitSource],
+          ["tilde-delta", tildeSource],
+          ["versioned-npm-delta", versionedNpmProjectSource],
+          ["protocol-git-delta", protocolGitProjectSource],
+          ["invalid-git-delta", invalidGitSource],
+          ["windows-absolute-delta", windowsAbsoluteSource],
+          ["windows-tilde-delta", windowsTildeSource],
+        ] as const) {
+          writeAgentFile(
+            projectAgentsDir,
+            name,
+            `name: ${name}\nextensions:\n  - package: ${JSON.stringify(source)}`,
+          );
+        }
+
+        const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+        assert.deepEqual(
+          discovery.agents.find((agent) => agent.name === "npm-delta")?.extensionPaths,
+          [realpathSync(join(npmRoot, "extensions", "one.ts"))],
+        );
+        assert.deepEqual(
+          discovery.agents.find((agent) => agent.name === "git-delta")?.extensionPaths,
+          [realpathSync(join(gitRoot, "extensions", "one.ts"))],
+        );
+        assert.deepEqual(
+          discovery.agents.find((agent) => agent.name === "tilde-delta")?.extensionPaths,
+          [realpathSync(join(tildeRoot, "extensions", "one.ts"))],
+        );
+        assert.deepEqual(
+          discovery.agents.find((agent) => agent.name === "versioned-npm-delta")?.extensionPaths,
+          [realpathSync(join(versionedNpmRoot, "extensions", "one.ts"))],
+        );
+        assert.deepEqual(
+          discovery.agents.find((agent) => agent.name === "protocol-git-delta")?.extensionPaths,
+          [realpathSync(join(protocolGitRoot, "extensions", "one.ts"))],
+        );
+        for (const name of [
+          "invalid-git-delta",
+          "windows-absolute-delta",
+          "windows-tilde-delta",
+        ]) {
+          assert.equal(discovery.agents.some((agent) => agent.name === name), false);
+          assert.ok(
+            discovery.diagnostics.some((entry) =>
+              entry.filePath.endsWith(`${name}.md`) &&
+              entry.field?.startsWith("extensions[0]")
+            ),
+            `${name} should fail closed with an extension diagnostic`,
+          );
+        }
+      } finally {
+        restoreEnvVar("HOME", previousHome);
+      }
+    });
+  });
+
+  it("fails package resolution closed without installs, settings writes, or global fallback", async () => {
+    await withIsolatedAgentEnv(async ({
+      projectDir,
+      projectAgentsDir,
+      globalDir,
+      globalAgentsDir,
+    }) => {
+      const projectConfigDir = join(projectDir, ".pi");
+      const disabledSource = "./packages/disabled";
+      const safeSource = "./packages/safe";
+      const escapeSource = "./packages/escape";
+      const missingSource = "npm:@profile-fixture/missing@0.0.0";
+      const emptySource = "npm:@profile-fixture/empty@1.0.0";
+      writePackageFixture(join(projectConfigDir, "packages", "disabled"), ["extensions/tool.ts"]);
+      writePackageFixture(join(projectConfigDir, "packages", "safe"), ["extensions/tool.ts"]);
+
+      const escapeRoot = join(projectConfigDir, "packages", "escape");
+      mkdirSync(escapeRoot, { recursive: true });
+      writeFileSync(
+        join(escapeRoot, "package.json"),
+        JSON.stringify({
+          name: "escape-fixture",
+          version: "1.0.0",
+          pi: { extensions: ["escape.ts"] },
+        }),
+      );
+      const outsideExtension = join(projectConfigDir, "outside.ts");
+      writeFileSync(outsideExtension, "export default function () {}\n");
+      symlinkSync(outsideExtension, join(escapeRoot, "escape.ts"));
+
+      const emptyRoot = join(
+        projectConfigDir,
+        "npm",
+        "node_modules",
+        "@profile-fixture",
+        "empty",
+      );
+      mkdirSync(emptyRoot, { recursive: true });
+      writeFileSync(
+        join(emptyRoot, "package.json"),
+        JSON.stringify({ name: "@profile-fixture/empty", version: "1.0.0" }),
+      );
+
+      writeFileSync(join(globalDir, "settings.json"), JSON.stringify({ packages: [] }));
+      const projectSettingsPath = join(projectConfigDir, "settings.json");
+      const projectSettings = JSON.stringify({
+        packages: [
+          { source: disabledSource, extensions: [] },
+          safeSource,
+          escapeSource,
+          missingSource,
+          emptySource,
+        ],
+      });
+      writeFileSync(projectSettingsPath, projectSettings);
+
+      writeAgentFile(globalAgentsDir, "shadowed", "name: shadowed");
+      writeAgentFile(
+        projectAgentsDir,
+        "shadowed",
+        `name: shadowed\nextensions:\n  - package: ${missingSource}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "disabled-package",
+        `name: disabled-package\nextensions:\n  - package: ${disabledSource}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "absent-selector",
+        `name: absent-selector\nextensions:\n  - package: ${safeSource}\n    paths: [extensions/missing.ts]`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "escaping-resource",
+        `name: escaping-resource\nextensions:\n  - package: ${escapeSource}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "empty-package",
+        `name: empty-package\nextensions:\n  - package: ${emptySource}`,
+      );
+
+      const missingInstall = join(
+        projectConfigDir,
+        "npm",
+        "node_modules",
+        "@profile-fixture",
+        "missing",
+      );
+      assert.equal(existsSync(missingInstall), false);
+
+      const packagePrototype = DefaultPackageManager.prototype as any;
+      const settingsPrototype = SettingsManager.prototype as any;
+      const originalResolve = packagePrototype.resolve;
+      const restoredMethods: Array<[any, string, any]> = [];
+      const missingActions: Array<{ source: string; action: string }> = [];
+      packagePrototype.resolve = function (onMissing: (source: string) => Promise<string>) {
+        assert.equal(typeof onMissing, "function");
+        return originalResolve.call(this, async (source: string) => {
+          const action = await onMissing(source);
+          missingActions.push({ source, action });
+          return action;
+        });
+      };
+      for (const [target, methods] of [
+        [packagePrototype, [
+          "installParsedSource",
+          "runCommand",
+          "runCommandCapture",
+          "spawnCommand",
+          "spawnCaptureCommand",
+        ]],
+        [settingsPrototype, ["setPackages", "setProjectPackages", "flush"]],
+      ] as const) {
+        for (const method of methods) {
+          const original = target[method];
+          restoredMethods.push([target, method, original]);
+          target[method] = () => {
+            throw new Error(`forbidden package-resolution side effect: ${method}`);
+          };
+        }
+      }
+
+      let discovery: Awaited<ReturnType<typeof discoverAgentDefinitions>>;
+      try {
+        discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      } finally {
+        packagePrototype.resolve = originalResolve;
+        for (const [target, method, original] of restoredMethods) target[method] = original;
+      }
+      assert.deepEqual(missingActions, [{ source: missingSource, action: "skip" }]);
+      assert.equal(readFileSync(projectSettingsPath, "utf8"), projectSettings);
+      assert.equal(existsSync(missingInstall), false);
+      for (const name of [
+        "shadowed",
+        "disabled-package",
+        "absent-selector",
+        "escaping-resource",
+        "empty-package",
+      ]) {
+        assert.equal(discovery.agents.some((agent) => agent.name === name), false, name);
+      }
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("shadowed.md") && /not installed/.test(entry.message)
+      ));
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("disabled-package.md") && /no enabled extension/.test(entry.message)
+      ));
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("absent-selector.md") && /does not exist/.test(entry.message)
+      ));
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("escaping-resource.md") && /escapes package root/.test(entry.message)
+      ));
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("empty-package.md") && /no enabled extension/.test(entry.message)
+      ));
+    });
+  });
+
+  it("contains malformed package settings as per-profile diagnostics", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
+      const source = "./packages/global-fallback";
+      const packageRoot = join(globalDir, "packages", "global-fallback");
+      writePackageFixture(packageRoot, ["extensions/tool.ts"]);
+      writeFileSync(join(globalDir, "settings.json"), JSON.stringify({ packages: [source] }));
+      writeFileSync(join(projectDir, ".pi", "settings.json"), "{ invalid json");
+      writeAgentFile(
+        globalAgentsDir,
+        "global-valid",
+        `name: global-valid\nextensions:\n  - package: ${source}`,
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "project-fallback-blocked",
+        `name: project-fallback-blocked\nextensions:\n  - package: ${source}`,
+      );
+      writeAgentFile(projectAgentsDir, "project-no-extensions", "name: project-no-extensions");
+
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.deepEqual(
+        discovery.agents.find((agent) => agent.name === "global-valid")?.extensionPaths,
+        [realpathSync(join(packageRoot, "extensions", "tool.ts"))],
+      );
+      assert.ok(discovery.agents.some((agent) => agent.name === "project-no-extensions"));
+      assert.equal(
+        discovery.agents.some((agent) => agent.name === "project-fallback-blocked"),
+        false,
+      );
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("project-fallback-blocked.md") &&
+        entry.field === "extensions[0].package" &&
+        /cannot determine trusted project package overrides safely/.test(entry.message)
+      ));
+    });
+
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
+      writeFileSync(join(globalDir, "settings.json"), JSON.stringify({ packages: {} }));
+      writeFileSync(
+        join(projectDir, ".pi", "settings.json"),
+        JSON.stringify({
+          packages: [
+            { source: "./broken", extensions: {} },
+            { source: "./typo", extensons: [] },
+            null,
+          ],
+        }),
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "bad-global-settings",
+        "name: bad-global-settings\nextensions:\n  - package: ./anything",
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "bad-project-entry",
+        "name: bad-project-entry\nextensions:\n  - package: ./broken",
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "typo-project-entry",
+        "name: typo-project-entry\nextensions:\n  - package: ./typo",
+      );
+      writeAgentFile(projectAgentsDir, "still-valid", "name: still-valid");
+
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.ok(discovery.agents.some((agent) => agent.name === "still-valid"));
+      assert.equal(discovery.agents.some((agent) => agent.name === "bad-global-settings"), false);
+      assert.equal(discovery.agents.some((agent) => agent.name === "bad-project-entry"), false);
+      assert.equal(discovery.agents.some((agent) => agent.name === "typo-project-entry"), false);
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("bad-global-settings.md") && /packages must be an array/.test(entry.message)
+      ));
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("bad-project-entry.md") &&
+        /project package configuration|project package overrides/.test(entry.message)
+      ));
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("typo-project-entry.md") &&
+        /unsupported field "extensons"/.test(entry.message)
+      ));
+    });
+  });
+
+  it("excludes a profile when Pi package resolution throws", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
+      const source = "./packages/throws";
+      writeFileSync(
+        join(projectDir, ".pi", "settings.json"),
+        JSON.stringify({ packages: [source] }),
+      );
+      writeAgentFile(
+        projectAgentsDir,
+        "resolver-error",
+        `name: resolver-error\nextensions:\n  - package: ${source}`,
+      );
+
+      const prototype = DefaultPackageManager.prototype as any;
+      const originalResolve = prototype.resolve;
+      prototype.resolve = async () => {
+        throw new Error("fixture resolver failure");
+      };
+      try {
+        const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+        assert.equal(discovery.agents.some((agent) => agent.name === "resolver-error"), false);
+        assert.ok(discovery.diagnostics.some((entry) =>
+          entry.filePath.endsWith("resolver-error.md") &&
+          entry.field === "extensions[0].package" &&
+          /fixture resolver failure/.test(entry.message)
+        ));
+      } finally {
+        prototype.resolve = originalResolve;
+      }
+    });
+  });
+
+  it("shares asynchronous resolution diagnostics across list, spawn, and command paths", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
+      const source = "npm:@profile-fixture/unavailable@0.0.0";
+      const settingsPath = join(projectDir, ".pi", "settings.json");
+      writeFileSync(settingsPath, JSON.stringify({ packages: [source] }));
+      writeAgentFile(
+        projectAgentsDir,
+        "unavailable",
+        `name: unavailable\nextensions:\n  - package: ${source}`,
+      );
+      const { api, registeredTools, registeredCommands, sentUserMessages } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const context = createMockContext(projectDir, true);
+      const notifications: string[] = [];
+      context.ui.notify = (message: string) => notifications.push(message);
+
+      const listTool = registeredTools.find((tool) => tool.name === "subagents_list");
+      const spawnTool = registeredTools.find((tool) => tool.name === "subagent");
+      const command = registeredCommands.find((entry) => entry.name === "subagent");
+      assert.ok(listTool && spawnTool && command);
+
+      const listed = await listTool.execute("list", {}, undefined, undefined, context);
+      const spawned = await spawnTool.execute(
+        "spawn",
+        { agent: "unavailable", task: "test" },
+        undefined,
+        undefined,
+        context,
+      );
+      await command.handler("unavailable test", context);
+
+      assert.equal(listed.details?.agents.length, 0);
+      assert.equal(spawned.details?.error, "unknown agent");
+      assert.equal(sentUserMessages.length, 0);
+      for (const text of [listed.content[0].text, spawned.content[0].text, notifications[0]]) {
+        assert.match(text, /unavailable/);
+        assert.match(text, /extensions\[0\]\.package/);
+        assert.match(text, /not installed/);
+      }
+    });
+  });
+
   it("rejects unknown built-ins and every malformed extension shape", () => {
     const invalidCases = [
       { name: "extensions mapping", yaml: "extensions: { package: pkg }", field: "extensions" },
@@ -1482,7 +2210,7 @@ describe("subagent discovery", () => {
         ].join("\n"),
       );
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.equal(
         discovery.agents.some((agent) => agent.name === "invalid-mode-test-agent"),
         false,
@@ -1632,7 +2360,7 @@ describe("subagent discovery", () => {
         "Canonical body.",
       );
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       const agent = discovery.agents.find((entry) => entry.name === "declared-name");
       assert.ok(agent);
       assert.equal(agent.filePath, join(projectAgentsDir, "filename-only.md"));
@@ -1687,11 +2415,11 @@ describe("subagent discovery", () => {
       const nested = join(projectDir, "src", "deep");
       mkdirSync(nested, { recursive: true });
 
-      const trusted = discoverAgentDefinitions({ cwd: nested, projectTrusted: true });
+      const trusted = await discoverAgentDefinitions({ cwd: nested, projectTrusted: true });
       assert.equal(trusted.projectAgentsDir, projectAgentsDir);
       assert.equal(trusted.agents.find((agent) => agent.name === "shared")?.model, "provider/project");
 
-      const untrusted = discoverAgentDefinitions({ cwd: nested, projectTrusted: false });
+      const untrusted = await discoverAgentDefinitions({ cwd: nested, projectTrusted: false });
       assert.equal(untrusted.projectAgentsDir, null);
       assert.equal(untrusted.agents.find((agent) => agent.name === "shared")?.model, "provider/global");
     });
@@ -1702,7 +2430,7 @@ describe("subagent discovery", () => {
       writeAgentFile(globalAgentsDir, "shared", "name: shared\nmodel: provider/global\nbuiltin-tools: [read]");
       writeAgentFile(projectAgentsDir, "shared-local", "name: shared\nbuiltin-tools: [read, 42]");
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.equal(discovery.agents.some((agent) => agent.name === "shared"), false);
       assert.ok(discovery.diagnostics.some((entry) => entry.field === "builtin-tools"));
     });
@@ -1717,7 +2445,7 @@ describe("subagent discovery", () => {
         "---\nname: target\nbuiltin-tools: [read\n---\nbody",
       );
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.equal(discovery.agents.some((agent) => agent.name === "target"), false);
       assert.equal(discovery.agents.some((agent) => agent.name === "neighbor"), true);
       assert.ok(
@@ -1735,7 +2463,7 @@ describe("subagent discovery", () => {
       writeAgentFile(projectAgentsDir, "local", "name: local\nbuiltin-tools: []");
       writeAgentFile(projectAgentsDir, "override", "name: [target]\nbuiltin-tools: []");
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.deepEqual(discovery.agents.map((agent) => agent.name), ["local"]);
       assert.ok(
         discovery.diagnostics.some((entry) =>
@@ -1765,7 +2493,7 @@ describe("subagent discovery", () => {
       assert.equal(parsed.agent, null);
       assert.equal(parsed.identityUncertain, true);
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.deepEqual(discovery.agents.map((agent) => agent.name), ["local"]);
       assert.ok(
         discovery.diagnostics.some((entry) =>
@@ -1782,7 +2510,7 @@ describe("subagent discovery", () => {
       writeAgentFile(projectAgentsDir, "a-valid", "name: duplicate\nbuiltin-tools: [read]");
       writeAgentFile(projectAgentsDir, "z-invalid", "name: duplicate\nbuiltin-tools: [read, 42]");
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.equal(discovery.agents.some((agent) => agent.name === "duplicate"), false);
       assert.ok(discovery.diagnostics.some((entry) => entry.filePath.endsWith("z-invalid.md")));
     });
@@ -1793,7 +2521,7 @@ describe("subagent discovery", () => {
       writeAgentFile(projectAgentsDir, "valid", "name: valid\nbuiltin-tools: []");
       writeFileSync(join(projectAgentsDir, "broken.md"), "---\nname: [unterminated\n---\nbody");
 
-      const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.ok(discovery.agents.some((agent) => agent.name === "valid"));
       assert.ok(
         discovery.diagnostics.some((entry) =>
@@ -1868,7 +2596,7 @@ describe("subagent discovery", () => {
         "configured-agent",
         "name: configured-agent\nmodel: provider/profile\nbuiltin-tools: []\ncwd: profile-dir",
       );
-      const agent = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true })
+      const agent = (await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true }))
         .agents.find((entry) => entry.name === "configured-agent");
       assert.ok(agent);
       const sandbox = testApi.prepareAgentSandbox(agent);
@@ -2217,7 +2945,7 @@ describe("subagent discovery", () => {
       assert.equal(agents.some((agent: any) => agent.name === "hidden-discovery-test-agent"), false);
       assert.doesNotMatch(result.content[0].text, /hidden-discovery-test-agent/);
 
-      const loaded = testApi.findAgentDefinition("hidden-discovery-test-agent");
+      const loaded = await testApi.findAgentDefinition("hidden-discovery-test-agent");
       assert.ok(loaded, "expected hidden agent to remain directly loadable");
       assert.equal(loaded.model, "anthropic/test-hidden");
       assert.equal(loaded.body, "You are the hidden agent.");
@@ -2267,7 +2995,7 @@ describe("subagent discovery", () => {
       assert.equal(agents.some((agent: any) => agent.name === "shadowed-discovery-test-agent"), false);
       assert.doesNotMatch(result.content[0].text, /shadowed-discovery-test-agent/);
 
-      const loaded = testApi.findAgentDefinition("shadowed-discovery-test-agent");
+      const loaded = await testApi.findAgentDefinition("shadowed-discovery-test-agent");
       assert.ok(loaded, "expected project override to remain directly loadable");
       assert.equal(loaded.model, "anthropic/test-project");
       assert.equal(loaded.body, "You are the project hidden agent.");

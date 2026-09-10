@@ -252,7 +252,7 @@ const SUBAGENT_ALLOWLIST: Set<string> | null = (() => {
   return list.length > 0 ? new Set(list) : null;
 })();
 
-function discoverDefinitionsForContext(
+async function discoverDefinitionsForContext(
   ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">,
 ) {
   return discoverAgentDefinitions({
@@ -262,13 +262,15 @@ function discoverDefinitionsForContext(
   });
 }
 
-function agentDiscoveryHint(discovery: ReturnType<typeof discoverDefinitionsForContext>): string {
+function agentDiscoveryHint(
+  discovery: Awaited<ReturnType<typeof discoverDefinitionsForContext>>,
+): string {
   const expectedProject = discovery.projectAgentsDir ?? join("<project>", ".pi", "agents");
   return `Add a profile under ${discovery.globalAgentsDir} or ${expectedProject}.`;
 }
 
 function formatDiscoveryDiagnostics(
-  discovery: ReturnType<typeof discoverDefinitionsForContext>,
+  discovery: Awaited<ReturnType<typeof discoverDefinitionsForContext>>,
 ): string {
   if (discovery.diagnostics.length === 0) return "";
   return `\nInvalid definitions:\n${discovery.diagnostics.map(formatAgentDiagnostic).join("\n")}`;
@@ -369,13 +371,13 @@ function buildSubagentTask(params: {
 }
 
 
-function findAgentDefinitionForTest(
+async function findAgentDefinitionForTest(
   agentName: string,
   cwd = process.cwd(),
   projectTrusted = true,
-): AgentDefinition | null {
-  return discoverAgentDefinitions({ cwd, projectTrusted })
-    .agents.find((agent) => agent.name === agentName) ?? null;
+): Promise<AgentDefinition | null> {
+  const discovery = await discoverAgentDefinitions({ cwd, projectTrusted });
+  return discovery.agents.find((agent) => agent.name === agentName) ?? null;
 }
 
 function formatElapsed(seconds: number): string {
@@ -1869,7 +1871,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         // Resolve once from the active context. The same canonical definition is
         // used for permission checks, diagnostics, launch, and loadout capture.
-        const discovery = discoverDefinitionsForContext(ctx);
+        const discovery = await discoverDefinitionsForContext(ctx);
         if (!params.agent) {
           return {
             content: [{
@@ -2129,7 +2131,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       parameters: Type.Object({}),
 
       async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-        const discovery = discoverDefinitionsForContext(ctx);
+        const discovery = await discoverDefinitionsForContext(ctx);
         const list = discovery.agents.filter((agent) => !agent.disableModelInvocation);
         const diagnosticText = formatDiscoveryDiagnostics(discovery);
 
@@ -2535,7 +2537,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       const agentName = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
       const task = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1).trim();
 
-      const discovery = discoverDefinitionsForContext(ctx);
+      const discovery = await discoverDefinitionsForContext(ctx);
       const defs = discovery.agents.find((agent) => agent.name === agentName);
       if (!defs) {
         ctx.ui.notify(

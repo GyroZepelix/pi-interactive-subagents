@@ -1,16 +1,30 @@
 import {
   CONFIG_DIR_NAME,
+  DefaultPackageManager,
+  SettingsManager,
   getAgentDir,
   parseFrontmatter,
+  type PackageSource,
+  type ResolvedResource,
 } from "@earendil-works/pi-coding-agent";
 import {
   existsSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
   type Dirent,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, win32 } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+  win32,
+} from "node:path";
 
 export type AgentSource = "global" | "project";
 export type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
@@ -22,7 +36,7 @@ export interface AgentExtensionSelector {
   paths?: string[];
 }
 
-export interface AgentDefinition {
+export interface ParsedAgentDefinition {
   name: string;
   description?: string;
   model?: string;
@@ -41,6 +55,10 @@ export interface AgentDefinition {
   disableModelInvocation: boolean;
   source: AgentSource;
   filePath: string;
+}
+
+export interface AgentDefinition extends ParsedAgentDefinition {
+  extensionPaths: string[];
 }
 
 export interface AgentDiagnostic {
@@ -65,7 +83,7 @@ export interface DiscoverAgentDefinitionsOptions {
 type AgentFrontmatter = Record<string, unknown>;
 
 type DirectoryLoadResult = {
-  agents: AgentDefinition[];
+  agents: ParsedAgentDefinition[];
   diagnostics: AgentDiagnostic[];
   invalidNames: Set<string>;
   uncertainIdentityFiles: string[];
@@ -428,7 +446,7 @@ export function parseAgentDefinition(
   filePath: string,
   source: AgentSource,
 ): {
-  agent: AgentDefinition | null;
+  agent: ParsedAgentDefinition | null;
   diagnostics: AgentDiagnostic[];
   effectiveName: string;
   identityUncertain: boolean;
@@ -536,7 +554,7 @@ export function parseAgentDefinition(
     }
   }
 
-  const agent: AgentDefinition = {
+  const agent: ParsedAgentDefinition = {
     name,
     description: optionalString(frontmatter, "description", filePath, diagnostics),
     model: optionalString(frontmatter, "model", filePath, diagnostics),
@@ -591,7 +609,7 @@ function isAgentFile(entry: Dirent): boolean {
 }
 
 function loadAgentsFromDir(dir: string, source: AgentSource): DirectoryLoadResult {
-  const agents = new Map<string, AgentDefinition>();
+  const agents = new Map<string, ParsedAgentDefinition>();
   const diagnostics: AgentDiagnostic[] = [];
   const invalidNames = new Set<string>();
   const uncertainIdentityFiles: string[] = [];
@@ -662,9 +680,573 @@ export function findNearestProjectAgentsDir(cwd: string): string | null {
   }
 }
 
-export function discoverAgentDefinitions(
+type PackageScope = "user" | "project";
+type SettingsScope = "global" | "project";
+
+type ResolvedPackage = {
+  manager: DefaultPackageManager;
+  resources: ResolvedResource[];
+};
+
+type PackageCatalog = {
+  cwd: string;
+  agentDir: string;
+  globalPackages: PackageSource[];
+  projectPackages: PackageSource[];
+  settingsErrors: Partial<Record<SettingsScope, string>>;
+  invalidPackages: Record<SettingsScope, Map<string, string>>;
+  identityManager: DefaultPackageManager;
+  cache: Map<string, Promise<ResolvedPackage>>;
+};
+
+class ReadOnlyPackageSettingsStorage {
+  private readonly content: Record<SettingsScope, string>;
+
+  constructor(globalPackages: PackageSource[], projectPackages: PackageSource[]) {
+    this.content = {
+      global: JSON.stringify({ packages: globalPackages }),
+      project: JSON.stringify({ packages: projectPackages }),
+    };
+  }
+
+  withLock(
+    scope: SettingsScope,
+    fn: (current: string | undefined) => string | undefined,
+  ): void {
+    const replacement = fn(this.content[scope]);
+    if (replacement !== undefined) {
+      throw new Error("Package resolution attempted to write read-only settings");
+    }
+  }
+}
+
+function packageSource(entry: PackageSource): string {
+  return typeof entry === "string" ? entry : entry.source;
+}
+
+function appendSettingsError(
+  errors: Partial<Record<SettingsScope, string>>,
+  scope: SettingsScope,
+  message: string,
+): void {
+  errors[scope] = errors[scope] ? `${errors[scope]}; ${message}` : message;
+}
+
+function validateConfiguredPackages(
+  value: unknown,
+  scope: SettingsScope,
+  settingsErrors: Partial<Record<SettingsScope, string>>,
+  invalidPackages: Map<string, string>,
+): PackageSource[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    appendSettingsError(settingsErrors, scope, "packages must be an array");
+    return [];
+  }
+
+  const packages: PackageSource[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry === "string") {
+      if (!entry.trim()) {
+        invalidPackages.set(entry, `packages[${index}] must be a non-empty string`);
+      } else {
+        packages.push(entry);
+      }
+      continue;
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      appendSettingsError(
+        settingsErrors,
+        scope,
+        `packages[${index}] must be a string or package mapping`,
+      );
+      continue;
+    }
+
+    const record = entry as Record<string, unknown>;
+    if (typeof record.source !== "string" || !record.source.trim()) {
+      appendSettingsError(
+        settingsErrors,
+        scope,
+        `packages[${index}].source must be a non-empty string`,
+      );
+      continue;
+    }
+
+    const reasons: string[] = [];
+    const supportedKeys = new Set([
+      "source",
+      "autoload",
+      "extensions",
+      "skills",
+      "prompts",
+      "themes",
+    ]);
+    for (const key of Object.keys(record)) {
+      if (!supportedKeys.has(key)) reasons.push(`unsupported field "${key}"`);
+    }
+    if (record.autoload !== undefined && typeof record.autoload !== "boolean") {
+      reasons.push("autoload must be a boolean");
+    }
+    for (const resourceType of ["extensions", "skills", "prompts", "themes"] as const) {
+      const resourceFilter = record[resourceType];
+      if (
+        resourceFilter !== undefined &&
+        (!Array.isArray(resourceFilter) ||
+          !resourceFilter.every((filter) => typeof filter === "string"))
+      ) {
+        reasons.push(`${resourceType} must be an array of strings`);
+      }
+    }
+    if (reasons.length > 0) {
+      invalidPackages.set(
+        record.source,
+        `packages[${index}] is invalid: ${reasons.join("; ")}`,
+      );
+      continue;
+    }
+    packages.push(entry as PackageSource);
+  }
+  return packages;
+}
+
+function loadPackageCatalog(
   options: DiscoverAgentDefinitionsOptions,
-): AgentDiscoveryResult {
+  projectAgentsDir: string | null,
+): PackageCatalog {
+  const agentDir = getAgentDir();
+  const settingsCwd = projectAgentsDir ? dirname(dirname(projectAgentsDir)) : options.cwd;
+  const settingsManager = SettingsManager.create(settingsCwd, agentDir, {
+    projectTrusted: options.projectTrusted,
+  });
+  const settingsErrors: Partial<Record<SettingsScope, string>> = {};
+  for (const entry of settingsManager.drainErrors()) {
+    appendSettingsError(
+      settingsErrors,
+      entry.scope,
+      entry.error?.message ?? String(entry.error),
+    );
+  }
+
+  const invalidPackages = {
+    global: new Map<string, string>(),
+    project: new Map<string, string>(),
+  };
+  const globalSettings = settingsManager.getGlobalSettings() as { packages?: unknown };
+  const projectSettings = settingsManager.getProjectSettings() as { packages?: unknown };
+  const globalPackages = validateConfiguredPackages(
+    globalSettings.packages,
+    "global",
+    settingsErrors,
+    invalidPackages.global,
+  );
+  const projectPackages = options.projectTrusted
+    ? validateConfiguredPackages(
+        projectSettings.packages,
+        "project",
+        settingsErrors,
+        invalidPackages.project,
+      )
+    : [];
+
+  const identitySettingsManager = SettingsManager.fromStorage(
+    new ReadOnlyPackageSettingsStorage([], []),
+    { projectTrusted: options.projectTrusted },
+  );
+  const identityManager = new DefaultPackageManager({
+    cwd: settingsCwd,
+    agentDir,
+    settingsManager: identitySettingsManager,
+  });
+
+  return {
+    cwd: settingsCwd,
+    agentDir,
+    globalPackages,
+    projectPackages,
+    settingsErrors,
+    invalidPackages,
+    identityManager,
+    cache: new Map(),
+  };
+}
+
+function findExactPackage(
+  entries: readonly PackageSource[],
+  source: string,
+): PackageSource | undefined {
+  return entries.find((entry) => packageSource(entry) === source);
+}
+
+type PiPackageIdentityReader = {
+  getPackageIdentity(source: string, scope: PackageScope): string;
+};
+
+function piPackageIdentity(
+  manager: DefaultPackageManager,
+  source: string,
+  scope: PackageScope,
+): string | null {
+  // Pi does not export its package parser or identity method, but its delta
+  // semantics depend on that exact implementation. Keep this compatibility
+  // seam fail-closed rather than approximating protocol and platform paths.
+  const reader = manager as unknown as Partial<PiPackageIdentityReader>;
+  if (typeof reader.getPackageIdentity !== "function") return null;
+  try {
+    const identity = reader.getPackageIdentity.call(manager, source, scope);
+    return typeof identity === "string" && identity.length > 0 ? identity : null;
+  } catch {
+    return null;
+  }
+}
+
+function matchingGlobalDeltaBases(
+  catalog: PackageCatalog,
+  projectSource: string,
+): PackageSource[] {
+  const projectIdentity = piPackageIdentity(
+    catalog.identityManager,
+    projectSource,
+    "project",
+  );
+  if (projectIdentity === null) return [];
+
+  return catalog.globalPackages.filter((entry) =>
+    piPackageIdentity(
+      catalog.identityManager,
+      packageSource(entry),
+      "user",
+    ) === projectIdentity
+  );
+}
+
+function resolveConfiguredPackage(
+  catalog: PackageCatalog,
+  entry: PackageSource,
+  scope: PackageScope,
+): Promise<ResolvedPackage> {
+  const source = packageSource(entry);
+  const cacheKey = `${scope}\u0000${source}`;
+  const cached = catalog.cache.get(cacheKey);
+  if (cached) return cached;
+
+  const resolution = (async () => {
+    const needsGlobalDeltaBase =
+      scope === "project" && typeof entry === "object" && entry.autoload === false;
+    const deltaBases = needsGlobalDeltaBase
+      ? matchingGlobalDeltaBases(catalog, source)
+      : [];
+    const inheritedSources = new Set(deltaBases.map(packageSource));
+    const storage = new ReadOnlyPackageSettingsStorage(
+      scope === "user" ? [entry] : deltaBases,
+      scope === "project" ? [entry] : [],
+    );
+    const settingsManager = SettingsManager.fromStorage(storage, {
+      projectTrusted: scope === "project",
+    });
+    const manager = new DefaultPackageManager({
+      cwd: catalog.cwd,
+      agentDir: catalog.agentDir,
+      settingsManager,
+    });
+    const resolved = await manager.resolve(async () => "skip");
+    return {
+      manager,
+      resources: resolved.extensions.filter((resource) =>
+        resource.metadata.origin === "package" && (
+          (resource.metadata.scope === scope && resource.metadata.source === source) ||
+          (needsGlobalDeltaBase &&
+            resource.metadata.scope === "user" &&
+            inheritedSources.has(resource.metadata.source))
+        )
+      ),
+    };
+  })();
+
+  catalog.cache.set(cacheKey, resolution);
+  return resolution;
+}
+
+function pathIsInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (
+    rel !== ".." &&
+    !rel.startsWith(`..${sep}`) &&
+    !isAbsolute(rel)
+  );
+}
+
+function installedPackageRoot(
+  resolvedPackage: ResolvedPackage,
+  source: string,
+  scope: PackageScope,
+): string | null {
+  const metadataRoot = resolvedPackage.resources.find((resource) =>
+    typeof resource.metadata.baseDir === "string"
+  )?.metadata.baseDir;
+  if (metadataRoot) return metadataRoot;
+
+  const installedPath = resolvedPackage.manager.getInstalledPath(source, scope);
+  if (!installedPath) return null;
+  try {
+    return statSync(installedPath).isFile() ? dirname(installedPath) : installedPath;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalFileWithinRoot(
+  path: string,
+  canonicalRoot: string,
+): { path: string } | { error: string } {
+  let canonicalPath: string;
+  try {
+    canonicalPath = realpathSync(path);
+  } catch (error: any) {
+    return { error: `does not exist or cannot be resolved: ${error?.message ?? String(error)}` };
+  }
+  try {
+    if (!statSync(canonicalPath).isFile()) {
+      return { error: "must resolve to a file" };
+    }
+  } catch (error: any) {
+    return { error: `cannot be inspected: ${error?.message ?? String(error)}` };
+  }
+  if (!pathIsInside(canonicalRoot, canonicalPath)) {
+    return { error: `escapes package root ${canonicalRoot}` };
+  }
+  return { path: canonicalPath };
+}
+
+async function resolveAgentExtensions(
+  agent: ParsedAgentDefinition,
+  catalog: PackageCatalog,
+): Promise<{ agent: AgentDefinition | null; diagnostics: AgentDiagnostic[] }> {
+  const diagnostics: AgentDiagnostic[] = [];
+  const extensionPaths: string[] = [];
+  const seenPaths = new Set<string>();
+
+  for (const [extensionIndex, selector] of agent.extensions.entries()) {
+    const packageField = `extensions[${extensionIndex}].package`;
+    const selectorField = `extensions[${extensionIndex}]`;
+    let scope: PackageScope;
+    let configured: PackageSource | undefined;
+
+    if (agent.source === "project") {
+      const invalidProjectPackage = catalog.invalidPackages.project.get(selector.package);
+      if (invalidProjectPackage) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            packageField,
+            `project package configuration for "${selector.package}" is invalid: ${invalidProjectPackage}`,
+          ),
+        );
+        continue;
+      }
+      if (catalog.settingsErrors.project) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            packageField,
+            `cannot determine trusted project package overrides safely: ${catalog.settingsErrors.project}`,
+          ),
+        );
+        continue;
+      }
+      configured = findExactPackage(catalog.projectPackages, selector.package);
+      if (configured) {
+        scope = "project";
+      } else {
+        const invalidGlobalPackage = catalog.invalidPackages.global.get(selector.package);
+        if (invalidGlobalPackage) {
+          diagnostics.push(
+            diagnostic(
+              agent.filePath,
+              packageField,
+              `global package configuration for "${selector.package}" is invalid: ${invalidGlobalPackage}`,
+            ),
+          );
+          continue;
+        }
+        if (catalog.settingsErrors.global) {
+          diagnostics.push(
+            diagnostic(
+              agent.filePath,
+              packageField,
+              `cannot inspect global package fallback safely: ${catalog.settingsErrors.global}`,
+            ),
+          );
+          continue;
+        }
+        configured = findExactPackage(catalog.globalPackages, selector.package);
+        scope = "user";
+      }
+    } else {
+      const invalidGlobalPackage = catalog.invalidPackages.global.get(selector.package);
+      if (invalidGlobalPackage) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            packageField,
+            `global package configuration for "${selector.package}" is invalid: ${invalidGlobalPackage}`,
+          ),
+        );
+        continue;
+      }
+      if (catalog.settingsErrors.global) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            packageField,
+            `cannot inspect global package settings safely: ${catalog.settingsErrors.global}`,
+          ),
+        );
+        continue;
+      }
+      configured = findExactPackage(catalog.globalPackages, selector.package);
+      scope = "user";
+    }
+
+    if (!configured) {
+      const settingsScope = agent.source === "project" ? "project or global" : "global";
+      diagnostics.push(
+        diagnostic(
+          agent.filePath,
+          packageField,
+          `package "${selector.package}" is not configured in permitted ${settingsScope} settings`,
+        ),
+      );
+      continue;
+    }
+
+    let resolvedPackage: ResolvedPackage;
+    try {
+      resolvedPackage = await resolveConfiguredPackage(catalog, configured, scope);
+    } catch (error: any) {
+      diagnostics.push(
+        diagnostic(
+          agent.filePath,
+          packageField,
+          `cannot resolve configured package "${selector.package}": ${error?.message ?? String(error)}`,
+        ),
+      );
+      continue;
+    }
+
+    const packageRoot = installedPackageRoot(resolvedPackage, selector.package, scope);
+    if (!packageRoot) {
+      diagnostics.push(
+        diagnostic(
+          agent.filePath,
+          packageField,
+          `configured package "${selector.package}" is not installed or has no resolvable package root`,
+        ),
+      );
+      continue;
+    }
+
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = realpathSync(packageRoot);
+      if (!statSync(canonicalRoot).isDirectory()) {
+        throw new Error("package root is not a directory");
+      }
+    } catch (error: any) {
+      diagnostics.push(
+        diagnostic(
+          agent.filePath,
+          packageField,
+          `cannot inspect package root for "${selector.package}": ${error?.message ?? String(error)}`,
+        ),
+      );
+      continue;
+    }
+
+    if (selector.paths === undefined) {
+      const enabled = resolvedPackage.resources.filter((resource) => resource.enabled);
+      if (enabled.length === 0) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            selectorField,
+            `package "${selector.package}" selects no enabled extension resources`,
+          ),
+        );
+        continue;
+      }
+      for (const resource of enabled) {
+        const canonical = canonicalFileWithinRoot(resource.path, canonicalRoot);
+        if ("error" in canonical) {
+          diagnostics.push(
+            diagnostic(
+              agent.filePath,
+              selectorField,
+              `extension resource "${resource.path}" ${canonical.error}`,
+            ),
+          );
+          continue;
+        }
+        if (!seenPaths.has(canonical.path)) {
+          seenPaths.add(canonical.path);
+          extensionPaths.push(canonical.path);
+        }
+      }
+      continue;
+    }
+
+    const resourcesByCanonicalPath = new Map<string, ResolvedResource[]>();
+    for (const resource of resolvedPackage.resources) {
+      try {
+        const canonicalPath = realpathSync(resource.path);
+        const matches = resourcesByCanonicalPath.get(canonicalPath) ?? [];
+        matches.push(resource);
+        resourcesByCanonicalPath.set(canonicalPath, matches);
+      } catch {
+        // The selected path receives the actionable missing-resource diagnostic below.
+      }
+    }
+
+    for (const [pathIndex, pathSelector] of selector.paths.entries()) {
+      const pathField = `extensions[${extensionIndex}].paths[${pathIndex}]`;
+      const canonical = canonicalFileWithinRoot(resolve(packageRoot, pathSelector), canonicalRoot);
+      if ("error" in canonical) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            pathField,
+            `selector "${pathSelector}" ${canonical.error}`,
+          ),
+        );
+        continue;
+      }
+      const matches = resourcesByCanonicalPath.get(canonical.path) ?? [];
+      if (!matches.some((resource) => resource.enabled)) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            pathField,
+            `selector "${pathSelector}" is not an enabled extension resource from package "${selector.package}"`,
+          ),
+        );
+        continue;
+      }
+      if (!seenPaths.has(canonical.path)) {
+        seenPaths.add(canonical.path);
+        extensionPaths.push(canonical.path);
+      }
+    }
+  }
+
+  return {
+    agent: diagnostics.length === 0 ? { ...agent, extensionPaths } : null,
+    diagnostics,
+  };
+}
+
+export async function discoverAgentDefinitions(
+  options: DiscoverAgentDefinitionsOptions,
+): Promise<AgentDiscoveryResult> {
   const globalAgentsDir = join(getAgentDir(), "agents");
   const global = loadAgentsFromDir(globalAgentsDir, "global");
   const diagnostics = [...global.diagnostics];
@@ -693,7 +1275,22 @@ export function discoverAgentDefinitions(
     for (const agent of project.agents) agents.set(agent.name, agent);
   }
 
-  const discovered = [...agents.values()];
+  const parsedAgents = [...agents.values()];
+  let discovered: AgentDefinition[];
+  if (parsedAgents.some((agent) => agent.extensions.length > 0)) {
+    const catalog = loadPackageCatalog(options, projectAgentsDir);
+    const resolved = await Promise.all(
+      parsedAgents.map((agent) => resolveAgentExtensions(agent, catalog)),
+    );
+    discovered = [];
+    for (const result of resolved) {
+      diagnostics.push(...result.diagnostics);
+      if (result.agent) discovered.push(result.agent);
+    }
+  } else {
+    discovered = parsedAgents.map((agent) => ({ ...agent, extensionPaths: [] }));
+  }
+
   const allowed = options.allowedNames;
   return {
     agents: allowed ? discovered.filter((agent) => allowed.has(agent.name)) : discovered,

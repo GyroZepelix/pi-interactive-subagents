@@ -27,6 +27,7 @@ Durable current-state codebase knowledge. Read this file first when answering co
 
 - [Observation queue](./observations.md): Tentative findings for later Dream comparison; not normal implementation guidance.
 - [Profile-hardening implementation session](./dreams/2026-09-09-1616-completed-session.md): Completed user-managed profile migration, fail-closed runtime hardening, repeated review corrections, verification, and checkpoint handoff.
+- [Profile capability-resolution session](./dreams/2026-09-10-1503-completed-session.md): Completed and independently verified T01 profile schema and asynchronous package resolution; Current advanced to `02.01` with T02 and T03 pending.
 
 ## Stale or needs review
 

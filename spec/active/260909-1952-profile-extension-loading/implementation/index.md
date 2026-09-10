@@ -2,7 +2,7 @@
 
 Plan: `../plan.md`
 Mode: sliced
-Current: `01.02`
+Current: `02.01`
 Expected implementation sessions: 5
 Implementation starting checkpoint: `486f582398eb6a79666e3ec05e868d33546c49eb`
 
@@ -51,7 +51,7 @@ Segment acceptance: Valid profiles resolve deterministic built-in and package-ex
 Segment gate: Run focused and full unit checks, prove parser/resolver and public diagnostic acceptance, then obtain independent Standards and Spec reviews.
 
 - [x] 01.01: Add the profile capability schema and migration validation (packet: `./01-01-profile-schema.md`)
-- [ ] 01.02: Add package resolution and asynchronous canonical discovery (packet: `./01-02-package-resolution.md`)
+- [x] 01.02: Add package resolution and asynchronous canonical discovery (packet: `./01-02-package-resolution.md`)
 
 Boundary 01.01 -> 01.02: Combining strict parser migration with asynchronous package-manager integration would reduce correction and recovery room across two distinct failure domains.
 
@@ -82,4 +82,4 @@ Final gate: Expand the T03 segment gate to whole-plan acceptance, all relevant s
 
 ## Discoveries and blockers
 
-None recorded.
+- `01.02` attempt 1's package-identity blocker was resolved by using Pi-equivalent identity comparison for project `autoload: false` delta bases. Focused, Standards, and Spec reviews passed; T01 is complete. Current is `02.01`.

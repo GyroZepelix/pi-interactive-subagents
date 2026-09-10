@@ -112,7 +112,7 @@ Diagnostics identify the profile file and relevant field or selector and explain
 
 ## Work breakdown
 
-- [ ] T01: Implement and verify profile capability resolution
+- [x] T01: Implement and verify profile capability resolution
   - Depends on: none
   - Scope: Add the new strict profile schema, migration diagnostics, non-installing package/resource resolution, trust-aware scope and precedence, asynchronous canonical discovery, and matching public list/spawn diagnostics.
   - Expected areas: `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `test/test.ts`

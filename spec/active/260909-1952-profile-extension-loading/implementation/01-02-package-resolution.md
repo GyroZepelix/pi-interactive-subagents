@@ -71,7 +71,34 @@ Run the segment's integrated acceptance and appropriate regression checks, then 
 
 ## Attempt log
 
-No attempts recorded.
+### Attempt 1 - 2026-09-10T13:57:44+0200
+
+Starting HEAD: `bd158f6692a39a407b218914dc8842d18916d156`
+
+Changes:
+
+- `pi-extension/subagents/agents.ts`: split parsed and resolved definitions; added asynchronous exact-source package resolution through `SettingsManager` and `DefaultPackageManager.resolve(() => "skip")`; added read-only scoped settings, runtime package-setting validation, nearest-project settings anchoring, enabled-resource selection, selector/declaration ordering, canonical path deduplication, file/root containment, project/global precedence, resolution caching, and per-profile diagnostics.
+- `pi-extension/subagents/index.ts`: made canonical discovery, test lookup, `subagent`, `subagents_list`, and `/subagent` callers asynchronous and awaited without changing launch flags, snapshots, activation, or the legacy registration mechanism.
+- `test/test.ts`: added isolated package/settings fixtures covering exact sources, global/project scope, nearest-project lookup from nested cwd, trusted fallback, enabled filters, explicit/all selection order, package order, canonical deduplication, disabled/absent/empty/missing/escaping resources, malformed settings, resolver errors, project tombstones, consistent public diagnostics, and instrumented no-install/network/settings-write behavior.
+
+Checks:
+
+- `node --test --test-name-pattern='subagent discovery' test/test.ts`: latest PASS, 53 tests.
+- `npm test`: latest PASS, 184 tests.
+- `git diff --check -- pi-extension/subagents/agents.ts pi-extension/subagents/index.ts test/test.ts`: PASS.
+- `uv run spec/scripts/manage-spec-item.py --root . validate --item 260909-1952-profile-extension-loading`: PASS.
+
+Failures:
+
+- Independent focused review remains BLOCKED. The current `exactGlobalDeltaBases` implementation infers cross-scope identity from source prefixes instead of Pi-equivalent parsed package identity. Invalid git/protocol-looking strings and Windows path forms can be misclassified, potentially admitting inherited global resources or dropping valid inheritance. The latest reviewer specifically requires false-positive and Windows tilde coverage; npm, valid git/protocol, and tilde identity coverage were also noted as absent.
+- Earlier focused findings were resolved: unreadable project settings now block global fallback; malformed package settings are contained as per-profile diagnostics; unknown package-setting keys fail closed; no-side-effect seams are instrumented; nearest ancestor project settings are used; absolute-path and `file://` autoload-delta inheritance/exclusions are covered.
+
+Blockers:
+
+- Replace source-prefix heuristics with Pi-equivalent package identity and scope/path normalization for project `autoload: false` delta-base matching. Retain exact profile-source matching and include inherited user resources only when the selected project entry and global base have the same effective Pi package identity.
+- Focused review must pass after correction. The T01 integrated checks and separate Standards and Spec reviews have not started.
+
+Exact next action: implement a deterministic Pi-equivalent package identity helper for npm, valid git/protocol, and local path sources (including `file://`, tilde, Windows forms, and invalid protocol false positives), use it in `exactGlobalDeltaBases`, and add targeted delta regressions before rerunning focused and full checks.
 
 For each interrupted or failed attempt, append without rewriting earlier entries:
 
@@ -84,6 +111,48 @@ Failures: <failures or none>
 Blockers: <blockers or none>
 Exact next action: <single resumable action>
 ```
+
+## Completion record
+
+### Completed - 2026-09-10T14:50:07+0200
+
+Starting HEAD: `bd158f6692a39a407b218914dc8842d18916d156`
+
+Segment starting checkpoint: `486f582398eb6a79666e3ec05e868d33546c49eb`
+
+Changes:
+
+- `pi-extension/subagents/agents.ts`: introduced parsed and resolved profile definitions; added asynchronous trust-scoped package catalog loading; strict runtime validation for package settings; read-only `SettingsManager` storage; `DefaultPackageManager.resolve(() => "skip")`; exact profile-to-configured-source matching; Pi-identity-aware project `autoload: false` inheritance; enabled resource filtering; selector and declaration ordering; canonical root containment and first-path deduplication; per-profile fail-closed diagnostics; project tombstone preservation; and canonical discovery caching.
+- `pi-extension/subagents/index.ts`: awaited the same canonical discovery object in list, permission, spawn preparation, test lookup, `subagent`, `subagents_list`, and `/subagent` paths without starting T02 launch, activation, snapshot, or legacy-registration changes.
+- `test/test.ts`: added isolated package/settings coverage for global and trusted project scope, untrusted exclusion, nearest-project anchoring, project precedence and safe global fallback, exact selectors, enabled filters, package and selector order, canonical deduplication, symlink/root escapes, missing and malformed resources/settings, resolver failures, no installation/network/settings writes, tombstones, public diagnostic consistency, Pi identity delta behavior across npm versions and git protocols, file URLs, tilde paths, and cross-platform false-positive forms.
+
+Acceptance evidence:
+
+- R01-R02 and R10-R11 remain green from 01.01: strict built-in and extension schemas, exact retained strings, actionable legacy migration, and the Claude capability boundary.
+- R03-R05 are proven by exact profile source selection, Pi enabled-resource behavior, deterministic ordering, canonical containment/deduplication, trust-scoped project/global resolution, read-only package resolution, and fail-closed exclusion before tmux prerequisites.
+- R12 is proven for T01 by one awaited resolved definition and shared diagnostics across listing, permission, spawn preparation, and command callers. Runtime activation and snapshots remain intentionally deferred to T02.
+- Project `autoload: false` deltas preserve inherited global resources and project exclusions when Pi identities match, including differently versioned npm sources and different git protocols, while scope-relative and malformed lookalikes fail closed.
+- No package install/update, network request, settings write, pane creation, global profile/settings edit, dependency change, or T02 implementation occurred.
+
+Checks:
+
+- `node --test --test-name-pattern='subagent discovery' test/test.ts`: PASS, 54 tests.
+- `npm test`: PASS, 185 tests.
+- `git diff --check -- pi-extension/subagents/agents.ts pi-extension/subagents/index.ts test/test.ts`: PASS.
+- `uv run spec/scripts/manage-spec-item.py --root . validate --item 260909-1952-profile-extension-loading`: PASS.
+- `git merge-base --is-ancestor 486f582398eb6a79666e3ec05e868d33546c49eb HEAD`: PASS; the complete T01 boundary includes committed 01.01 plus unstaged 01.02.
+
+Reviews:
+
+- Initial resumed focused review: UNVERIFIED because its turn limit expired before complete `index.ts` and `test.ts` diff coverage. It established no blocking finding; its return-type hardening suggestion was applied, all checks were rerun, and a complete replacement review followed.
+- Focused review before the final correction: PASS, no blockers. The later segment Spec finding materially changed delta matching, so the focused review was repeated.
+- Initial T01 Standards review: PASS, no findings or uncertainty.
+- Initial T01 Spec review: BLOCK because project delta inheritance required identical global/project source strings instead of Pi-equivalent identities. Resolved by comparing the exactly selected project source identity against every configured global source identity, with differing-version npm and differing-protocol git regressions.
+- Final focused review: PASS with complete Current coverage, no findings, and only the documented reliance on locked Pi 0.85.1 package identity semantics.
+- Final T01 Standards review: PASS with complete checkpoint-to-working-tree coverage, no findings, and no material uncertainty.
+- Final T01 Spec review: PASS with complete T01 requirement and omission coverage. It noted only stale progress evidence, resolved by this completion record and index update. Future Pi private identity API drift is fail-closed; current behavior is verified against locked Pi 0.85.1.
+
+Exact next slice: `02.01 - Implement isolated child launch and capability activation`. Do not begin it in this invocation.
 
 ## Completion and handoff
 
