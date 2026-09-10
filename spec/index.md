@@ -11,8 +11,8 @@ Repository-local planning and execution artifacts.
 <!-- spec-items:active:start -->
 | Item | Kind | Status | Updated |
 | --- | --- | --- | --- |
-| [Harden agent profiles and adapt the fork](./active/260909-1230-harden-agent-profiles-and-adapt-the-fork/plan.md) | work-item | planned | 2026-09-09 |
-| [Document Git installation](./active/260909-1629-document-git-installation/plan.md) | work-item | planned | 2026-09-09 |
+| [Create global scout, researcher, and worker profiles](./active/260909-1928-create-global-scout-researcher-and-worker-profiles/plan.md) | work-item | planned | 2026-09-09 |
+| [Profile extension loading](./active/260909-1952-profile-extension-loading/plan.md) | work-item | planned | 2026-09-09 |
 <!-- spec-items:active:end -->
 
 ## Archive
@@ -20,6 +20,8 @@ Repository-local planning and execution artifacts.
 <!-- spec-items:archive:start -->
 | Item | Kind | Status | Updated |
 | --- | --- | --- | --- |
+| [Harden agent profiles and adapt the fork](./archive/260909-1230-harden-agent-profiles-and-adapt-the-fork/plan.md) | work-item | planned | 2026-09-09 |
+| [Document Git installation](./archive/260909-1629-document-git-installation/plan.md) | work-item | planned | 2026-09-09 |
 <!-- spec-items:archive:end -->
 
 ## Templates

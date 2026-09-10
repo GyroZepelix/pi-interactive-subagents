@@ -1,0 +1,33 @@
+schema_version: 1
+id: 260909-1928-create-global-scout-researcher-and-worker-profiles
+title: Create global scout, researcher, and worker profiles
+kind: work-item
+work_type: operations
+parent: null
+route: quick-plan
+status: planned
+created_at: '2026-09-09T19:28:14+02:00'
+updated_at: '2026-09-09T19:28:14+02:00'
+external_refs:
+- system: web
+  type: documentation
+  key: cursor-models
+  url: https://cursor.com/docs/models-and-pricing
+- system: web
+  type: benchmark
+  key: cursorbench
+  url: https://cursor.com/cursorbench
+- system: web
+  type: release
+  key: gpt-5.6-sol
+  url: https://openai.com/index/gpt-5-6/
+- system: web
+  type: release
+  key: grok-4.6
+  url: https://x.ai/news/grok-4-6
+- system: web
+  type: comparison
+  key: grok-vs-sol
+  url: https://artificialanalysis.ai/models/comparisons/grok-4-6-vs-gpt-5-6-sol-high
+wiki_refs:
+- wiki/conventions/agent-profiles.md

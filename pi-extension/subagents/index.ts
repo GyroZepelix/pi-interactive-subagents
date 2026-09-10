@@ -126,7 +126,7 @@ type AgentDefaults = Partial<
   Pick<
     AgentDefinition,
     | "model"
-    | "tools"
+    | "builtinTools"
     | "skills"
     | "thinking"
     | "subagentAgents"
@@ -796,7 +796,7 @@ function prepareAgentSandbox(
   agent: AgentDefinition,
 ): { sandbox: PreparedAgentSandbox } | { error: string } {
   const grantSpawning = agent.subagentAgents.length > 0;
-  const toolAllowlist = buildSubagentToolAllowlist(agent.tools, { grantSpawning });
+  const toolAllowlist = buildSubagentToolAllowlist(agent.builtinTools, { grantSpawning });
   const extensionPaths = new Set<string>();
 
   for (const tool of toolAllowlist.split(",")) {

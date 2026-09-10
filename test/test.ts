@@ -1274,7 +1274,7 @@ describe("subagent discovery", () => {
         "coordinator",
         [
           "name: coordinator",
-          "tools: [read, bash]",
+          "builtin-tools: [read, bash]",
           "subagent_agents: [inspector, implementer]",
         ].join("\n"),
       );
@@ -1282,7 +1282,7 @@ describe("subagent discovery", () => {
       assert.ok(coordinator);
       assert.deepEqual(coordinator.subagentAgents, ["inspector", "implementer"]);
 
-      const allowlist = testApi.buildSubagentToolAllowlist(coordinator.tools, { grantSpawning: true });
+      const allowlist = testApi.buildSubagentToolAllowlist(coordinator.builtinTools, { grantSpawning: true });
       const tools = new Set(allowlist.split(","));
       for (const tool of ["subagent", "subagent_message", "subagents_list", "ask_question"]) {
         assert.ok(tools.has(tool), `expected ${tool} in coordinator allowlist`);
@@ -1291,14 +1291,173 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("rejects spawning tools listed directly under tools", () => {
+  it("rejects spawning tools listed under builtin-tools", () => {
     const parsed = parseAgentDefinition(
-      `---\nname: unsafe\ntools: [read, subagent]\n---\nbody`,
+      `---\nname: unsafe\nbuiltin-tools: [read, subagent]\n---\nbody`,
       "/tmp/unsafe.md",
       "global",
     );
     assert.equal(parsed.agent, null);
-    assert.match(parsed.diagnostics[0].message, /use subagent_agents/);
+    assert.ok(
+      parsed.diagnostics.some((entry) =>
+        entry.field === "builtin-tools" && /use subagent_agents/.test(entry.message)
+      ),
+    );
+  });
+
+  it("rejects legacy tools with actionable migration guidance", () => {
+    const parsed = parseAgentDefinition(
+      `---\nname: legacy\ntools: [read, web_search]\n---\nbody`,
+      "/tmp/legacy.md",
+      "global",
+    );
+    assert.equal(parsed.agent, null);
+    assert.ok(
+      parsed.diagnostics.some((entry) =>
+        entry.field === "tools" &&
+        /builtin-tools/.test(entry.message) &&
+        /extensions/.test(entry.message)
+      ),
+    );
+  });
+
+  it("normalizes builtin-tools forms with a default-deny empty value", () => {
+    const parse = (line: string | null) => parseAgentDefinition(
+      `---\nname: builtins\n${line ? `${line}\n` : ""}---\nbody`,
+      "/tmp/builtins.md",
+      "global",
+    );
+
+    assert.deepEqual(parse(null).agent?.builtinTools, []);
+    assert.deepEqual(parse('builtin-tools: ""').agent?.builtinTools, []);
+    assert.deepEqual(parse("builtin-tools: []").agent?.builtinTools, []);
+    assert.deepEqual(
+      parse("builtin-tools: read, bash, read").agent?.builtinTools,
+      ["read", "bash"],
+    );
+    assert.deepEqual(
+      parse("builtin-tools: [grep, find, ls]").agent?.builtinTools,
+      ["grep", "find", "ls"],
+    );
+  });
+
+  it("retains exact package sources and ordered extension selectors", () => {
+    const parsed = parseAgentDefinition(
+      [
+        "---",
+        "name: researcher",
+        "builtin-tools: [read, grep]",
+        "extensions:",
+        "  - package: 'git:git@github.com:example/search@main'",
+        "  - package: 'npm:@example/web-tools'",
+        "    paths:",
+        "      - index.ts",
+        "      - packages/web/index.ts",
+        "---",
+        "body",
+      ].join("\n"),
+      "/tmp/researcher.md",
+      "project",
+    );
+
+    assert.deepEqual(parsed.diagnostics, []);
+    assert.deepEqual(parsed.agent?.builtinTools, ["read", "grep"]);
+    assert.deepEqual(parsed.agent?.extensions, [
+      { package: "git:git@github.com:example/search@main" },
+      {
+        package: "npm:@example/web-tools",
+        paths: ["index.ts", "packages/web/index.ts"],
+      },
+    ]);
+    assert.equal(parsed.agent?.source, "project");
+    assert.equal(parsed.agent?.filePath, "/tmp/researcher.md");
+  });
+
+  it("preserves extension strings exactly and compares duplicates exactly", () => {
+    const parsed = parseAgentDefinition(
+      [
+        "---",
+        "name: exact-strings",
+        "extensions:",
+        "  - package: ' pkg '",
+        "    paths: [' index.ts ', index.ts]",
+        "  - package: pkg",
+        "---",
+        "body",
+      ].join("\n"),
+      "/tmp/exact-strings.md",
+      "global",
+    );
+
+    assert.deepEqual(parsed.diagnostics, []);
+    assert.deepEqual(parsed.agent?.extensions, [
+      { package: " pkg ", paths: [" index.ts ", "index.ts"] },
+      { package: "pkg" },
+    ]);
+  });
+
+  it("rejects unknown built-ins and every malformed extension shape", () => {
+    const invalidCases = [
+      { name: "extensions mapping", yaml: "extensions: { package: pkg }", field: "extensions" },
+      { name: "scalar entry", yaml: "extensions: [pkg]", field: "extensions[0]" },
+      { name: "missing package", yaml: "extensions:\n  - paths: [index.ts]", field: "extensions[0].package" },
+      { name: "empty package", yaml: "extensions:\n  - package: '   '", field: "extensions[0].package" },
+      { name: "unknown key", yaml: "extensions:\n  - package: pkg\n    alias: web", field: "extensions[0].alias" },
+      { name: "duplicate package", yaml: "extensions:\n  - package: pkg\n  - package: pkg", field: "extensions[1].package" },
+      { name: "scalar paths", yaml: "extensions:\n  - package: pkg\n    paths: index.ts", field: "extensions[0].paths" },
+      { name: "empty paths", yaml: "extensions:\n  - package: pkg\n    paths: []", field: "extensions[0].paths" },
+      { name: "empty selector", yaml: "extensions:\n  - package: pkg\n    paths: ['']", field: "extensions[0].paths[0]" },
+      { name: "non-string selector", yaml: "extensions:\n  - package: pkg\n    paths: [42]", field: "extensions[0].paths[0]" },
+      { name: "duplicate selector", yaml: "extensions:\n  - package: pkg\n    paths: [index.ts, index.ts]", field: "extensions[0].paths[1]" },
+      { name: "absolute selector", yaml: "extensions:\n  - package: pkg\n    paths: [/index.ts]", field: "extensions[0].paths[0]" },
+      { name: "Windows absolute selector", yaml: "extensions:\n  - package: pkg\n    paths: ['C:\\index.ts']", field: "extensions[0].paths[0]" },
+      { name: "Windows drive selector", yaml: "extensions:\n  - package: pkg\n    paths: ['C:relative\\index.ts']", field: "extensions[0].paths[0]" },
+      { name: "Windows drive parent slash", yaml: "extensions:\n  - package: pkg\n    paths: ['C:../index.ts']", field: "extensions[0].paths[0]" },
+      { name: "Windows drive parent backslash", yaml: "extensions:\n  - package: pkg\n    paths: ['C:..\\index.ts']", field: "extensions[0].paths[0]" },
+      { name: "dot selector", yaml: "extensions:\n  - package: pkg\n    paths: [./index.ts]", field: "extensions[0].paths[0]" },
+      { name: "parent selector", yaml: "extensions:\n  - package: pkg\n    paths: [lib/../index.ts]", field: "extensions[0].paths[0]" },
+    ];
+
+    for (const invalid of invalidCases) {
+      const parsed = parseAgentDefinition(
+        `---\nname: invalid\n${invalid.yaml}\n---\nbody`,
+        `/tmp/${invalid.name}.md`,
+        "global",
+      );
+      assert.equal(parsed.agent, null, invalid.name);
+      assert.ok(
+        parsed.diagnostics.some((entry) => entry.field === invalid.field),
+        `${invalid.name}: expected diagnostic for ${invalid.field}`,
+      );
+    }
+
+    const unknownBuiltin = parseAgentDefinition(
+      "---\nname: invalid\nbuiltin-tools: [read, web_search]\n---\nbody",
+      "/tmp/unknown-builtin.md",
+      "global",
+    );
+    assert.equal(unknownBuiltin.agent, null);
+    assert.ok(
+      unknownBuiltin.diagnostics.some((entry) =>
+        entry.field === "builtin-tools" && /web_search/.test(entry.message)
+      ),
+    );
+  });
+
+  it("rejects Pi capability fields on Claude profiles even when empty", () => {
+    for (const capability of ["builtin-tools: []", "extensions: []"]) {
+      const parsed = parseAgentDefinition(
+        `---\nname: claude-agent\ncli: claude\n${capability}\n---\nbody`,
+        "/tmp/claude-agent.md",
+        "global",
+      );
+      assert.equal(parsed.agent, null);
+      assert.ok(
+        parsed.diagnostics.some((entry) =>
+          entry.field === capability.split(":", 1)[0] && /Pi-only/.test(entry.message)
+        ),
+      );
+    }
   });
 
   it("getToolExtensionPath maps custom tools and skips built-ins", () => {
@@ -1340,7 +1499,7 @@ describe("subagent discovery", () => {
     const parsed = parseAgentDefinition(
       [
         "---",
-        "tools: [read, bash]",
+        "builtin-tools: [read, bash]",
         "skills: review, lint",
         "subagent_agents: [inspector]",
         "auto-exit: true",
@@ -1356,7 +1515,8 @@ describe("subagent discovery", () => {
 
     assert.ok(parsed.agent);
     assert.equal(parsed.agent.name, "fallback-name");
-    assert.deepEqual(parsed.agent.tools, ["read", "bash"]);
+    assert.deepEqual(parsed.agent.builtinTools, ["read", "bash"]);
+    assert.deepEqual(parsed.agent.extensions, []);
     assert.deepEqual(parsed.agent.skills, ["review", "lint"]);
     assert.deepEqual(parsed.agent.subagentAgents, ["inspector"]);
     assert.equal(parsed.agent.autoExit, true);
@@ -1372,7 +1532,7 @@ describe("subagent discovery", () => {
         "name: malformed",
         "skill: review",
         "skills: [lint]",
-        "tools: [read, 42]",
+        "builtin-tools: [read, 42]",
         "auto-exit: \"true\"",
         "mystery: value",
         "---",
@@ -1385,13 +1545,13 @@ describe("subagent discovery", () => {
     assert.equal(parsed.agent, null);
     assert.deepEqual(
       new Set(parsed.diagnostics.map((entry) => entry.field)),
-      new Set(["mystery", "skill/skills", "tools", "auto-exit"]),
+      new Set(["mystery", "skill/skills", "builtin-tools", "auto-exit"]),
     );
   });
 
   it("rejects unterminated frontmatter and delimiter-bearing names or array entries", () => {
     const unterminated = parseAgentDefinition(
-      "---\nname: broken\ntools: []\nbody without closing delimiter",
+      "---\nname: broken\nbuiltin-tools: []\nbody without closing delimiter",
       "/tmp/broken.md",
       "global",
     );
@@ -1407,7 +1567,7 @@ describe("subagent discovery", () => {
     assert.ok(scalarRoot.diagnostics.some((entry) => entry.field === "frontmatter"));
 
     const emptyEffectiveName = parseAgentDefinition(
-      '---\nname: "   "\ntools: []\n---\nbody',
+      '---\nname: "   "\nbuiltin-tools: []\n---\nbody',
       "/tmp/empty-name.md",
       "global",
     );
@@ -1415,7 +1575,7 @@ describe("subagent discovery", () => {
     assert.ok(emptyEffectiveName.diagnostics.some((entry) => entry.field === "name"));
 
     const commaName = parseAgentDefinition(
-      "---\nname: safe,evil\ntools: []\n---\nbody",
+      "---\nname: safe,evil\nbuiltin-tools: []\n---\nbody",
       "/tmp/comma-name.md",
       "global",
     );
@@ -1445,7 +1605,7 @@ describe("subagent discovery", () => {
 
   it("rejects an empty profile body", () => {
     const parsed = parseAgentDefinition(
-      "---\nname: empty-body\ntools: []\n---\n",
+      "---\nname: empty-body\nbuiltin-tools: []\n---\n",
       "/tmp/empty-body.md",
       "global",
     );
@@ -1461,7 +1621,7 @@ describe("subagent discovery", () => {
         [
           "name: declared-name",
           "model: provider/restricted",
-          "tools: [read]",
+          "builtin-tools: [read]",
           "skills: [review]",
           "thinking: medium",
           "subagent_agents: [child-agent]",
@@ -1539,22 +1699,22 @@ describe("subagent discovery", () => {
 
   it("does not fall back to a global definition when its project override is invalid", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalAgentsDir }) => {
-      writeAgentFile(globalAgentsDir, "shared", "name: shared\nmodel: provider/global\ntools: [read]");
-      writeAgentFile(projectAgentsDir, "shared-local", "name: shared\ntools: [read, 42]");
+      writeAgentFile(globalAgentsDir, "shared", "name: shared\nmodel: provider/global\nbuiltin-tools: [read]");
+      writeAgentFile(projectAgentsDir, "shared-local", "name: shared\nbuiltin-tools: [read, 42]");
 
       const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.equal(discovery.agents.some((agent) => agent.name === "shared"), false);
-      assert.ok(discovery.diagnostics.some((entry) => entry.field === "tools"));
+      assert.ok(discovery.diagnostics.some((entry) => entry.field === "builtin-tools"));
     });
   });
 
   it("tombstones a malformed project override whose filename differs from its name", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalAgentsDir }) => {
-      writeAgentFile(globalAgentsDir, "target", "name: target\nmodel: provider/global\ntools: [read]");
-      writeAgentFile(globalAgentsDir, "neighbor", "name: neighbor\ntools: [read]");
+      writeAgentFile(globalAgentsDir, "target", "name: target\nmodel: provider/global\nbuiltin-tools: [read]");
+      writeAgentFile(globalAgentsDir, "neighbor", "name: neighbor\nbuiltin-tools: [read]");
       writeFileSync(
         join(projectAgentsDir, "override.md"),
-        "---\nname: target\ntools: [read\n---\nbody",
+        "---\nname: target\nbuiltin-tools: [read\n---\nbody",
       );
 
       const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
@@ -1570,10 +1730,10 @@ describe("subagent discovery", () => {
 
   it("suppresses global fallback when an explicit project name has an invalid type", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalAgentsDir }) => {
-      writeAgentFile(globalAgentsDir, "target", "name: target\ntools: [read]");
-      writeAgentFile(globalAgentsDir, "neighbor", "name: neighbor\ntools: [read]");
-      writeAgentFile(projectAgentsDir, "local", "name: local\ntools: []");
-      writeAgentFile(projectAgentsDir, "override", "name: [target]\ntools: []");
+      writeAgentFile(globalAgentsDir, "target", "name: target\nbuiltin-tools: [read]");
+      writeAgentFile(globalAgentsDir, "neighbor", "name: neighbor\nbuiltin-tools: [read]");
+      writeAgentFile(projectAgentsDir, "local", "name: local\nbuiltin-tools: []");
+      writeAgentFile(projectAgentsDir, "override", "name: [target]\nbuiltin-tools: []");
 
       const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.deepEqual(discovery.agents.map((agent) => agent.name), ["local"]);
@@ -1589,12 +1749,12 @@ describe("subagent discovery", () => {
 
   it("suppresses global fallback when malformed YAML declares multiple possible names", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalAgentsDir }) => {
-      writeAgentFile(globalAgentsDir, "target", "name: target\ntools: [read]");
-      writeAgentFile(globalAgentsDir, "neighbor", "name: neighbor\ntools: [read]");
-      writeAgentFile(projectAgentsDir, "local", "name: local\ntools: []");
+      writeAgentFile(globalAgentsDir, "target", "name: target\nbuiltin-tools: [read]");
+      writeAgentFile(globalAgentsDir, "neighbor", "name: neighbor\nbuiltin-tools: [read]");
+      writeAgentFile(projectAgentsDir, "local", "name: local\nbuiltin-tools: []");
       writeFileSync(
         join(projectAgentsDir, "ambiguous.md"),
-        "---\nname: target\nname: neighbor\ntools: [read\n---\nbody",
+        "---\nname: target\nname: neighbor\nbuiltin-tools: [read\n---\nbody",
       );
 
       const parsed = parseAgentDefinition(
@@ -1619,8 +1779,8 @@ describe("subagent discovery", () => {
 
   it("excludes same-source duplicates regardless of lexical validity order", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
-      writeAgentFile(projectAgentsDir, "a-valid", "name: duplicate\ntools: [read]");
-      writeAgentFile(projectAgentsDir, "z-invalid", "name: duplicate\ntools: [read, 42]");
+      writeAgentFile(projectAgentsDir, "a-valid", "name: duplicate\nbuiltin-tools: [read]");
+      writeAgentFile(projectAgentsDir, "z-invalid", "name: duplicate\nbuiltin-tools: [read, 42]");
 
       const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
       assert.equal(discovery.agents.some((agent) => agent.name === "duplicate"), false);
@@ -1630,7 +1790,7 @@ describe("subagent discovery", () => {
 
   it("reports malformed YAML without hiding valid neighboring definitions", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
-      writeAgentFile(projectAgentsDir, "valid", "name: valid\ntools: []");
+      writeAgentFile(projectAgentsDir, "valid", "name: valid\nbuiltin-tools: []");
       writeFileSync(join(projectAgentsDir, "broken.md"), "---\nname: [unterminated\n---\nbody");
 
       const discovery = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
@@ -1645,12 +1805,12 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("fails unresolved custom tools in the public spawn path before tmux prerequisites", async () => {
+  it("rejects legacy tools in the public spawn path before tmux prerequisites", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
       writeAgentFile(
         projectAgentsDir,
-        "custom-tool-agent",
-        "name: custom-tool-agent\ntools: [missing_custom_tool]",
+        "legacy-tool-agent",
+        "name: legacy-tool-agent\ntools: [read]",
       );
       const { api, registeredTools } = createMockExtensionApi();
       (subagentsModule as any).default(api);
@@ -1658,22 +1818,22 @@ describe("subagent discovery", () => {
       assert.ok(subagentTool);
 
       const result = await subagentTool.execute(
-        "missing-tool",
-        { agent: "custom-tool-agent", task: "do it" },
+        "legacy-tool",
+        { agent: "legacy-tool-agent", task: "do it" },
         undefined,
         undefined,
         createMockContext(projectDir, true),
       );
-      assert.equal(result.details?.error, "unresolved agent tool");
-      assert.match(result.content[0].text, /custom-tool-agent/);
-      assert.match(result.content[0].text, /missing_custom_tool/);
-      assert.match(result.content[0].text, /registerToolExtension/);
+      assert.equal(result.details?.error, "unknown agent");
+      assert.match(result.content[0].text, /legacy-tool-agent/);
+      assert.match(result.content[0].text, /builtin-tools/);
+      assert.match(result.content[0].text, /extensions/);
     });
   });
 
   it("rejects empty runtime model and cwd overrides before tmux prerequisites", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
-      writeAgentFile(projectAgentsDir, "configured-agent", "name: configured-agent\ntools: []");
+      writeAgentFile(projectAgentsDir, "configured-agent", "name: configured-agent\nbuiltin-tools: []");
       const { api, registeredTools } = createMockExtensionApi();
       (subagentsModule as any).default(api);
       const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
@@ -1706,7 +1866,7 @@ describe("subagent discovery", () => {
       writeAgentFile(
         projectAgentsDir,
         "configured-agent",
-        "name: configured-agent\nmodel: provider/profile\ntools: []\ncwd: profile-dir",
+        "name: configured-agent\nmodel: provider/profile\nbuiltin-tools: []\ncwd: profile-dir",
       );
       const agent = discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true })
         .agents.find((entry) => entry.name === "configured-agent");
@@ -1947,7 +2107,7 @@ describe("subagent discovery", () => {
 
   it("requires the spawning extension path when a snapshot grants nesting", () => {
     const parsed = parseAgentDefinition(
-      "---\nname: coordinator\ntools: [read]\nsubagent_agents: [inspector]\n---\nbody",
+      "---\nname: coordinator\nbuiltin-tools: [read]\nsubagent_agents: [inspector]\n---\nbody",
       "/tmp/coordinator.md",
       "global",
     );
@@ -2436,7 +2596,7 @@ describe("tmux.ts interpretExitSidecar", () => {
 describe("commands", () => {
   it("/subagent emits a spawn tool call for a known agent", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
-      writeAgentFile(projectAgentsDir, "inspector", "name: inspector\ntools: [read]");
+      writeAgentFile(projectAgentsDir, "inspector", "name: inspector\nbuiltin-tools: [read]");
       const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
 
       (subagentsModule as any).default(api);

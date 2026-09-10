@@ -10,18 +10,24 @@ import {
   statSync,
   type Dirent,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, win32 } from "node:path";
 
 export type AgentSource = "global" | "project";
 export type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
 export type SystemPromptMode = "append" | "replace";
 export type AgentCli = "pi" | "claude";
 
+export interface AgentExtensionSelector {
+  package: string;
+  paths?: string[];
+}
+
 export interface AgentDefinition {
   name: string;
   description?: string;
   model?: string;
-  tools: string[];
+  builtinTools: string[];
+  extensions: AgentExtensionSelector[];
   skills: string[];
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   subagentAgents: string[];
@@ -69,7 +75,8 @@ const SUPPORTED_FIELDS = new Set([
   "name",
   "description",
   "model",
-  "tools",
+  "builtin-tools",
+  "extensions",
   "skill",
   "skills",
   "thinking",
@@ -95,6 +102,21 @@ const THINKING_VALUES = new Set([
 const SYSTEM_PROMPT_VALUES = new Set(["append", "replace"]);
 const SESSION_MODE_VALUES = new Set(["standalone", "lineage-only", "fork"]);
 const CLI_VALUES = new Set(["pi", "claude"]);
+const BUILTIN_TOOL_VALUES = new Set([
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "powershell",
+  "grep",
+  "find",
+  "ls",
+]);
+const SPAWNING_TOOL_VALUES = new Set([
+  "subagent",
+  "subagent_message",
+  "subagents_list",
+]);
 
 function hasOwn(record: AgentFrontmatter, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, key);
@@ -270,6 +292,137 @@ function stringList(
   return [...new Set(raw.map((entry) => entry.trim()).filter(Boolean))];
 }
 
+function builtinToolList(
+  frontmatter: AgentFrontmatter,
+  filePath: string,
+  diagnostics: AgentDiagnostic[],
+): string[] {
+  const tools = stringList(frontmatter, "builtin-tools", filePath, diagnostics);
+  for (const tool of tools) {
+    if (BUILTIN_TOOL_VALUES.has(tool)) continue;
+    diagnostics.push(
+      diagnostic(
+        filePath,
+        "builtin-tools",
+        SPAWNING_TOOL_VALUES.has(tool)
+          ? `entry "${tool}" is not a Pi built-in; use subagent_agents for nested spawning`
+          : `entry "${tool}" must be one of: ${[...BUILTIN_TOOL_VALUES].join(", ")}`,
+      ),
+    );
+  }
+  return tools;
+}
+
+function extensionSelectors(
+  frontmatter: AgentFrontmatter,
+  filePath: string,
+  diagnostics: AgentDiagnostic[],
+): AgentExtensionSelector[] {
+  const value = frontmatter.extensions;
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    diagnostics.push(diagnostic(filePath, "extensions", "must be a YAML array of mappings"));
+    return [];
+  }
+
+  const selectors: AgentExtensionSelector[] = [];
+  const seenPackages = new Set<string>();
+  for (const [index, entry] of value.entries()) {
+    const field = `extensions[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      diagnostics.push(diagnostic(filePath, field, "must be a mapping"));
+      continue;
+    }
+
+    const record = entry as AgentFrontmatter;
+    let valid = true;
+    for (const key of Object.keys(record)) {
+      if (key === "package" || key === "paths") continue;
+      diagnostics.push(diagnostic(filePath, `${field}.${key}`, "is not a supported extension field"));
+      valid = false;
+    }
+
+    let packageSource: string | undefined;
+    if (typeof record.package !== "string") {
+      diagnostics.push(diagnostic(filePath, `${field}.package`, "must be a non-empty string"));
+      valid = false;
+    } else {
+      packageSource = record.package;
+      if (!packageSource.trim()) {
+        diagnostics.push(diagnostic(filePath, `${field}.package`, "must be a non-empty string"));
+        valid = false;
+      } else if (seenPackages.has(packageSource)) {
+        diagnostics.push(
+          diagnostic(filePath, `${field}.package`, `duplicates package "${packageSource}"`),
+        );
+        valid = false;
+      } else {
+        seenPackages.add(packageSource);
+      }
+    }
+
+    let paths: string[] | undefined;
+    if (hasOwn(record, "paths")) {
+      if (!Array.isArray(record.paths)) {
+        diagnostics.push(
+          diagnostic(filePath, `${field}.paths`, "must be a non-empty YAML array of strings"),
+        );
+        valid = false;
+      } else if (record.paths.length === 0) {
+        diagnostics.push(
+          diagnostic(filePath, `${field}.paths`, "must not be empty when provided"),
+        );
+        valid = false;
+      } else {
+        paths = [];
+        const seenPaths = new Set<string>();
+        for (const [pathIndex, rawPath] of record.paths.entries()) {
+          const pathField = `${field}.paths[${pathIndex}]`;
+          if (typeof rawPath !== "string") {
+            diagnostics.push(diagnostic(filePath, pathField, "must be a non-empty string"));
+            valid = false;
+            continue;
+          }
+          const selector = rawPath;
+          if (!selector.trim()) {
+            diagnostics.push(diagnostic(filePath, pathField, "must be a non-empty string"));
+            valid = false;
+            continue;
+          }
+          if (seenPaths.has(selector)) {
+            diagnostics.push(diagnostic(filePath, pathField, `duplicates selector "${selector}"`));
+            valid = false;
+            continue;
+          }
+          seenPaths.add(selector);
+          if (
+            isAbsolute(selector) ||
+            win32.isAbsolute(selector) ||
+            /^[A-Za-z]:/.test(selector)
+          ) {
+            diagnostics.push(diagnostic(filePath, pathField, "must be package-relative"));
+            valid = false;
+            continue;
+          }
+          if (selector.split(/[\\/]+/).some((segment) => segment === "." || segment === "..")) {
+            diagnostics.push(
+              diagnostic(filePath, pathField, "must not contain '.' or '..' path segments"),
+            );
+            valid = false;
+            continue;
+          }
+          paths.push(selector);
+        }
+      }
+    }
+
+    if (valid && packageSource) {
+      selectors.push({ package: packageSource, ...(paths ? { paths } : {}) });
+    }
+  }
+  return selectors;
+}
+
 export function parseAgentDefinition(
   content: string,
   filePath: string,
@@ -330,7 +483,15 @@ export function parseAgentDefinition(
     };
   }
   for (const key of Object.keys(frontmatter)) {
-    if (!SUPPORTED_FIELDS.has(key)) {
+    if (key === "tools") {
+      diagnostics.push(
+        diagnostic(
+          filePath,
+          key,
+          "has been removed; use builtin-tools for Pi built-ins and extensions for package extension capabilities",
+        ),
+      );
+    } else if (!SUPPORTED_FIELDS.has(key)) {
       diagnostics.push(diagnostic(filePath, key, "is not a supported agent-definition field"));
     }
   }
@@ -352,7 +513,8 @@ export function parseAgentDefinition(
     diagnostics.push(diagnostic(filePath, "body", "must contain a non-empty Markdown prompt"));
   }
   const skillsField = hasOwn(frontmatter, "skill") ? "skill" : "skills";
-  const tools = stringList(frontmatter, "tools", filePath, diagnostics);
+  const builtinTools = builtinToolList(frontmatter, filePath, diagnostics);
+  const extensions = extensionSelectors(frontmatter, filePath, diagnostics);
   const skills = stringList(frontmatter, skillsField, filePath, diagnostics);
   const subagentAgents = stringList(frontmatter, "subagent_agents", filePath, diagnostics);
   for (const target of subagentAgents) {
@@ -363,24 +525,23 @@ export function parseAgentDefinition(
       );
     }
   }
-  const spawningTool = tools.find((tool) =>
-    ["subagent", "subagent_message", "subagents_list"].includes(tool),
-  );
-  if (spawningTool) {
-    diagnostics.push(
-      diagnostic(
-        filePath,
-        "tools",
-        `must not grant spawning tool "${spawningTool}"; use subagent_agents instead`,
-      ),
-    );
+  const cli = optionalEnum<AgentCli>(frontmatter, "cli", CLI_VALUES, filePath, diagnostics);
+  if (cli === "claude") {
+    for (const field of ["builtin-tools", "extensions"] as const) {
+      if (hasOwn(frontmatter, field)) {
+        diagnostics.push(
+          diagnostic(filePath, field, `cannot be used with cli: claude; ${field} is Pi-only`),
+        );
+      }
+    }
   }
 
   const agent: AgentDefinition = {
     name,
     description: optionalString(frontmatter, "description", filePath, diagnostics),
     model: optionalString(frontmatter, "model", filePath, diagnostics),
-    tools,
+    builtinTools,
+    extensions,
     skills,
     thinking: optionalEnum(frontmatter, "thinking", THINKING_VALUES, filePath, diagnostics),
     subagentAgents,
@@ -401,7 +562,7 @@ export function parseAgentDefinition(
       diagnostics,
     ),
     cwd: optionalString(frontmatter, "cwd", filePath, diagnostics),
-    cli: optionalEnum(frontmatter, "cli", CLI_VALUES, filePath, diagnostics),
+    cli,
     body: normalizedBody || undefined,
     disableModelInvocation:
       optionalBoolean(frontmatter, "disable-model-invocation", filePath, diagnostics) ?? false,
