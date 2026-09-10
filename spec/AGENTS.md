@@ -11,7 +11,7 @@ Protocol version: 1
 - `spec/active/<id>/`: every nonterminal initiative or work item.
 - `spec/archive/<id>/`: terminal history retained under the same stable ID.
 - `spec/templates/`: canonical artifact templates.
-- `spec/scripts/manage-spec-item.py`: deterministic creation, resolution, current planning transitions, validation, and index maintenance.
+- `spec/scripts/manage-spec-item.py`: deterministic creation, resolution, current planning transitions, completed archival, validation, and index maintenance.
 - `spec/index.md`: generated routing tables plus human-authored orientation.
 
 ## Work-item contract
@@ -20,7 +20,7 @@ Protocol version: 1
 - Quick Plan items contain `plan.md` and start in `planned`.
 - Grill With Docs items contain `discovery.md` and start in `discovering`.
 - To Spec preserves discovery evidence, creates `plan.md`, and transitions `ready_for_spec` to `planned`.
-- `verification.md` and `outcome.md` are created only by later workflows that own those lifecycle phases.
+- Implement creates or updates `verification.md` after successful evidence gates. It creates `outcome.md` only after explicit completion approval.
 - `plan.md` is the canonical implementation contract. Discovery and research cannot silently override it.
 
 ## Planning boundaries
@@ -35,13 +35,16 @@ Protocol version: 1
 ## Indexing
 
 - `item.yaml` and filesystem location are authoritative for item identity and status.
+- Active items use `discovering`, `ready_for_spec`, or `planned` as their route permits. Archived items use `completed`.
 - Update only the managed regions in `spec/index.md`.
 - Explicitly identify an item by ID or path. Infer only when exactly one eligible active item exists.
 - Never infer the active item from a Git branch or shared current-item pointer.
 
 ## Archive boundary
 
-`spec/archive/` is the only terminal location. Completion, cancellation, supersession, verification automation, and archive transitions are reserved for a later workflow and are not implemented by the current planning skills.
+`spec/archive/` is the only terminal location. After all applicable implementation evidence gates pass, Implement may preflight completion, request explicit terminal approval, create `outcome.md`, and invoke the helper's dedicated `archive` command. That command is the only protocol operation that moves the item, sets `status: completed`, and regenerates both index tables. Missing artifacts, invalid state, an existing destination, or literal canonical `spec/active/<id>` text in Markdown outside the item block a new move. Archive location is the commit point; rerunning the command may idempotently finish archived status or repair the derived index.
+
+Cancellation, supersession, and broader execution-state automation remain unimplemented. Planning skills do not archive items.
 
 ## Authority
 

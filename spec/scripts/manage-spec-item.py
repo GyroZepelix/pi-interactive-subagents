@@ -5,7 +5,7 @@
 #   "PyYAML>=6.0,<7",
 # ]
 # ///
-"""Manage the planning phases of repository-local spec work items."""
+"""Manage repository-local spec work items through completed archival."""
 
 from __future__ import annotations
 
@@ -35,7 +35,9 @@ WORK_TYPES = {
     "documentation",
     "other",
 }
-STATUSES = {"discovering", "ready_for_spec", "planned"}
+ACTIVE_STATUSES = {"discovering", "ready_for_spec", "planned"}
+TERMINAL_STATUSES = {"completed"}
+STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
 TRANSITIONS = {
     "discovering": {"ready_for_spec"},
     "ready_for_spec": {"planned"},
@@ -46,6 +48,7 @@ ACTIVE_END = "<!-- spec-items:active:end -->"
 ARCHIVE_START = "<!-- spec-items:archive:start -->"
 ARCHIVE_END = "<!-- spec-items:archive:end -->"
 ID_PATTERN = re.compile(r"^[0-9]{6}-[0-9]{4}-[a-z0-9]+(?:-[a-z0-9]+)*(?:-[0-9]+)?$")
+MARKDOWN_SUFFIXES = {".md", ".markdown"}
 
 
 class ProtocolError(Exception):
@@ -114,7 +117,7 @@ def atomic_write(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-    except Exception:
+    except BaseException:
         try:
             os.unlink(temporary)
         except FileNotFoundError:
@@ -192,10 +195,10 @@ def validate_manifest_shape(item_dir: Path, manifest: dict[str, Any]) -> list[st
         errors.append("route must be one of: " + ", ".join(sorted(ROUTES)))
     if status not in STATUSES:
         errors.append("status must be one of: " + ", ".join(sorted(STATUSES)))
-    if route == "quick-plan" and status != "planned":
-        errors.append("quick-plan items must have status planned")
-    if route == "grill-to-spec" and status not in {"discovering", "ready_for_spec", "planned"}:
-        errors.append("grill-to-spec items must use a current planning status")
+    if route == "quick-plan" and status not in {"planned", "completed"}:
+        errors.append("quick-plan items must have status planned or completed")
+    if route == "grill-to-spec" and status not in STATUSES:
+        errors.append("grill-to-spec items must use a supported lifecycle status")
     for field in ("created_at", "updated_at"):
         value = manifest.get(field)
         if not isinstance(value, str) or not value.strip():
@@ -246,17 +249,45 @@ def validate_manifest_shape(item_dir: Path, manifest: dict[str, Any]) -> list[st
     return errors
 
 
-def validate_item(item_dir: Path, paths: dict[str, Path]) -> dict[str, Any]:
+def item_location(item_dir: Path, paths: dict[str, Path]) -> str | None:
+    resolved = item_dir.resolve()
+    for location in ("active", "archive"):
+        if resolved.parent == paths[location].resolve():
+            return location
+    return None
+
+
+def validate_item(
+    item_dir: Path,
+    paths: dict[str, Path],
+    allow_archive_planned: bool = False,
+) -> dict[str, Any]:
     manifest = load_manifest(item_dir)
     errors = validate_manifest_shape(item_dir, manifest)
     route = manifest.get("route")
     status = manifest.get("status")
+    location = item_location(item_dir, paths)
+    if location == "active" and status not in ACTIVE_STATUSES:
+        errors.append("active items must use a nonterminal planning status")
+    if location == "archive" and status not in TERMINAL_STATUSES and not (
+        allow_archive_planned and status == "planned"
+    ):
+        errors.append("archived items must have status completed")
+    if location is None:
+        errors.append("item must be located under spec/active or spec/archive")
     if route == "quick-plan" and not (item_dir / "plan.md").is_file():
         errors.append("quick-plan items require plan.md")
     if route == "grill-to-spec" and not (item_dir / "discovery.md").is_file():
         errors.append("grill-to-spec items require discovery.md")
-    if route == "grill-to-spec" and status == "planned" and not (item_dir / "plan.md").is_file():
-        errors.append("planned grill-to-spec items require plan.md")
+    if route == "grill-to-spec" and status in {"planned", "completed"} and not (
+        item_dir / "plan.md"
+    ).is_file():
+        errors.append("planned or completed grill-to-spec items require plan.md")
+    if status == "completed":
+        for artifact in ("plan.md", "verification.md", "outcome.md"):
+            artifact_path = item_dir / artifact
+            if not artifact_path.is_file() or artifact_path.is_symlink():
+                errors.append(f"completed items require regular non-symlink {artifact}")
 
     parent = manifest.get("parent")
     if parent:
@@ -357,36 +388,53 @@ def collect_items(
     return items
 
 
-def update_index(paths: dict[str, Path]) -> None:
+def render_index(
+    paths: dict[str, Path],
+    active_items: list[tuple[Path, dict[str, Any]]] | None = None,
+    archive_items: list[tuple[Path, dict[str, Any]]] | None = None,
+) -> str:
     text = paths["index"].read_text(encoding="utf-8")
-    active_body = table_for(
-        collect_items(paths["active"], paths, require_manifests=True),
-        "active",
-    )
-    archive_body = table_for(collect_items(paths["archive"], paths), "archive")
-    text = replace_region(text, ACTIVE_START, ACTIVE_END, active_body)
-    text = replace_region(text, ARCHIVE_START, ARCHIVE_END, archive_body)
-    atomic_write(paths["index"], text)
+    if active_items is None:
+        active_items = collect_items(paths["active"], paths, require_manifests=True)
+    if archive_items is None:
+        archive_items = collect_items(paths["archive"], paths, require_manifests=True)
+    active_ids = {str(manifest["id"]) for _, manifest in active_items}
+    archive_ids = {str(manifest["id"]) for _, manifest in archive_items}
+    duplicates = sorted(active_ids & archive_ids)
+    if duplicates:
+        raise ProtocolError("item IDs exist in both active and archive: " + ", ".join(duplicates))
+    text = replace_region(text, ACTIVE_START, ACTIVE_END, table_for(active_items, "active"))
+    return replace_region(text, ARCHIVE_START, ARCHIVE_END, table_for(archive_items, "archive"))
 
 
-def item_from_explicit(value: str, paths: dict[str, Path]) -> Path:
+def update_index(paths: dict[str, Path]) -> None:
+    atomic_write(paths["index"], render_index(paths))
+
+
+def item_from_explicit(
+    value: str,
+    paths: dict[str, Path],
+    locations: tuple[str, ...] = ("active",),
+) -> Path:
     raw = Path(value).expanduser()
     candidates: list[Path] = []
     if raw.is_absolute():
         candidates.append(raw)
     else:
-        candidates.extend([paths["root"] / raw, paths["active"] / value])
+        candidates.append(paths["root"] / raw)
+        candidates.extend(paths[location] / value for location in locations)
+    allowed_roots = [paths[location].resolve() for location in locations]
     for candidate in candidates:
         resolved = candidate.resolve()
         if resolved.is_file():
             resolved = resolved.parent
         if resolved.is_dir() and (resolved / "item.yaml").is_file():
-            try:
-                resolved.relative_to(paths["active"].resolve())
-            except ValueError as exc:
-                raise ProtocolError("only active work items can be resolved by this helper") from exc
-            return resolved
-    raise ProtocolError(f"active work item not found: {value}", code=3)
+            if any(resolved.parent == root for root in allowed_roots):
+                return resolved
+            label = " or ".join(f"spec/{location}" for location in locations)
+            raise ProtocolError(f"work item must be located under {label}")
+    label = " or ".join(f"spec/{location}" for location in locations)
+    raise ProtocolError(f"work item not found under {label}: {value}", code=3)
 
 
 def resolve_item(
@@ -499,6 +547,156 @@ def command_resolve(args: argparse.Namespace, paths: dict[str, Path]) -> None:
     )
 
 
+def required_archive_artifacts(item_dir: Path, include_outcome: bool) -> None:
+    names = ["plan.md", "verification.md"]
+    if include_outcome:
+        names.append("outcome.md")
+    missing = [
+        name
+        for name in names
+        if not (item_dir / name).is_file() or (item_dir / name).is_symlink()
+    ]
+    if missing:
+        raise ProtocolError("archive requires files: " + ", ".join(missing))
+
+
+def canonical_reference_sources(paths: dict[str, Path], item_dir: Path) -> list[str]:
+    token = f"spec/active/{item_dir.name}"
+    sources: list[str] = []
+    root = paths["root"]
+
+    def fail_on_traversal_error(error: OSError) -> None:
+        location = error.filename or root
+        detail = error.strerror or str(error)
+        raise ProtocolError(f"cannot inspect Markdown tree at {location}: {detail}")
+
+    for current, directories, names in os.walk(
+        root, onerror=fail_on_traversal_error
+    ):
+        directory = Path(current)
+        directories[:] = [
+            name
+            for name in directories
+            if name != ".git" and directory / name != item_dir
+        ]
+        for name in names:
+            source = directory / name
+            if source.suffix.lower() not in MARKDOWN_SUFFIXES or source.is_symlink():
+                continue
+            try:
+                text = source.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise ProtocolError(f"cannot inspect Markdown source {source}: {exc}") from exc
+            if token in text:
+                sources.append(str(source.relative_to(root)))
+    return sorted(sources)
+
+
+def archive_item_paths(item_id: str, paths: dict[str, Path]) -> tuple[Path, Path]:
+    if not ID_PATTERN.fullmatch(item_id):
+        raise ProtocolError("archive --item requires an explicit work item ID")
+    return paths["active"] / item_id, paths["archive"] / item_id
+
+
+def preflight_new_archive(
+    item_dir: Path,
+    destination: Path,
+    paths: dict[str, Path],
+    include_outcome: bool,
+) -> dict[str, Any]:
+    if os.path.lexists(destination):
+        raise ProtocolError(f"archive destination already exists: {destination}")
+    manifest = validate_item(item_dir, paths)
+    if manifest["status"] != "planned":
+        raise ProtocolError(
+            f"item {manifest['id']} has status {manifest['status']!r}; archive requires planned"
+        )
+    required_archive_artifacts(item_dir, include_outcome)
+    render_index(paths)
+    references = canonical_reference_sources(paths, item_dir)
+    if references:
+        raise ProtocolError(
+            f"archive blocked by canonical reference spec/active/{item_dir.name} in: "
+            + ", ".join(references)
+        )
+    return manifest
+
+
+def finalize_archived_item(
+    destination: Path,
+    paths: dict[str, Path],
+) -> tuple[dict[str, Any], bool]:
+    manifest = validate_item(destination, paths, allow_archive_planned=True)
+    if manifest["status"] not in {"planned", "completed"}:
+        raise ProtocolError(
+            f"archived item {manifest['id']} has unsupported status {manifest['status']!r}"
+        )
+    required_archive_artifacts(destination, include_outcome=True)
+    finalized = manifest["status"] == "planned"
+    if finalized:
+        manifest = dict(manifest)
+        manifest["status"] = "completed"
+        manifest["updated_at"] = now_iso()
+        write_manifest(destination, manifest)
+    manifest = validate_item(destination, paths)
+    update_index(paths)
+    return manifest, finalized
+
+
+def command_archive(args: argparse.Namespace, paths: dict[str, Path]) -> None:
+    item_dir, destination = archive_item_paths(args.item, paths)
+    active_exists = os.path.lexists(item_dir)
+    archive_exists = os.path.lexists(destination)
+    if active_exists and archive_exists:
+        raise ProtocolError(f"item exists in both active and archive: {args.item}")
+
+    relative_source = str(item_dir.relative_to(paths["root"]))
+    relative_destination = str(destination.relative_to(paths["root"]))
+    if args.check:
+        if not active_exists:
+            if archive_exists:
+                raise ProtocolError(f"archive destination already exists: {destination}")
+            raise ProtocolError(f"active work item not found: {args.item}", code=3)
+        manifest = preflight_new_archive(
+            item_dir, destination, paths, include_outcome=False
+        )
+        emit(
+            {
+                "action": "archive",
+                "check": True,
+                "from": relative_source,
+                "id": manifest["id"],
+                "status": "completed",
+                "to": relative_destination,
+                "valid": True,
+            }
+        )
+        return
+
+    recovered = False
+    if active_exists:
+        preflight_new_archive(item_dir, destination, paths, include_outcome=True)
+        os.rename(item_dir, destination)
+    elif archive_exists:
+        recovered = True
+    else:
+        raise ProtocolError(f"work item not found: {args.item}", code=3)
+
+    manifest, finalized = finalize_archived_item(destination, paths)
+    emit(
+        {
+            "action": "archive",
+            "check": False,
+            "finalized": finalized,
+            "from": relative_source,
+            "id": manifest["id"],
+            "recovered": recovered,
+            "status": "completed",
+            "to": relative_destination,
+        }
+    )
+
+
 def command_transition(args: argparse.Namespace, paths: dict[str, Path]) -> None:
     item_dir, manifest = resolve_item(paths, args.item, set(), set())
     original = dict(manifest)
@@ -524,14 +722,21 @@ def command_transition(args: argparse.Namespace, paths: dict[str, Path]) -> None
 
 def command_validate(args: argparse.Namespace, paths: dict[str, Path]) -> None:
     if args.all:
-        items = collect_items(paths["active"], paths, require_manifests=True)
+        active_items = collect_items(paths["active"], paths, require_manifests=True)
+        archive_items = collect_items(paths["archive"], paths, require_manifests=True)
         update_index(paths)
-        emit({"action": "validate", "count": len(items), "valid": True})
+        emit(
+            {
+                "action": "validate",
+                "count": len(active_items) + len(archive_items),
+                "valid": True,
+            }
+        )
         return
     if not args.item:
         raise ProtocolError("validate requires --item or --all", code=2)
-    item_dir, manifest = resolve_item(paths, args.item, set(), set())
-    validate_item(item_dir, paths)
+    item_dir = item_from_explicit(args.item, paths, locations=("active", "archive"))
+    manifest = validate_item(item_dir, paths)
     emit({"action": "validate", "id": manifest["id"], "valid": True})
 
 
@@ -542,7 +747,7 @@ def command_index(paths: dict[str, Path]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create, resolve, transition, validate, and index planning work items."
+        description="Create, resolve, transition, archive, validate, and index spec work items."
     )
     parser.add_argument("--root", default=".", help="Repository root, default: current directory")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -564,9 +769,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     transition = subparsers.add_parser("transition", help="Apply a current planning transition")
     transition.add_argument("--item", help="Explicit item ID, directory, or artifact path")
-    transition.add_argument("--to", choices=sorted(STATUSES), required=True)
+    transition.add_argument("--to", choices=sorted(ACTIVE_STATUSES), required=True)
 
-    validate = subparsers.add_parser("validate", help="Validate one item or all active items")
+    archive = subparsers.add_parser("archive", help="Complete and archive one planned item")
+    archive.add_argument("--item", required=True, help="Explicit work item ID")
+    archive.add_argument(
+        "--check",
+        action="store_true",
+        help="Run non-mutating archive preflight without requiring outcome.md",
+    )
+
+    validate = subparsers.add_parser("validate", help="Validate one item or all items")
     validate.add_argument("--item", help="Explicit item ID, directory, or artifact path")
     validate.add_argument("--all", action="store_true")
 
@@ -590,6 +803,8 @@ def main() -> int:
             command_resolve(args, paths)
         elif args.command == "transition":
             command_transition(args, paths)
+        elif args.command == "archive":
+            command_archive(args, paths)
         elif args.command == "validate":
             command_validate(args, paths)
         elif args.command == "index":
