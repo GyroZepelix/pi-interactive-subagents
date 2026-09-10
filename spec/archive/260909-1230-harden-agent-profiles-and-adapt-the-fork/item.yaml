@@ -5,9 +5,9 @@ kind: work-item
 work_type: refactor
 parent: null
 route: quick-plan
-status: planned
+status: completed
 created_at: '2026-09-09T12:30:24+02:00'
-updated_at: '2026-09-09T12:30:24+02:00'
+updated_at: '2026-09-10T20:25:32+02:00'
 external_refs:
 - system: github
   type: repository

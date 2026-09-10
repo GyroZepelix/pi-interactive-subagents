@@ -36,9 +36,9 @@ Replay validation was tightened at the pre-pane boundary. New snapshots preserve
 
 ## Source of truth
 
-- `spec/active/260909-1952-profile-extension-loading/implementation/02-02-versioned-resume.md`: complete 02.02 implementation, checks, review verdicts, failures, and handoff.
-- `spec/active/260909-1952-profile-extension-loading/implementation/index.md`: T02 completion and Current `03.01`.
-- `spec/active/260909-1952-profile-extension-loading/plan.md`: requirements R06-R10 and R12, Decisions D10 and D14-D16, and checked T02 task.
+- `spec/archive/260909-1952-profile-extension-loading/implementation/02-02-versioned-resume.md`: complete 02.02 implementation, checks, review verdicts, failures, and handoff.
+- `spec/archive/260909-1952-profile-extension-loading/implementation/index.md`: T02 completion and Current `03.01`.
+- `spec/archive/260909-1952-profile-extension-loading/plan.md`: requirements R06-R10 and R12, Decisions D10 and D14-D16, and checked T02 task.
 - `pi-extension/subagents/session.ts`: strict legacy/versioned snapshot union and reader.
 - `pi-extension/subagents/index.ts`: snapshot construction, replay validation, shared command application, and resume environment.
 - `test/test.ts`: structural, compatibility, ordering, environment, path, and public pre-pane refusal regressions.

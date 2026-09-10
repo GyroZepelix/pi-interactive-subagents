@@ -36,9 +36,9 @@ Repeated focused reviews drove corrections for malformed project settings, packa
 
 ## Source of truth
 
-- `spec/active/260909-1952-profile-extension-loading/plan.md`: authoritative requirements and T01 completion state.
-- `spec/active/260909-1952-profile-extension-loading/implementation/index.md`: sliced progress, checkpoints, and Current `02.01`.
-- `spec/active/260909-1952-profile-extension-loading/implementation/01-02-package-resolution.md`: attempt history, final acceptance evidence, review reconciliation, and handoff.
+- `spec/archive/260909-1952-profile-extension-loading/plan.md`: authoritative requirements and T01 completion state.
+- `spec/archive/260909-1952-profile-extension-loading/implementation/index.md`: sliced progress, checkpoints, and Current `02.01`.
+- `spec/archive/260909-1952-profile-extension-loading/implementation/01-02-package-resolution.md`: attempt history, final acceptance evidence, review reconciliation, and handoff.
 - `pi-extension/subagents/agents.ts`: parsed and resolved definition model and package/resource resolver.
 - `pi-extension/subagents/index.ts`: awaited public discovery callers.
 - `test/test.ts`: isolated parser, resolver, scope, identity, side-effect, tombstone, and caller regressions.

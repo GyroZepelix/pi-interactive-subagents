@@ -36,9 +36,9 @@ Independent review then exposed three launch-boundary gaps: profiles could selec
 
 ## Source of truth
 
-- `spec/active/260909-1952-profile-extension-loading/plan.md`: authoritative capability lifecycle contract and Decision D16.
-- `spec/active/260909-1952-profile-extension-loading/implementation/02-01-child-capability-launch.md`: complete attempts, acceptance evidence, focused review, and handoff.
-- `spec/active/260909-1952-profile-extension-loading/implementation/index.md`: Current `02.02`, T02 checkpoint, and slice progress.
+- `spec/archive/260909-1952-profile-extension-loading/plan.md`: authoritative capability lifecycle contract and Decision D16.
+- `spec/archive/260909-1952-profile-extension-loading/implementation/02-01-child-capability-launch.md`: complete attempts, acceptance evidence, focused review, and handoff.
+- `spec/archive/260909-1952-profile-extension-loading/implementation/index.md`: Current `02.02`, T02 checkpoint, and slice progress.
 - `pi-extension/subagents/index.ts`: launch isolation, protected extension ordering, path preflight, and nested environment construction.
 - `pi-extension/subagents/subagent-runtime-control.ts`: first-loaded framework runtime behavior.
 - `pi-extension/subagents/subagent-capability-activation.ts`: trailing child-only activation behavior.

@@ -55,7 +55,7 @@ Use this shape for new entries:
 ## [2026-09-10] dream | child capability launch
 
 - Trigger: `/dream` run after completing and independently reviewing profile-extension-loading slice 02.01.
-- Inputs: current session, `spec/active/260909-1952-profile-extension-loading/plan.md`, its 02.01 packet and implementation index, changed runtime source, focused tests, and current profile/runtime wiki pages.
+- Inputs: current session, `spec/archive/260909-1952-profile-extension-loading/plan.md`, its 02.01 packet and implementation index, changed runtime source, focused tests, and current profile/runtime wiki pages.
 - Wiki pages changed: `wiki/dreams/2026-09-10-1752-completed-session.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/observations.md`, `wiki/index.md`, and `wiki/log.md`.
 - Verification: claims checked against staged source and spec evidence; focused and full tests had passed; changed files were re-read, links and tier separation checked, memory safety scans run, and `git diff --check` passed.
 - Notes: versioned resume and the T02 segment gate remain Current 02.02; model-consuming lifecycle tests remain approval-gated; no `MEMORY.md` pointer was needed because existing index routes cover both convention pages.
@@ -63,7 +63,7 @@ Use this shape for new entries:
 ## [2026-09-10] dream | versioned resume
 
 - Trigger: `/dream` run after completing profile-extension-loading slice 02.02 and the T02 high-assurance segment gate.
-- Inputs: current session, `spec/active/260909-1952-profile-extension-loading/plan.md`, its 02.02 packet and implementation index, changed snapshot/resume source and tests, review verdicts, and current runtime-safety and observation pages.
+- Inputs: current session, `spec/archive/260909-1952-profile-extension-loading/plan.md`, its 02.02 packet and implementation index, changed snapshot/resume source and tests, review verdicts, and current runtime-safety and observation pages.
 - Wiki pages changed: `wiki/dreams/2026-09-10-1843-completed-session.md`, `wiki/conventions/runtime-safety.md`, `wiki/observations.md`, `wiki/index.md`, and `wiki/log.md`.
 - Verification: claims checked against source and spec evidence; focused, integrated, full unit, controlled tmux, Standards, and Spec gates had passed; changed wiki files were re-read, links and tier separation checked, memory safety scans run, and `git diff --check` passed.
 - Notes: Current is 03.01 for documentation and final whole-plan verification; configured-model lifecycle testing remains approval-gated; no `MEMORY.md` pointer was needed because the existing runtime-safety route covers the durable update.
@@ -79,7 +79,7 @@ Use this shape for new entries:
 ## [2026-09-10] dream | final profile-extension verification
 
 - Trigger: `/dream` run after completing Current 03.01 and the whole-plan profile-extension-loading verification gate.
-- Inputs: current conversation, `spec/active/260909-1952-profile-extension-loading/verification.md`, its 03.01 packet, final documentation and wiki diffs, review verdicts, and the failed archive capability check.
+- Inputs: current conversation, `spec/archive/260909-1952-profile-extension-loading/verification.md`, its 03.01 packet, final documentation and wiki diffs, review verdicts, and the failed archive capability check.
 - Wiki pages changed: `wiki/dreams/2026-09-10-1958-completed-session.md`, `wiki/development.md`, `wiki/index.md`, and `wiki/log.md`.
 - Verification: re-read changed wiki files, checked relative links and tier separation, ran memory safety scans, confirmed wiki-only Dream write scope, and ran `git diff --check`.
 - Notes: implementation and whole-plan verification are complete, but the item remains active because the repository helper lacks `archive`; configured-model lifecycle testing remains approval-gated; no `MEMORY.md` pointer was needed because `wiki/development.md` is already routed from the index.

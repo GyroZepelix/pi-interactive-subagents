@@ -37,8 +37,8 @@ Focused documentation checks ran before review. Reviewer findings then drove nar
 
 ## Source of truth
 
-- `spec/active/260909-1952-profile-extension-loading/verification.md`: consolidated requirement, check, review, limitation, and archive-preflight evidence.
-- `spec/active/260909-1952-profile-extension-loading/implementation/03-01-documentation-and-final-verification.md`: final-slice attempt log, completion record, checkpoints, and handoff.
+- `spec/archive/260909-1952-profile-extension-loading/verification.md`: consolidated requirement, check, review, limitation, and archive-preflight evidence.
+- `spec/archive/260909-1952-profile-extension-loading/implementation/03-01-documentation-and-final-verification.md`: final-slice attempt log, completion record, checkpoints, and handoff.
 - `README.md` and `docs/agent-definitions.md`: final user-facing profile-extension contract.
 - `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, and `pi-extension/subagents/session.ts`: authoritative parser, resolution, launch, and resume behavior.
 
