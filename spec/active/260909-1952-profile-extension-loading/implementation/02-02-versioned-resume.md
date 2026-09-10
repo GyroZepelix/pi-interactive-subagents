@@ -17,8 +17,9 @@ The persisted schema must encode the verified launch behavior from 02.01. This s
 - Requirement R09: new sidecars identify version/mode, selected built-ins, and exact ordered absolute extension paths; resume validates paths before pane creation and does not reread profile/package settings.
 - Requirement R10: valid current strict `toolAllowlist` snapshots remain resumable through `--tools` and are not automatically rewritten.
 - Requirement R08: snapshot state must preserve whether nesting controls and `PI_SUBAGENT_ALLOWED` are restored.
-- Requirements R06-R07: replay preserves framework-first extension order and the same selected built-ins plus complete declared extension grants as initial launch.
+- Requirements R06-R07: replay preserves runtime-control-first, activation-control-last extension order and the same selected built-ins plus complete declared extension grants as initial launch.
 - Decisions D10/D14: use current contents at valid stored paths and preserve legacy strict snapshot compatibility.
+- Decision D16: new-mode resume loads the tool-free activation control after all snapshotted profile extension paths while retaining runtime and spawning control precedence.
 - Security invariant: a missing, malformed, unknown-version, incomplete, or path-invalid snapshot refuses resume before pane creation rather than falling back to defaults.
 - Segment acceptance contribution: completes the durable launch/resume capability lifecycle and T02 gate.
 - Parent-plan sections to load on conflict or uncertainty: Requirements R06-R10; Design "Child launch and activation" and "Versioned loadouts"; Decision Log D10, D14-D15; T02 acceptance and risks.
@@ -36,6 +37,8 @@ The persisted schema must encode the verified launch behavior from 02.01. This s
 
 - `pi-extension/subagents/session.ts`
 - `pi-extension/subagents/index.ts`
+- `pi-extension/subagents/subagent-runtime-control.ts`
+- `pi-extension/subagents/subagent-capability-activation.ts`
 - `test/test.ts`
 
 These paths are navigation hints. Inspect other relevant source or tests when justified by the bounded outcome.
@@ -44,7 +47,7 @@ These paths are navigation hints. Inspect other relevant source or tests when ju
 
 - New sidecars contain an explicit supported version/capability mode, selected built-ins, ordered absolute extension paths, and the existing launch state needed for faithful replay.
 - The reader rejects unknown fields, unsupported versions/modes, malformed built-ins, duplicate or relative paths, inconsistent nesting state, and incomplete mode-specific fields.
-- New-mode launch and resume share one command/capability application path and reproduce framework-first ordering, selected built-ins, extension order, and nested-agent restrictions.
+- New-mode launch and resume share one command/capability application path and reproduce runtime-control-first, activation-control-last ordering, selected built-ins, profile extension order, and nested-agent restrictions.
 - Resume succeeds independently of changed or deleted profiles and changed package settings when stored paths remain valid.
 - Resume uses current installed contents at stored paths and refuses missing/non-file/otherwise invalid paths before pane creation.
 - Valid legacy strict snapshots still round-trip and resume with `--no-extensions`, strict `--tools`, and exact legacy extension paths; they are not rewritten.
@@ -53,8 +56,8 @@ These paths are navigation hints. Inspect other relevant source or tests when ju
 
 ## Focused checks
 
-- `node --test --test-name-pattern='session.ts|subagent discovery|subagent-done.ts' test/test.ts`
-- `git diff --check -- pi-extension/subagents/session.ts pi-extension/subagents/index.ts pi-extension/subagents/subagent-done.ts test/test.ts`
+- `node --test --test-name-pattern='session.ts|subagent discovery|subagent runtime control|capability activation' test/test.ts`
+- `git diff --check -- pi-extension/subagents/session.ts pi-extension/subagents/index.ts pi-extension/subagents/subagent-runtime-control.ts pi-extension/subagents/subagent-capability-activation.ts test/test.ts`
 
 ## Focused review
 
@@ -64,8 +67,8 @@ Ask one independent read-only reviewer to inspect the Current slice, its complet
 
 Run the segment's integrated acceptance and appropriate regression checks, then launch independent read-only Standards and Spec reviewers. Resolve blocking findings before checking off the segment and matching plan task.
 
-- Integrated checks: `node --test --test-name-pattern='session.ts|subagent discovery|subagent-done.ts|tool registration' test/test.ts`, `npm test`, and in a controlled tmux session `node --test test/integration/tmux-surface.test.ts`
-- Segment acceptance: Prove R06-R10 and R12 across initial launch and both snapshot modes, including activation timing, extension ordering, missing-path refusal, nesting, removed interfaces, and unchanged legacy strict replay. Standards and Spec reviews inspect the complete T02 diff from its recorded segment checkpoint.
+- Integrated checks: `node --test --test-name-pattern='session.ts|subagent discovery|subagent runtime control|capability activation|tool registration' test/test.ts`, `npm test`, and in a controlled tmux session `node --test test/integration/tmux-surface.test.ts`
+- Segment acceptance: Prove R06-R10, R12, and D16 across initial launch and both snapshot modes, including after-profile activation timing, extension ordering, missing-path refusal, nesting, removed interfaces, and unchanged legacy strict replay. Standards and Spec reviews inspect the complete T02 diff from its recorded segment checkpoint.
 
 ## Attempt log
 

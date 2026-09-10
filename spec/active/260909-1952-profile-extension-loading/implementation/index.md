@@ -2,7 +2,7 @@
 
 Plan: `../plan.md`
 Mode: sliced
-Current: `02.01`
+Current: `02.02`
 Expected implementation sessions: 5
 Implementation starting checkpoint: `486f582398eb6a79666e3ec05e868d33546c49eb`
 
@@ -27,7 +27,7 @@ Give restricted Pi subagent profiles a fail-closed way to select Pi built-ins se
 - D09: Pi capability fields are invalid for `cli: claude`.
 - D10/D14: new resumes replay exact paths using current contents, while valid legacy strict snapshots remain resumable.
 - D15: package extension grants replace hardcoded mappings and `registerToolExtension`.
-- Framework controls always load before profile extensions; `subagent_agents` is the only nested-spawn grant.
+- Runtime and optional spawning controls load before profile extensions; the tool-free capability activation control loads last. `subagent_agents` is the only nested-spawn grant.
 
 ## Common approval gates
 
@@ -60,11 +60,11 @@ Boundary 01.02 -> 02.01: The complete fail-closed resolution contract must pass 
 ### T02: Implement and verify the complete capability lifecycle
 
 Depends on: T01
-Segment starting checkpoint: unrecorded
-Segment acceptance: New launch and resume use the same framework-first extension grant and selected built-ins; extension collision behavior matches the contract; missing paths fail before pane creation; valid legacy strict snapshots still resume; removed interfaces are absent.
+Segment starting checkpoint: `ee89f3c3cd1c2d0f7091f0cfcdb4bb54d760a25a`
+Segment acceptance: New launch and resume use the same runtime-control-first, activation-control-last extension grant and selected built-ins; extension collision behavior matches the contract; missing paths fail before pane creation; valid legacy strict snapshots still resume; removed interfaces are absent.
 Segment gate: Run focused and full unit checks plus the controlled non-model tmux surface suite where available, prove launch/activation/snapshot/resume acceptance, then obtain independent Standards and Spec reviews.
 
-- [ ] 02.01: Implement isolated child launch and capability activation (packet: `./02-01-child-capability-launch.md`)
+- [x] 02.01: Implement isolated child launch and capability activation (packet: `./02-01-child-capability-launch.md`)
 - [ ] 02.02: Add versioned snapshots and safe legacy/new resume (packet: `./02-02-versioned-resume.md`)
 
 Boundary 02.01 -> 02.02: Launch and child-startup behavior needs focused runtime review before persistence compatibility is layered onto it; combining both materially increases security-sensitive review and correction scope.
@@ -82,4 +82,5 @@ Final gate: Expand the T03 segment gate to whole-plan acceptance, all relevant s
 
 ## Discoveries and blockers
 
-- `01.02` attempt 1's package-identity blocker was resolved by using Pi-equivalent identity comparison for project `autoload: false` delta bases. Focused, Standards, and Spec reviews passed; T01 is complete. Current is `02.01`.
+- `01.02` attempt 1's package-identity blocker was resolved by using Pi-equivalent identity comparison for project `autoload: false` delta bases. Focused, Standards, and Spec reviews passed; T01 is complete.
+- `02.01` attempt 1 found that Pi's extension-ordered lifecycle dispatch prevents a first-loaded handler from activating same-event profile overrides. The user approved D16 and the control rename on 2026-09-10. Attempt 2 implemented the split and resolved spawning-path, parent-import, lifecycle-test, and inherited-environment findings. Focused review passed after 90 focused and 195 full tests; `02.01` is complete and Current is `02.02`.

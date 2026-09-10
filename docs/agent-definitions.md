@@ -90,13 +90,7 @@ Every named Pi profile launches with `--no-extensions` and an explicit `--tools`
 
 The extension always adds `ask_question`, which is registered by the child-control extension. A non-empty `subagent_agents` also adds `subagent`, `subagent_message`, and `subagents_list` and loads their backing extension. Listing those spawning tools directly in `tools` is invalid; `subagent_agents` is the only nested-spawn grant.
 
-Pi built-ins include `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`. A non-built-in requested tool must have a resolvable backing extension before a tmux pane is created. Known compatibility mappings cover `web_search`, `web_fetch`, `video_extract`, `youtube_search`, `google_image_search`, and `safe_bash`. Other extensions can register a tool path through:
-
-```typescript
-globalThis.__pi_interactive_subagents.registerToolExtension("my_tool", "/absolute/path/to/extension.ts");
-```
-
-If resolution fails, spawning stops with the profile name, tool name, source file, and corrective action. The tool is never silently omitted.
+Pi built-ins include `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`. The retired tool-name compatibility mappings and process-global extension registration hook are no longer supported.
 
 ## Nested spawning
 

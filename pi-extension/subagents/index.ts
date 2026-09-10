@@ -68,9 +68,11 @@ import {
   type AgentDefinition,
   type SubagentSessionMode,
 } from "./agents.ts";
+import { SUBAGENT_BUILTIN_TOOLS_ENV } from "./subagent-protocol.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
+const SPAWNING_EXTENSION_PATH = realpathSync(fileURLToPath(import.meta.url));
 
 // Survive /reload: clear timers and abort poll loops from the previous module load.
 // /reload re-imports this file, giving fresh module-level state, but closures from
@@ -169,46 +171,6 @@ function getAgentConfigDir(): string {
   return getAgentDir();
 }
 
-// ── Runtime tool-extension registration ─────────────────────────────────────
-// `getToolExtensionPath` otherwise only knows a closed set of tool names. Other
-// pi extensions that bundle a tool for subagents (e.g. a project-local
-// extension exposing a bespoke tool) register its name → extension-file path
-// here at load/session_start time so a child process can be launched with
-// `--no-extensions` + an explicit `-e <path>` for it. Mirrors the legacy
-// `subagents` extension's `registerToolExtension` hook.
-const EXTRA_TOOL_EXTENSIONS = new Map<string, string>();
-
-/** Register (or re-register) a custom tool's backing extension file. */
-export function registerToolExtension(name: string, extensionPath: string): void {
-  if (BUILTIN_TOOLS.has(name)) {
-    throw new Error(`Cannot register custom tool "${name}": shadows a built-in pi tool`);
-  }
-  if ((SPAWNING_TOOLS as readonly string[]).includes(name)) {
-    throw new Error(`Cannot register custom tool "${name}": shadows a spawning tool`);
-  }
-  const existing = EXTRA_TOOL_EXTENSIONS.get(name);
-  if (existing === extensionPath) return; // idempotent / reload-safe
-  if (existing !== undefined) {
-    throw new Error(
-      `Tool extension already registered for "${name}": ${existing} (refusing to overwrite with ${extensionPath})`,
-    );
-  }
-  EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
-}
-
-// Expose registration on a process-global so project-local extensions loaded
-// via jiti (separate module instances) can reach this shared map. Set at module
-// load so it's available before any `session_start` listener runs.
-(globalThis as any).__pi_interactive_subagents = {
-  registerToolExtension,
-};
-
-/**
- * Map a custom (non-built-in) tool name to the pi-extension file that
- * registers it. Used to build the child's `--extension` whitelist after
- * `--no-extensions` disables global discovery. Returns undefined for built-in
- * tools and for unknown names (which simply won't be granted).
- */
 function isExistingFile(path: string): boolean {
   try {
     return statSync(path).isFile();
@@ -217,40 +179,17 @@ function isExistingFile(path: string): boolean {
   }
 }
 
-function getToolExtensionPath(tool: string): string | undefined {
-  if (BUILTIN_TOOLS.has(tool)) return undefined;
-  // The three spawning tools are registered by this extension.
-  if ((SPAWNING_TOOLS as readonly string[]).includes(tool)) {
-    return fileURLToPath(import.meta.url);
-  }
-  const extBase = join(getAgentConfigDir(), "extensions");
-  const map: Record<string, string> = {
-    web_search: join(extBase, "web-search", "index.ts"),
-    web_fetch: join(extBase, "web-fetch", "index.ts"),
-    video_extract: join(extBase, "video-extract", "index.ts"),
-    youtube_search: join(extBase, "youtube-search", "index.ts"),
-    google_image_search: join(extBase, "google-image-search", "index.ts"),
-    safe_bash: join(SUBAGENTS_DIR, "tools", "safe-bash.ts"),
-  };
-  // Prefer the built-in path, but fall back to a runtime-registered extension
-  // when that path no longer exists on disk (e.g. a built-in tool extension
-  // was disabled/removed but a project-local extension re-registered it).
-  const builtin = map[tool];
-  if (builtin && existsSync(builtin)) return builtin;
-  return EXTRA_TOOL_EXTENSIONS.get(tool);
-}
-
 /**
  * When this process was spawned as a restricted subagent, the parent pins the
  * set of agents it may itself spawn via PI_SUBAGENT_ALLOWED. `null` means no
  * restriction (top-level session, or an unrestricted child).
  */
-const SUBAGENT_ALLOWLIST: Set<string> | null = (() => {
-  const raw = process.env.PI_SUBAGENT_ALLOWED;
-  if (!raw) return null;
-  const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
-  return list.length > 0 ? new Set(list) : null;
-})();
+function parseSubagentAllowlist(raw: string | undefined): Set<string> | null {
+  if (raw === undefined) return null;
+  return new Set(raw.split(",").map((value) => value.trim()).filter(Boolean));
+}
+
+const SUBAGENT_ALLOWLIST = parseSubagentAllowlist(process.env.PI_SUBAGENT_ALLOWED);
 
 async function discoverDefinitionsForContext(
   ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">,
@@ -594,11 +533,11 @@ interface RunningSubagent {
 const runningSubagents = new Map<string, RunningSubagent>();
 
 // When this extension is loaded inside a subagent that itself spawns children
-// (for example, a coordinator delegating to configured children), `subagent-done.ts` runs in the
-// same process and needs to know whether this session still has children in
-// flight — so it can suppress auto-exit and keep the session open until they all
-// report back. Expose a live count through a process-global symbol that both
-// modules share. (subagent-done.ts reads it; if absent it assumes zero.)
+// (for example, a coordinator delegating to configured children),
+// `subagent-runtime-control.ts` runs in the same process and needs to know whether
+// this session still has children in flight so it can suppress auto-exit and keep
+// the session open until they report back. Expose a live count through a shared
+// process-global symbol; the runtime control assumes zero when it is absent.
 const RUNNING_CHILDREN_COUNT_KEY = Symbol.for("pi-subagents/running-children-count");
 (globalThis as any)[RUNNING_CHILDREN_COUNT_KEY] = () => runningSubagents.size;
 
@@ -754,7 +693,7 @@ const SUBAGENT_CONTROL_TOOLS = ["ask_question"] as const;
  *
  * Pi 0.70+ applies --tools to built-in, extension, and custom tools. If a
  * subagent definition restricts tools to e.g. "read,bash,write", the child
- * control tools from subagent-done.ts would otherwise be hidden, leaving a
+ * control tools from subagent-runtime-control.ts would otherwise be hidden, leaving a
  * manually resumed or user-touched subagent unable to call ask_question.
  */
 function buildSubagentToolAllowlist(
@@ -773,9 +712,23 @@ function buildSubagentToolAllowlist(
   return [...allow].join(",");
 }
 
+function buildProfileCapabilityEnvironment(
+  capabilities: PreparedAgentSandbox,
+  allowedAgents: readonly string[],
+): string[] {
+  if (capabilities.grantSpawning !== (allowedAgents.length > 0)) {
+    throw new Error("Profile capability environment has inconsistent nested-spawn state");
+  }
+  return [
+    `${SUBAGENT_BUILTIN_TOOLS_ENV}=${shellEscape(capabilities.builtinTools.join(","))}`,
+    `PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`,
+  ];
+}
+
 interface PreparedAgentSandbox {
-  toolAllowlist: string;
+  builtinTools: string[];
   extensionPaths: string[];
+  grantSpawning: boolean;
 }
 
 interface PreparedAgentLaunch {
@@ -792,32 +745,44 @@ interface PreparedAgentLaunch {
   systemPromptMode?: AgentDefinition["systemPromptMode"];
   fullTask: string;
   loadout: SubagentLoadout | null;
+  capabilities: PreparedAgentSandbox;
+  capabilityEnvironment: string[];
 }
 
 function prepareAgentSandbox(
   agent: AgentDefinition,
 ): { sandbox: PreparedAgentSandbox } | { error: string } {
-  const grantSpawning = agent.subagentAgents.length > 0;
-  const toolAllowlist = buildSubagentToolAllowlist(agent.builtinTools, { grantSpawning });
-  const extensionPaths = new Set<string>();
-
-  for (const tool of toolAllowlist.split(",")) {
-    if (BUILTIN_TOOLS.has(tool) || (SUBAGENT_CONTROL_TOOLS as readonly string[]).includes(tool)) {
-      continue;
-    }
-    const extensionPath = getToolExtensionPath(tool);
-    if (!extensionPath || !isExistingFile(extensionPath)) {
-      return {
-        error:
-          `Agent "${agent.name}" requests tool "${tool}", but no backing extension can be resolved. ` +
-          `Install or enable the extension and register it with registerToolExtension("${tool}", path), ` +
-          `or remove "${tool}" from ${agent.filePath}.`,
-      };
-    }
-    extensionPaths.add(resolve(extensionPath));
+  const requestedExtensionPaths = [...(agent.extensionPaths ?? [])];
+  const missingPath = requestedExtensionPaths.find((extensionPath) => !isExistingFile(extensionPath));
+  if (missingPath) {
+    return {
+      error:
+        `Agent "${agent.name}" resolves extension "${missingPath}", but that file is no longer available. ` +
+        `Restore or reinstall the configured package, or update extensions in ${agent.filePath}.`,
+    };
   }
 
-  return { sandbox: { toolAllowlist, extensionPaths: [...extensionPaths] } };
+  const grantSpawning = agent.subagentAgents.length > 0;
+  const selectsSpawningExtension = requestedExtensionPaths.some(
+    (extensionPath) => resolve(extensionPath) === SPAWNING_EXTENSION_PATH,
+  );
+  if (selectsSpawningExtension && !grantSpawning) {
+    return {
+      error:
+        `Agent "${agent.name}" selects the subagent spawning extension without a subagent_agents grant. ` +
+        `Add explicit nested agent names or remove that extension from ${agent.filePath}.`,
+    };
+  }
+
+  return {
+    sandbox: {
+      builtinTools: [...agent.builtinTools],
+      extensionPaths: requestedExtensionPaths.filter(
+        (extensionPath) => resolve(extensionPath) !== SPAWNING_EXTENSION_PATH,
+      ),
+      grantSpawning,
+    },
+  };
 }
 
 function prepareAgentLaunch(
@@ -851,7 +816,7 @@ function prepareAgentLaunch(
   );
   const targetCwdForSession = effectiveCwd ?? activeCwd;
   const launchBehavior = resolveLaunchBehavior(normalizedParams, agent);
-  const grantSpawning = agent.subagentAgents.length > 0;
+  const grantSpawning = sandbox.grantSpawning;
   const identity = agent.body ?? null;
   const systemPromptMode = agent.systemPromptMode;
   const fullTask = buildSubagentTask({
@@ -862,10 +827,20 @@ function prepareAgentLaunch(
     inheritsConversationContext: launchBehavior.inheritsConversationContext,
   });
 
+  const legacySnapshotExtensionPaths = [
+    ...(grantSpawning ? [SPAWNING_EXTENSION_PATH] : []),
+    ...sandbox.extensionPaths,
+  ].filter((extensionPath, index, paths) =>
+    paths.findIndex((candidate) => resolve(candidate) === resolve(extensionPath)) === index
+  );
+  const capabilityEnvironment = buildProfileCapabilityEnvironment(
+    sandbox,
+    grantSpawning ? agent.subagentAgents : [],
+  );
   const loadout: SubagentLoadout | null = agent.cli === "claude" ? null : {
     agent: normalizedParams.agent ?? null,
-    toolAllowlist: sandbox.toolAllowlist,
-    extensionPaths: sandbox.extensionPaths,
+    toolAllowlist: buildSubagentToolAllowlist(sandbox.builtinTools, { grantSpawning }),
+    extensionPaths: legacySnapshotExtensionPaths,
     model: effectiveModel ?? null,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,
@@ -898,6 +873,8 @@ function prepareAgentLaunch(
       systemPromptMode,
       fullTask,
       loadout,
+      capabilities: sandbox,
+      capabilityEnvironment,
     },
   };
 }
@@ -913,11 +890,7 @@ function validateLoadoutExtensionPaths(loadout: SubagentLoadout): string | null 
   }
   const grantsSpawning = SPAWNING_TOOLS.every((tool) => tools.includes(tool));
   if (grantsSpawning) {
-    const spawningExtension = getToolExtensionPath("subagent");
-    if (
-      !spawningExtension ||
-      !loadout.extensionPaths?.some((path) => resolve(path) === resolve(spawningExtension))
-    ) {
+    if (!loadout.extensionPaths?.some((path) => resolve(path) === SPAWNING_EXTENSION_PATH)) {
       return "sandbox snapshot grants spawning without the spawning extension path";
     }
   }
@@ -961,20 +934,20 @@ function buildArtifactPath(opts: {
 }
 
 /**
- * Apply a loadout snapshot's sandbox to a pi command's `parts` array: model,
- * identity (system prompt), and the default-deny tool/extension restriction
- * (`--no-extensions` + `--tools` + one `-e` per tool-backing extension).
- *
- * This is the single source of truth for reconstructing a subagent's sandbox,
- * used both by the initial `launchSubagent` and by the `subagent_message`
- * resume path so the two can never drift. Env vars (PI_SUBAGENT_AGENT /
- * PI_SUBAGENT_ALLOWED / PI_CODING_AGENT_DIR) and cwd are the caller's
- * responsibility since they differ slightly between launch and resume.
+ * Apply model, identity, and a capability restriction to a Pi command.
+ * New launches use the framework-first extension-grant branch. Existing
+ * snapshots retain the legacy strict branch until slice 02.02 introduces the
+ * versioned launch/resume union. Environment values and cwd remain caller-owned.
  */
 function applySandboxToParts(
   parts: string[],
   loadout: SubagentLoadout,
-  opts: { artifactDir: string; name: string; artifactId: string },
+  opts: {
+    artifactDir: string;
+    name: string;
+    artifactId: string;
+    capabilities?: PreparedAgentSandbox;
+  },
 ): void {
   if (loadout.model) {
     const model = loadout.thinking ? `${loadout.model}:${loadout.thinking}` : loadout.model;
@@ -996,9 +969,27 @@ function applySandboxToParts(
     parts.push(flag, shellEscape(spPath));
   }
 
-  // Default-deny: disable global extension discovery and re-enable only the
-  // extensions backing the whitelisted tools. Null is retained only for legacy
-  // snapshots; every newly launched named Pi profile has an explicit allowlist.
+  if (opts.capabilities) {
+    parts.push("--no-extensions", "--no-builtin-tools");
+
+    const orderedExtensionPaths = [
+      join(SUBAGENTS_DIR, "subagent-runtime-control.ts"),
+      ...(opts.capabilities.grantSpawning ? [SPAWNING_EXTENSION_PATH] : []),
+      ...opts.capabilities.extensionPaths,
+      join(SUBAGENTS_DIR, "subagent-capability-activation.ts"),
+    ];
+    const seen = new Set<string>();
+    for (const extensionPath of orderedExtensionPaths) {
+      const canonicalPath = resolve(extensionPath);
+      if (seen.has(canonicalPath)) continue;
+      seen.add(canonicalPath);
+      parts.push("-e", shellEscape(extensionPath));
+    }
+    return;
+  }
+
+  // Legacy strict snapshots retain their exact --tools replay until the
+  // versioned capability union is introduced in slice 02.02.
   if (loadout.toolAllowlist !== null) {
     parts.push("--no-extensions");
     parts.push("--tools", shellEscape(loadout.toolAllowlist));
@@ -1314,6 +1305,8 @@ export const __test__ = {
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
+  buildProfileCapabilityEnvironment,
+  parseSubagentAllowlist,
   buildSubagentTask,
   prepareAgentSandbox,
   prepareAgentLaunch,
@@ -1323,7 +1316,6 @@ export const __test__ = {
   buildPiPromptArgs,
   formatWidgetRightLabel,
   observeRunningSubagent,
-  getToolExtensionPath,
   resolveRunningByName,
   uniqueRunningName,
   claimRuntimeName,
@@ -1380,6 +1372,8 @@ async function launchSubagent(
     identity,
     fullTask,
     loadout,
+    capabilities,
+    capabilityEnvironment,
   } = prepared;
 
   const sessionFile = ctx.sessionManager.getSessionFile();
@@ -1493,23 +1487,23 @@ async function launchSubagent(
   const parts: string[] = ["pi"];
   parts.push("--session", shellEscape(subagentSessionFile));
 
-  const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-  parts.push("-e", shellEscape(subagentDonePath));
-
   // Resolve the config dir the child sees: a target-local .pi/agent/ wins,
   // else the propagated global dir. Captured once so the launch env and the
   // resume snapshot agree.
   const resolvedAgentDir = effectiveAgentDir;
 
-  // Snapshot the fully-resolved sandbox beside the session file so a later
-  // `subagent_message({ name })` resume can replay the exact same
-  // restriction instead of relaunching pi with all global extensions + tools.
+  // Keep writing the compile-compatible strict sidecar during this launch-only
+  // slice. Slice 02.02 replaces it with the versioned extension-grant snapshot.
   if (!loadout) throw new Error(`Pi agent "${agentDefs.name}" has no sandbox snapshot`);
   writeSubagentLoadout(subagentSessionFile, loadout);
 
-  // Apply model, identity, and the default-deny tool/extension restriction via
-  // the shared helper (same code path resume uses — they can't drift).
-  applySandboxToParts(parts, loadout, { artifactDir, name: params.name, artifactId: id });
+  // Apply model, identity, and the new framework-first capability grant.
+  applySandboxToParts(parts, loadout, {
+    artifactDir,
+    name: params.name,
+    artifactId: id,
+    capabilities,
+  });
 
   // Build env prefix: subagent identity + config dir propagation + spawn allowlist
   const envParts: string[] = [];
@@ -1517,10 +1511,7 @@ async function launchSubagent(
   if (resolvedAgentDir) {
     envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(resolvedAgentDir)}`);
   }
-
-  if (grantSpawning) {
-    envParts.push(`PI_SUBAGENT_ALLOWED=${shellEscape(agentDefs.subagentAgents.join(","))}`);
-  }
+  envParts.push(...capabilityEnvironment);
   envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
   if (params.agent) {
     envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
@@ -2352,9 +2343,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Build pi resume command
         const parts = ["pi", "--session", shellEscape(sessionPath)];
 
-        // Load subagent-done extension so the agent can self-terminate if needed
-        const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-        parts.push("-e", shellEscape(subagentDonePath));
+        // Legacy strict resumes keep their existing runtime control path. The
+        // trailing capability activator belongs only to new versioned mode.
+        const runtimeControlPath = join(SUBAGENTS_DIR, "subagent-runtime-control.ts");
+        parts.push("-e", shellEscape(runtimeControlPath));
 
         const sessionId = ctx.sessionManager.getSessionId();
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);

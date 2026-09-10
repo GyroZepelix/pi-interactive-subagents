@@ -20,15 +20,15 @@ An omitted `name` falls back to the filename without `.md`. Explicit names may d
 
 Require opening and closing `---` delimiters, a mapping-valued YAML frontmatter root, and a non-empty Markdown body. Use Pi's exported YAML `parseFrontmatter`, not line-oriented regular expressions. Unknown keys, malformed YAML, invalid field types, invalid enums, non-string list members, pseudo-booleans, and simultaneous `skill` plus `skills` exclude the whole profile with a file-and-field diagnostic.
 
-Comma-delimited strings and YAML string arrays are accepted for `tools`, `skill` or `skills`, and `subagent_agents`; YAML array entries may not contain commas, and nested target entries follow effective-name validation. `docs/agent-definitions.md` is the complete user-facing field and default reference.
+Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`, `skill` or `skills`, and `subagent_agents`; YAML array entries may not contain commas, and nested target entries follow effective-name validation. `extensions` is a YAML array of exact configured package sources with optional exact package-relative `paths`; selectors must stay within enabled package resources. Legacy `tools` is rejected rather than reinterpreted. `docs/agent-definitions.md` is the complete user-facing field and default reference.
 
-## Tool and nesting defaults
+## Built-ins, extensions, and nesting
 
-- Missing or empty `tools` means no ordinary tools.
+- Missing or empty `builtin-tools` grants no Pi built-ins. Only the validated built-in vocabulary can appear there.
+- Declaring `extensions` grants each selected extension's complete executable behavior and all tools it registers at startup or later. Extensions are trusted code, not per-tool grants.
+- Extension packages resolve without installation against the profile's permitted settings scope. Missing, disabled, escaping, nonexistent, or empty selections exclude the profile before pane creation.
 - Every named Pi child still receives `ask_question`.
-- A non-empty `subagent_agents` grants spawning tools and pins nested targets.
-- Spawning tool names listed directly under `tools` invalidate the profile.
-- Requested non-built-in tools require a resolvable backing extension before pane creation.
+- A non-empty `subagent_agents` grants spawning tools and pins nested targets. Spawning tool names under `builtin-tools` invalidate the profile.
 
 ## Session and prompt behavior
 

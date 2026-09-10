@@ -2,11 +2,15 @@
 
 ## Tool and extension isolation
 
-Every named Pi profile launches with `--no-extensions`, an explicit `--tools` allowlist, and only extension files known to back those tools. Missing or empty `tools` grants no ordinary tools; `ask_question` is still added. Built-in tools do not require extension paths. Spawning tools are granted only when `subagent_agents` is present and non-empty (`pi-extension/subagents/index.ts`).
+New named Pi profile launches use `--no-extensions --no-builtin-tools` and do not use strict `--tools`. Explicit extension order is runtime control first, optional spawning control second, canonical profile extensions in resolved order, and tool-free capability activation last (`pi-extension/subagents/index.ts`).
 
-A requested non-built-in tool must resolve to an existing backing extension before pane creation. Failure names the agent, tool, source profile, and corrective action rather than silently dropping the restriction (`pi-extension/subagents/index.ts`).
+Validated `builtin-tools` cross the child boundary through a private package-owned environment value. The trailing activation control enables that subset plus tools registered by declared profile extensions; undeclared built-ins remain inactive. Declared extensions are trusted executable grants, not per-tool sandboxes (`pi-extension/subagents/subagent-capability-activation.ts`).
 
-Every spawn must name a valid discoverable agent selected from the active trusted context. A restricted child also receives `PI_SUBAGENT_ALLOWED`, so nested calls cannot select agents outside the parent's profile contract (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`).
+Pi 0.85.1 dispatches lifecycle handlers in extension load order. Keep protected tool registration controls first so ordinary profile collisions cannot replace framework tools, and keep the tool-free activation control last so it observes same-event profile registrations before the next model request. Do not merge these roles without re-verifying Pi's lifecycle semantics (`spec/active/260909-1952-profile-extension-loading/plan.md`, Decision D16).
+
+Resolved profile extension files are preflighted before pane creation. This package's spawning extension is reserved: it is rejected from the profile slot without non-empty `subagent_agents`, then filtered and loaded once in the protected spawning slot when granted (`pi-extension/subagents/index.ts`).
+
+Every spawn must name a valid discoverable agent selected from the active trusted context. Child commands always override `PI_SUBAGENT_ALLOWED` with the profile's exact nested targets; a present empty value means deny all, while an undefined value is reserved for an unrestricted top-level process (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`).
 
 ## Name safety
 

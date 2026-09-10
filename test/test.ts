@@ -14,10 +14,14 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  createAgentSession,
   DefaultPackageManager,
+  DefaultResourceLoader,
+  SessionManager as PiSessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import {
   discoverAgentDefinitions,
@@ -71,8 +75,12 @@ import {
   shouldAutoExitOnAgentEnd,
   findLatestAssistantError,
   runningChildrenCount,
-} from "../pi-extension/subagents/subagent-done.ts";
-import subagentDoneExtension from "../pi-extension/subagents/subagent-done.ts";
+} from "../pi-extension/subagents/subagent-runtime-control.ts";
+import subagentRuntimeControlExtension from "../pi-extension/subagents/subagent-runtime-control.ts";
+import capabilityActivationExtension, {
+  resolveProfileActiveTools,
+  SUBAGENT_BUILTIN_TOOLS_ENV,
+} from "../pi-extension/subagents/subagent-capability-activation.ts";
 import { __pollForExitTest__ } from "../pi-extension/subagents/tmux.ts";
 
 // --- Helpers ---
@@ -2188,16 +2196,6 @@ describe("subagent discovery", () => {
     }
   });
 
-  it("getToolExtensionPath maps custom tools and skips built-ins", () => {
-    assert.equal(testApi.getToolExtensionPath("read"), undefined);
-    assert.equal(testApi.getToolExtensionPath("bash"), undefined);
-    assert.equal(testApi.getToolExtensionPath("powershell"), undefined);
-    assert.equal(testApi.getToolExtensionPath("definitely_unknown_tool"), undefined);
-    assert.ok(testApi.getToolExtensionPath("safe_bash")?.endsWith("tools/safe-bash.ts"));
-    // Spawning tools are registered by this extension itself.
-    assert.ok(testApi.getToolExtensionPath("subagent")?.endsWith("index.ts"));
-  });
-
   it("excludes invalid enum values with a field-specific diagnostic", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
       writeAgentFile(
@@ -2367,6 +2365,11 @@ describe("subagent discovery", () => {
 
       const sandbox = testApi.prepareAgentSandbox(agent);
       assert.ok("sandbox" in sandbox);
+      assert.deepEqual(sandbox.sandbox, {
+        builtinTools: ["read"],
+        extensionPaths: [],
+        grantSpawning: true,
+      });
       const prepared = testApi.prepareAgentLaunch(
         { agent: "declared-name", task: "Inspect the change" },
         agent,
@@ -2382,6 +2385,10 @@ describe("subagent discovery", () => {
       assert.equal(launch.launchBehavior.sessionMode, "lineage-only");
       assert.match(launch.fullTask, /Inspect the change/);
       assert.doesNotMatch(launch.fullTask, /Canonical body/);
+      assert.deepEqual(launch.capabilityEnvironment, [
+        `${SUBAGENT_BUILTIN_TOOLS_ENV}='read'`,
+        "PI_SUBAGENT_ALLOWED='child-agent'",
+      ]);
       assert.deepEqual(launch.loadout, {
         agent: "declared-name",
         toolAllowlist: "read,subagent,subagent_message,subagents_list,ask_question",
@@ -2401,10 +2408,70 @@ describe("subagent discovery", () => {
         artifactDir: projectDir,
         name: "runtime-name",
         artifactId: "canonical-launch",
+        capabilities: launch.capabilities,
       });
       assert.deepEqual(commandParts.slice(0, 2), ["--model", "'provider/restricted:medium'"]);
       assert.ok(commandParts.includes("--no-extensions"));
-      assert.ok(commandParts.includes("'read,subagent,subagent_message,subagents_list,ask_question'"));
+      assert.ok(commandParts.includes("--no-builtin-tools"));
+      assert.equal(commandParts.includes("--tools"), false);
+      const extensionPaths = commandParts
+        .flatMap((part, index) => part === "-e" ? [commandParts[index + 1].slice(1, -1)] : []);
+      assert.deepEqual(extensionPaths, [
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-runtime-control.ts", import.meta.url)),
+        fileURLToPath(new URL("../pi-extension/subagents/index.ts", import.meta.url)),
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-capability-activation.ts", import.meta.url)),
+      ]);
+    });
+  });
+
+  it("fails launch preparation when a resolved profile extension disappears", () => {
+    const parsed = parseAgentDefinition(
+      "---\nname: missing-extension\nbuiltin-tools: [read]\n---\nbody",
+      "/tmp/missing-extension.md",
+      "global",
+    );
+    assert.ok(parsed.agent);
+    const prepared = testApi.prepareAgentSandbox({
+      ...parsed.agent,
+      extensionPaths: ["/definitely/missing/profile-extension.ts"],
+    });
+    assert.ok("error" in prepared);
+    assert.match(prepared.error, /no longer available/);
+    assert.match(prepared.error, /extensions/);
+  });
+
+  it("reserves the spawning extension behind subagent_agents", () => {
+    const spawningExtension = fileURLToPath(
+      new URL("../pi-extension/subagents/index.ts", import.meta.url),
+    );
+    const withoutGrant = parseAgentDefinition(
+      "---\nname: no-nesting\nbuiltin-tools: []\n---\nbody",
+      "/tmp/no-nesting.md",
+      "global",
+    );
+    assert.ok(withoutGrant.agent);
+    const rejected = testApi.prepareAgentSandbox({
+      ...withoutGrant.agent,
+      extensionPaths: [spawningExtension],
+    });
+    assert.ok("error" in rejected);
+    assert.match(rejected.error, /without a subagent_agents grant/);
+
+    const withGrant = parseAgentDefinition(
+      "---\nname: coordinator\nbuiltin-tools: []\nsubagent_agents: [scout]\n---\nbody",
+      "/tmp/coordinator.md",
+      "global",
+    );
+    assert.ok(withGrant.agent);
+    const prepared = testApi.prepareAgentSandbox({
+      ...withGrant.agent,
+      extensionPaths: [spawningExtension],
+    });
+    assert.ok("sandbox" in prepared);
+    assert.deepEqual(prepared.sandbox, {
+      builtinTools: [],
+      extensionPaths: [],
+      grantSpawning: true,
     });
   });
 
@@ -2661,10 +2728,10 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("buildSubagentToolAllowlist preserves requested tools and adds child control tools", () => {
+  it("buildSubagentToolAllowlist preserves legacy snapshot tools and child controls", () => {
     assert.equal(
-      testApi.buildSubagentToolAllowlist(["read", "bash", "web_search"]),
-      "read,bash,web_search,ask_question",
+      testApi.buildSubagentToolAllowlist(["read", "bash"], { grantSpawning: true }),
+      "read,bash,subagent,subagent_message,subagents_list,ask_question",
     );
   });
 
@@ -2673,7 +2740,138 @@ describe("subagent discovery", () => {
     assert.equal(testApi.buildSubagentToolAllowlist([]), "ask_question");
   });
 
-  it("applySandboxToParts replays model, identity, and default-deny tool restriction", () => {
+  it("builds the private capability environment and pins nesting targets", () => {
+    assert.deepEqual(
+      testApi.buildProfileCapabilityEnvironment(
+        { builtinTools: ["read", "grep"], extensionPaths: [], grantSpawning: false },
+        [],
+      ),
+      [
+        `${SUBAGENT_BUILTIN_TOOLS_ENV}='read,grep'`,
+        "PI_SUBAGENT_ALLOWED=''",
+      ],
+    );
+    assert.deepEqual(
+      testApi.buildProfileCapabilityEnvironment(
+        { builtinTools: [], extensionPaths: [], grantSpawning: true },
+        ["scout", "worker"],
+      ),
+      [
+        `${SUBAGENT_BUILTIN_TOOLS_ENV}=''`,
+        "PI_SUBAGENT_ALLOWED='scout,worker'",
+      ],
+    );
+    assert.throws(
+      () => testApi.buildProfileCapabilityEnvironment(
+        { builtinTools: [], extensionPaths: [], grantSpawning: true },
+        [],
+      ),
+      /inconsistent nested-spawn state/,
+    );
+  });
+
+  it("treats an explicit empty nested-agent allowlist as deny-all", () => {
+    assert.equal(testApi.parseSubagentAllowlist(undefined), null);
+
+    const inheritedOverride = testApi.parseSubagentAllowlist("");
+    assert.ok(inheritedOverride);
+    assert.equal(inheritedOverride.size, 0);
+
+    assert.deepEqual(
+      [...(testApi.parseSubagentAllowlist(" scout, worker ") ?? [])],
+      ["scout", "worker"],
+    );
+  });
+
+  it("applySandboxToParts constructs framework-first profile capability launches", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      const profileOne = join(d, "profile-one.ts");
+      const profileTwo = join(d, "profile-two.ts");
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "researcher",
+          toolAllowlist: "read,subagent,subagent_message,subagents_list,ask_question",
+          extensionPaths: [],
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: ["scout"],
+          autoExit: true,
+          cwd: d,
+          agentDir: d,
+        },
+        {
+          artifactDir: d,
+          name: "researcher",
+          artifactId: "profile-launch",
+          capabilities: {
+            builtinTools: ["read"],
+            grantSpawning: true,
+            extensionPaths: [profileOne, profileTwo],
+          },
+        },
+      );
+
+      assert.equal(parts.includes("--no-extensions"), true);
+      assert.equal(parts.includes("--no-builtin-tools"), true);
+      assert.equal(parts.includes("--tools"), false);
+      const extensionPaths = parts
+        .flatMap((part, index) => part === "-e" ? [parts[index + 1].slice(1, -1)] : []);
+      assert.deepEqual(extensionPaths, [
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-runtime-control.ts", import.meta.url)),
+        fileURLToPath(new URL("../pi-extension/subagents/index.ts", import.meta.url)),
+        profileOne,
+        profileTwo,
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-capability-activation.ts", import.meta.url)),
+      ]);
+    });
+  });
+
+  it("applySandboxToParts omits spawning controls without a nesting grant", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      const profileExtension = join(d, "profile.ts");
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "scout",
+          toolAllowlist: "read,ask_question",
+          extensionPaths: [],
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: d,
+          agentDir: d,
+        },
+        {
+          artifactDir: d,
+          name: "scout",
+          artifactId: "non-nesting-launch",
+          capabilities: {
+            builtinTools: ["read"],
+            grantSpawning: false,
+            extensionPaths: [profileExtension],
+          },
+        },
+      );
+
+      const extensionPaths = parts
+        .flatMap((part, index) => part === "-e" ? [parts[index + 1].slice(1, -1)] : []);
+      assert.deepEqual(extensionPaths, [
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-runtime-control.ts", import.meta.url)),
+        profileExtension,
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-capability-activation.ts", import.meta.url)),
+      ]);
+    });
+  });
+
+  it("applySandboxToParts replays legacy model, identity, and strict tool restriction", () => {
     withTempDir((d) => {
       const parts: string[] = [];
       testApi.applySandboxToParts(
@@ -2833,20 +3031,10 @@ describe("subagent discovery", () => {
     assert.match(error, /sandbox extension is missing/);
   });
 
-  it("requires the spawning extension path when a snapshot grants nesting", () => {
-    const parsed = parseAgentDefinition(
-      "---\nname: coordinator\nbuiltin-tools: [read]\nsubagent_agents: [inspector]\n---\nbody",
-      "/tmp/coordinator.md",
-      "global",
-    );
-    assert.ok(parsed.agent);
-    const prepared = testApi.prepareAgentSandbox(parsed.agent);
-    assert.ok(!("error" in prepared));
-    assert.ok(prepared.sandbox.extensionPaths.some((path: string) => path.endsWith("index.ts")));
-
+  it("requires the spawning extension path when a legacy snapshot grants nesting", () => {
     const error = testApi.validateLoadoutExtensionPaths({
       agent: "coordinator",
-      toolAllowlist: prepared.sandbox.toolAllowlist,
+      toolAllowlist: "read,subagent,subagent_message,subagents_list,ask_question",
       extensionPaths: [],
       model: null,
       thinking: null,
@@ -3003,7 +3191,7 @@ describe("subagent discovery", () => {
     });
   });
 });
-describe("subagent-done.ts", () => {
+describe("subagent runtime control", () => {
   describe("shouldMarkUserTookOver", () => {
     it("ignores the initial injected task before the first agent run", () => {
       assert.equal(shouldMarkUserTookOver(false), false);
@@ -3112,6 +3300,209 @@ describe("subagent-done.ts", () => {
     });
   });
 
+  describe("profile capability activation", () => {
+    const availableTools = [
+      { name: "read", sourceInfo: { source: "builtin" } },
+      { name: "bash", sourceInfo: { source: "builtin" } },
+      { name: "ask_question", sourceInfo: { source: "local" } },
+      { name: "web_search", sourceInfo: { source: "package" } },
+      { name: "write", sourceInfo: { source: "package" } },
+    ];
+
+    it("activates selected built-ins plus every startup extension tool", () => {
+      assert.deepEqual(resolveProfileActiveTools("read", availableTools), [
+        "read",
+        "ask_question",
+        "web_search",
+        "write",
+      ]);
+    });
+
+    it("keeps extension overrides active when the matching built-in is omitted", () => {
+      const active = resolveProfileActiveTools("", availableTools);
+      assert.ok(active);
+      assert.equal(active.includes("write"), true);
+      assert.equal(active.includes("read"), false);
+      assert.equal(active.includes("bash"), false);
+    });
+
+    it("fails malformed private built-in input closed without disabling extension tools", () => {
+      assert.deepEqual(resolveProfileActiveTools("read,unknown", availableTools), [
+        "ask_question",
+        "web_search",
+        "write",
+      ]);
+      assert.deepEqual(resolveProfileActiveTools("read,read", availableTools), [
+        "ask_question",
+        "web_search",
+        "write",
+      ]);
+      assert.equal(resolveProfileActiveTools(undefined, availableTools), null);
+    });
+
+    it("preserves Pi dynamic activation and activates later built-in overrides", async () => {
+      const dir = createTestDir();
+      const savedBuiltinTools = process.env[SUBAGENT_BUILTIN_TOOLS_ENV];
+      process.env[SUBAGENT_BUILTIN_TOOLS_ENV] = "";
+      let firstProfileApi: any;
+      let registerDynamicRead = false;
+      const makeTool = (name: string, label: string) => ({
+        name,
+        label,
+        description: label,
+        parameters: Type.Object({}),
+        async execute() {
+          return { content: [{ type: "text", text: label }], details: {} };
+        },
+      });
+      const settingsManager = SettingsManager.inMemory();
+      const resourceLoader = new DefaultResourceLoader({
+        cwd: dir,
+        agentDir: dir,
+        settingsManager,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        extensionFactories: [
+          { name: "runtime-control", factory: subagentRuntimeControlExtension },
+          {
+            name: "profile-first",
+            factory(pi) {
+              firstProfileApi = pi;
+              pi.registerTool(makeTool("duplicate_custom", "first duplicate"));
+              pi.registerTool(makeTool("write", "startup write override"));
+              pi.on("session_start", () => {
+                pi.registerTool(makeTool("session_dynamic", "session dynamic"));
+                pi.registerTool(makeTool("ls", "session ls override"));
+              });
+              pi.on("before_agent_start", () => {
+                if (!registerDynamicRead) return;
+                registerDynamicRead = false;
+                pi.registerTool(makeTool("read", "dynamic read override"));
+              });
+            },
+          },
+          {
+            name: "profile-second",
+            factory(pi) {
+              pi.registerTool(makeTool("duplicate_custom", "second duplicate"));
+              pi.registerTool(makeTool("ask_question", "profile collision"));
+            },
+          },
+          { name: "capability-activation", factory: capabilityActivationExtension },
+        ],
+      });
+      let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+
+      try {
+        await resourceLoader.reload();
+        const created = await createAgentSession({
+          cwd: dir,
+          agentDir: dir,
+          noTools: "builtin",
+          resourceLoader,
+          settingsManager,
+          sessionManager: PiSessionManager.inMemory(dir),
+        });
+        session = created.session;
+        await session.bindExtensions({});
+
+        assert.deepEqual(
+          created.extensionsResult.extensions.map((extension: any) => extension.path),
+          [
+            "<inline:runtime-control>",
+            "<inline:profile-first>",
+            "<inline:profile-second>",
+            "<inline:capability-activation>",
+          ],
+        );
+        const activationControl = created.extensionsResult.extensions.at(-1) as any;
+        assert.equal(activationControl.tools.size, 0, "the trailing control must register no tools");
+        assert.equal(session.getToolDefinition("duplicate_custom")?.label, "first duplicate");
+        assert.equal(session.getToolDefinition("ask_question")?.label, "ask_question");
+        assert.equal(session.getToolDefinition("write")?.label, "startup write override");
+        assert.equal(session.getToolDefinition("ls")?.label, "session ls override");
+        assert.deepEqual(
+          new Set(session.getActiveToolNames()),
+          new Set(["ask_question", "duplicate_custom", "write", "session_dynamic", "ls"]),
+        );
+
+        firstProfileApi.registerTool(makeTool("later_custom", "later custom"));
+        assert.equal(session.getActiveToolNames().includes("later_custom"), true);
+
+        registerDynamicRead = true;
+        assert.equal(session.getActiveToolNames().includes("read"), false);
+        await (session as any)._extensionRunner.emitBeforeAgentStart(
+          "test prompt",
+          [],
+          "test system prompt",
+          { cwd: dir },
+        );
+        assert.equal(session.getToolDefinition("read")?.label, "dynamic read override");
+        assert.equal(
+          session.getActiveToolNames().includes("read"),
+          true,
+          "the trailing activation handler must enable a same-event profile override",
+        );
+
+        session.setActiveToolsByName(
+          session.getActiveToolNames().filter((name) => name !== "later_custom"),
+        );
+        await (session as any)._extensionRunner.emit({
+          type: "turn_start",
+          turnIndex: 2,
+          timestamp: Date.now(),
+        });
+        assert.equal(
+          session.getActiveToolNames().includes("later_custom"),
+          false,
+          "an observed extension tool that is explicitly deactivated must stay inactive",
+        );
+      } finally {
+        session?.dispose();
+        restoreEnvVar(SUBAGENT_BUILTIN_TOOLS_ENV, savedBuiltinTools);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("applies the profile activation during session_start", () => {
+      const savedBuiltinTools = process.env[SUBAGENT_BUILTIN_TOOLS_ENV];
+      process.env[SUBAGENT_BUILTIN_TOOLS_ENV] = "read";
+      const handlers = new Map<string, Array<(...args: any[]) => void>>();
+      const activeCalls: string[][] = [];
+      let activeTools: string[] = [];
+      const api = {
+        on(event: string, handler: (...args: any[]) => void) {
+          if (!handlers.has(event)) handlers.set(event, []);
+          handlers.get(event)!.push(handler);
+        },
+        registerTool() {}, registerCommand() {}, registerMessageRenderer() {}, registerShortcut() {},
+        sendUserMessage() {}, sendMessage() {},
+        getAllTools() { return availableTools; },
+        getActiveTools() { return [...activeTools]; },
+        setActiveTools(names: string[]) {
+          activeTools = [...names];
+          activeCalls.push([...names]);
+        },
+      } as any;
+
+      try {
+        capabilityActivationExtension(api);
+        for (const handler of handlers.get("session_start") ?? []) {
+          handler(
+            { type: "session_start", reason: "startup" },
+            { ui: { setWidget() {} } },
+          );
+        }
+        assert.deepEqual(activeCalls, [["read", "ask_question", "web_search", "write"]]);
+      } finally {
+        restoreEnvVar(SUBAGENT_BUILTIN_TOOLS_ENV, savedBuiltinTools);
+      }
+    });
+  });
+
   describe("ask_question tool", () => {
     function setupSubagentExtension(sessionFile: string) {
       const saved = {
@@ -3125,7 +3516,7 @@ describe("subagent-done.ts", () => {
       process.env.PI_SUBAGENT_AGENT = "inspector";
       process.env.PI_SUBAGENT_AUTO_EXIT = "1";
       const mock = createMockExtensionApi();
-      subagentDoneExtension(mock.api);
+      subagentRuntimeControlExtension(mock.api);
       const restore = () => {
         restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
         restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
@@ -3203,7 +3594,7 @@ describe("subagent-done.ts", () => {
       process.env.PI_SUBAGENT_NAME = "inspector-2";
       process.env.PI_SUBAGENT_AGENT = "inspector";
       process.env.PI_SUBAGENT_AUTO_EXIT = "1";
-      subagentDoneExtension(api);
+      subagentRuntimeControlExtension(api);
       const emit = (event: string, ...args: any[]) =>
         (handlers.get(event) ?? []).forEach((h) => h(...args));
       const restore = () => {

@@ -1,5 +1,5 @@
 /**
- * Extension loaded into sub-agents.
+ * Runtime control extension loaded into subagents.
  * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+Alt+O)
  * - Provides an `ask_question` tool for asking the parent orchestrator a question
  *
@@ -184,13 +184,10 @@ export default function (pi: ExtensionAPI) {
   // `agent_start` (covers a reply that starts a fresh turn after parking).
   let awaitingAnswer = false;
 
-  // Show widget + status bar on session start
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
-    const tools = pi.getAllTools();
-    toolNames = tools.map((t) => t.name).sort();
+    toolNames = pi.getAllTools().map((tool) => tool.name).sort();
     denied = parseDeniedTools(deniedToolsValue);
-
     renderWidget(ctx, null);
   });
 
