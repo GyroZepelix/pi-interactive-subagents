@@ -2,7 +2,7 @@
 name: test-ping
 description: Integration test agent that asks its parent a question
 model: anthropic/claude-haiku-4-5
-tools: []
+builtin-tools: []
 session-mode: standalone
 system-prompt: append
 auto-exit: true

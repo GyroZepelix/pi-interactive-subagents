@@ -2,7 +2,7 @@
 name: test-echo
 description: Integration test agent that completes simple file-writing tasks
 model: anthropic/claude-haiku-4-5
-tools: [read, bash, write, edit]
+builtin-tools: [read, bash, write, edit]
 session-mode: lineage-only
 system-prompt: append
 auto-exit: true

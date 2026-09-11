@@ -38,5 +38,4 @@ The package is an in-process Pi extension that supervises child Pi or optional C
 
 - The extension targets Pi 0.85.1 APIs and tmux command behavior. Profile extension paths resolve read-only from exact configured global package sources or, for trusted project profiles, project-first package settings with safe global fallback (`package.json`, `pi-extension/subagents/agents.ts`).
 - A profile with `cli: claude` uses a bundled Stop hook and launches Claude Code with `--dangerously-skip-permissions`; this path should be treated as explicitly trusted configuration (`pi-extension/subagents/index.ts`, `pi-extension/subagents/plugin/hooks/on-stop.sh`).
-- Inferred: `safe_bash` is a convenience denylist, not a complete sandbox, because it matches a finite regex list before delegating to the normal Bash tool (`pi-extension/subagents/tools/safe-bash.ts`).
 - Unverified: no design history predates the repository's single current commit, so rationale beyond source comments and README statements is unavailable (`git log`).

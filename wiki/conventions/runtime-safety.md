@@ -32,7 +32,6 @@ Resume never re-reads profiles or package settings. It intentionally executes cu
 
 - Build shell commands through `shellEscape`, and use `sendLongCommand` for generated launch scripts (`pi-extension/subagents/tmux.ts`, `pi-extension/subagents/index.ts`).
 - Generated task, system-prompt, and resume-message artifacts include a per-launch UUID after the sanitized runtime-name slug so concurrent distinct names cannot overwrite one another's content (`pi-extension/subagents/index.ts`).
-- `safe_bash` blocks a fixed dangerous-pattern list before calling Pi's Bash tool (`pi-extension/subagents/tools/safe-bash.ts`). Inferred: it reduces common hazards but is not a general containment boundary.
 - A `cli: claude` profile invokes `claude --dangerously-skip-permissions`. Only explicitly trusted profiles should enable this path (`pi-extension/subagents/index.ts`).
 
 ## Runtime files

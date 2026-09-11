@@ -91,3 +91,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/dreams/2026-09-10-2217-completed-session.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/index.md`, and `wiki/log.md`.
 - Verification: re-read all five changed wiki files; memory safety, relative-link, ASCII, fence, tier-separation, wiki-only write-scope, and diff checks passed.
 - Notes: user-specific profile contents and external staged state remain episodic; no observation, `MEMORY.md` pointer, or state checkpoint update qualified.
+
+## [2026-09-11] update | removed obsolete safe-bash guidance
+
+- Trigger: implementation of `260910-2235-repair-agent-profile-drift-and-remove-obsolete-safe-bash` removed an unreachable packaged extension and synchronized current-state guidance.
+- Inputs: `pi-extension/subagents/index.ts`, deleted `pi-extension/subagents/tools/safe-bash.ts`, legacy snapshot regressions in `test/test.ts`, package dry-run output, and the active work-item plan.
+- Wiki pages changed: `wiki/map.md`, `wiki/architecture.md`, `wiki/conventions/index.md`, `wiki/conventions/runtime-safety.md`, `wiki/conventions/typescript-modules.md`, and `wiki/log.md`.
+- Verification: current source and documentation searches found no remaining activation route or stale claim; all 199 model-free unit tests passed; package dry-run excluded the deleted module and repository-only files.
+- Notes: archived historical references remain unchanged, `wiki/state.md` was unchanged because no ingest, lint, or dedupe checkpoint advanced, and model-consuming lifecycle tests remain approval-gated.

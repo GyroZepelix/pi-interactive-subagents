@@ -5,7 +5,7 @@ Repository conventions are recorded only when supported by instructions, configu
 ## Focused pages
 
 - [Agent profiles](./agent-profiles.md): validated frontmatter, trust-aware discovery, canonical identity, and nested-spawn permissions evidenced by `docs/agent-definitions.md`, `pi-extension/subagents/agents.ts`, and `pi-extension/subagents/index.ts`.
-- [Runtime safety](./runtime-safety.md): default-deny tools, sandboxed resume, shell boundaries, and trusted CLI profiles evidenced by `pi-extension/subagents/index.ts`, `session.ts`, and `tools/safe-bash.ts`.
+- [Runtime safety](./runtime-safety.md): default-deny tools, sandboxed resume, shell boundaries, and trusted CLI profiles evidenced by `pi-extension/subagents/index.ts`, `session.ts`, and `subagent-capability-activation.ts`.
 - [TypeScript modules](./typescript-modules.md): ESM import, module-boundary, and test-hook patterns repeated in `package.json`, `pi-extension/subagents/*.ts`, and `test/test.ts`.
 
 ## Cross-cutting repository rules

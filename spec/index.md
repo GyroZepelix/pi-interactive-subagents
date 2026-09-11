@@ -22,6 +22,7 @@ Repository-local planning and execution artifacts.
 | [Document Git installation](./archive/260909-1629-document-git-installation/plan.md) | work-item | completed | 2026-09-10 |
 | [Create global scout, researcher, worker, flash-reviewer, and twin profiles](./archive/260909-1928-create-global-scout-researcher-and-worker-profiles/plan.md) | work-item | completed | 2026-09-10 |
 | [Profile extension loading](./archive/260909-1952-profile-extension-loading/plan.md) | work-item | completed | 2026-09-10 |
+| [Repair agent profile drift and remove obsolete safe-bash](./archive/260910-2235-repair-agent-profile-drift-and-remove-obsolete-safe-bash/plan.md) | work-item | completed | 2026-09-11 |
 <!-- spec-items:archive:end -->
 
 ## Templates

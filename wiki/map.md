@@ -13,7 +13,6 @@
 | `pi-extension/subagents/subagent-runtime-control.ts` | Child-side tools widget, auto-exit decisions, activity events, protected `ask_question`, and parent-question signaling. |
 | `pi-extension/subagents/subagent-capability-activation.ts` | Child-only trailing lifecycle control that activates selected Pi built-ins and declared extension tools. |
 | `pi-extension/subagents/subagent-protocol.ts` | Shared private launch protocol constants used without importing child extension registration into the parent. |
-| `pi-extension/subagents/tools/safe-bash.ts` | Optional Bash wrapper that rejects a fixed set of dangerous command patterns. |
 | `pi-extension/subagents/plugin/` | Claude Code Stop hook used by `cli: claude` profiles to signal completion and expose the transcript path. |
 | `test/test.ts` | Main source-coupled unit and regression suite. |
 | `test/integration/` | Real tmux/Pi integration harness, current-contract fixtures, non-model surface tests, and model-consuming lifecycle tests that remain execution-gated. |

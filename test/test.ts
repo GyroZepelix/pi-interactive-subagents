@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   mkdirSync,
   realpathSync,
   rmSync,
@@ -389,8 +390,8 @@ describe("session.ts", () => {
   describe("subagent loadout snapshot", () => {
     const legacySample: SubagentLoadout = {
       agent: "implementer",
-      toolAllowlist: "read,write,edit,safe_bash,web_search,subagent,subagent_message,subagents_list,ask_question",
-      extensionPaths: ["/extensions/safe-bash.ts", "/extensions/web-search.ts"],
+      toolAllowlist: "read,write,edit,custom_tool,web_search,subagent,subagent_message,subagents_list,ask_question",
+      extensionPaths: ["/extensions/custom-tool.ts", "/extensions/web-search.ts"],
       model: "openrouter/z-ai/glm-5.2",
       thinking: "medium",
       systemPromptMode: "append",
@@ -1224,6 +1225,30 @@ describe("status.ts", () => {
 
 describe("subagent discovery", () => {
   const testApi = (subagentsModule as any).__test__;
+
+  it("repository agent profiles use the current schema", () => {
+    const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+    const profileDirectories = [
+      join(repositoryRoot, "agent-examples"),
+      join(repositoryRoot, "test", "integration", "agents"),
+    ];
+    const failures: string[] = [];
+
+    for (const directory of profileDirectories) {
+      for (const filename of readdirSync(directory).filter((name) => name.endsWith(".md")).sort()) {
+        const filePath = join(directory, filename);
+        const parsed = parseAgentDefinition(readFileSync(filePath, "utf8"), filePath, "global");
+        if (parsed.agent && parsed.diagnostics.length === 0) continue;
+
+        const details = parsed.diagnostics
+          .map((entry) => `${entry.field ?? "profile"}: ${entry.message}`)
+          .join("; ");
+        failures.push(`${filePath}: ${details || "profile was rejected without diagnostics"}`);
+      }
+    }
+
+    assert.deepEqual(failures, [], failures.join("\n"));
+  });
 
   it("loads session-mode from frontmatter", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
@@ -2935,8 +2960,8 @@ describe("subagent discovery", () => {
         parts,
         {
           agent: "implementer",
-          toolAllowlist: "read,write,safe_bash",
-          extensionPaths: ["/extensions/safe-bash.ts"],
+          toolAllowlist: "read,write,custom_tool",
+          extensionPaths: ["/extensions/custom-tool.ts"],
           model: "openrouter/z-ai/glm-5.2",
           thinking: "medium",
           systemPromptMode: "append",
@@ -2960,13 +2985,13 @@ describe("subagent discovery", () => {
       assert.ok(toolsIdx >= 0, "expected --tools");
       // The value is shell-escaped (single-quoted) before joining.
       assert.ok(
-        parts[toolsIdx + 1].includes("read,write,safe_bash"),
+        parts[toolsIdx + 1].includes("read,write,custom_tool"),
         "expected the tool allowlist as the --tools value",
       );
       const extensionValues = parts
         .flatMap((part, index) => part === "-e" ? [parts[index + 1]] : []);
       assert.ok(
-        extensionValues.some((value) => value.includes("/extensions/safe-bash.ts")),
+        extensionValues.some((value) => value.includes("/extensions/custom-tool.ts")),
         "expected the snapshotted extension path",
       );
     });
