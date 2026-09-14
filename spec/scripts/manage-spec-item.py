@@ -5,7 +5,7 @@
 #   "PyYAML>=6.0,<7",
 # ]
 # ///
-"""Manage repository-local spec work items through completed archival."""
+"""Manage repository-local spec work items through completed and superseded archival."""
 
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from typing import Any
 
 import yaml
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_ARCHIVE_SCHEMAS = {1, 2}
 ROUTES = {"quick-plan", "grill-to-spec"}
 KINDS = {"initiative", "work-item"}
 WORK_TYPES = {
@@ -35,19 +36,22 @@ WORK_TYPES = {
     "documentation",
     "other",
 }
-ACTIVE_STATUSES = {"discovering", "ready_for_spec", "planned"}
-TERMINAL_STATUSES = {"completed"}
+ACTIVE_STATUSES = {"discovering", "revision_required", "ready_for_spec", "planned"}
+TERMINAL_STATUSES = {"completed", "superseded"}
 STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
+REPLACEMENT_STATUSES = ACTIVE_STATUSES | {"completed"}
 TRANSITIONS = {
     "discovering": {"ready_for_spec"},
-    "ready_for_spec": {"planned"},
-    "planned": set(),
+    "revision_required": {"ready_for_spec"},
+    "ready_for_spec": {"planned", "revision_required"},
+    "planned": {"revision_required"},
 }
 ACTIVE_START = "<!-- spec-items:active:start -->"
 ACTIVE_END = "<!-- spec-items:active:end -->"
 ARCHIVE_START = "<!-- spec-items:archive:start -->"
 ARCHIVE_END = "<!-- spec-items:archive:end -->"
 ID_PATTERN = re.compile(r"^[0-9]{6}-[0-9]{4}-[a-z0-9]+(?:-[a-z0-9]+)*(?:-[0-9]+)?$")
+REFINEMENT_PATTERN = re.compile(r"^R([0-9]{3})\.md$")
 MARKDOWN_SUFFIXES = {".md", ".markdown"}
 
 
@@ -92,6 +96,7 @@ def require_protocol(paths: dict[str, Path]) -> None:
         paths["templates"] / "item.yaml",
         paths["templates"] / "discovery.md",
         paths["templates"] / "plan.md",
+        paths["templates"] / "refinement.md",
         paths["templates"] / "verification.md",
         paths["templates"] / "outcome.md",
         paths["index"],
@@ -159,6 +164,7 @@ def validate_manifest_shape(item_dir: Path, manifest: dict[str, Any]) -> list[st
         "parent",
         "route",
         "status",
+        "superseded_by",
         "created_at",
         "updated_at",
         "external_refs",
@@ -191,14 +197,32 @@ def validate_manifest_shape(item_dir: Path, manifest: dict[str, Any]) -> list[st
         errors.append("an item cannot be its own parent")
     route = manifest.get("route")
     status = manifest.get("status")
+    superseded_by = manifest.get("superseded_by")
     if route not in ROUTES:
         errors.append("route must be one of: " + ", ".join(sorted(ROUTES)))
     if status not in STATUSES:
         errors.append("status must be one of: " + ", ".join(sorted(STATUSES)))
-    if route == "quick-plan" and status not in {"planned", "completed"}:
-        errors.append("quick-plan items must have status planned or completed")
+    if route == "quick-plan" and status not in {
+        "revision_required",
+        "ready_for_spec",
+        "planned",
+        "completed",
+        "superseded",
+    }:
+        errors.append(
+            "quick-plan items must have status revision_required, ready_for_spec, planned, completed, or superseded"
+        )
     if route == "grill-to-spec" and status not in STATUSES:
         errors.append("grill-to-spec items must use a supported lifecycle status")
+    if status == "superseded":
+        if not isinstance(superseded_by, str) or not superseded_by.strip():
+            errors.append("superseded_by must be a non-empty item ID when status is superseded")
+        elif not ID_PATTERN.fullmatch(superseded_by):
+            errors.append("superseded_by must match YYMMDD-HHMM-kebab-slug")
+        elif superseded_by == item_id:
+            errors.append("an item cannot supersede itself")
+    elif "superseded_by" in manifest and superseded_by is not None:
+        errors.append("superseded_by must be null unless status is superseded")
     for field in ("created_at", "updated_at"):
         value = manifest.get(field)
         if not isinstance(value, str) or not value.strip():
@@ -257,44 +281,212 @@ def item_location(item_dir: Path, paths: dict[str, Path]) -> str | None:
     return None
 
 
-def validate_item(
+def validate_schema_1_archive_shape(item_dir: Path, manifest: dict[str, Any]) -> list[str]:
+    """Validate the complete pre-supersession manifest contract without upgrading it."""
+    candidate = dict(manifest)
+    candidate["schema_version"] = SCHEMA_VERSION
+    candidate["superseded_by"] = None
+    errors = validate_manifest_shape(item_dir, candidate)
+    if manifest.get("schema_version") != 1:
+        errors.append("schema_version must equal 1")
+    if "superseded_by" in manifest:
+        errors.append("schema 1 archives must not define superseded_by")
+    if manifest.get("status") != "completed":
+        errors.append("schema 1 archives must have status completed")
+    return errors
+
+
+def route_artifact(item_dir: Path, route: Any, status: Any) -> tuple[str | None, list[str]]:
+    errors: list[str] = []
+    target: str | None = None
+    if route == "quick-plan":
+        target = "plan.md"
+    elif route == "grill-to-spec":
+        if status in {"planned", "completed"} or (item_dir / "plan.md").is_file():
+            target = "plan.md"
+        else:
+            target = "discovery.md"
+    if target:
+        path = item_dir / target
+        if not path.is_file() or path.is_symlink():
+            errors.append(f"index route target must be regular non-symlink {target}")
+    return target, errors
+
+
+def validate_archive_operational(
     item_dir: Path,
     paths: dict[str, Path],
-    allow_archive_planned: bool = False,
-) -> dict[str, Any]:
+    allow_archive_statuses: set[str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Return the immutable archive's live envelope and non-blocking audit defects."""
     manifest = load_manifest(item_dir)
-    errors = validate_manifest_shape(item_dir, manifest)
-    route = manifest.get("route")
-    status = manifest.get("status")
-    location = item_location(item_dir, paths)
-    if location == "active" and status not in ACTIVE_STATUSES:
-        errors.append("active items must use a nonterminal planning status")
-    if location == "archive" and status not in TERMINAL_STATUSES and not (
-        allow_archive_planned and status == "planned"
+    schema = manifest.get("schema_version")
+    if type(schema) is not int or schema not in SUPPORTED_ARCHIVE_SCHEMAS:
+        raise ProtocolError(
+            f"invalid item {item_dir.name}: unsupported archive schema_version {schema!r}"
+        )
+
+    required = {"schema_version", "id", "title", "kind", "parent", "route", "status", "updated_at"}
+    if schema == 2:
+        required.add("superseded_by")
+    errors = []
+    missing = sorted(required - manifest.keys())
+    if missing:
+        errors.append("missing operational fields: " + ", ".join(missing))
+
+    item_id = manifest.get("id")
+    if item_id != item_dir.name:
+        errors.append(f"manifest id {item_id!r} does not match directory {item_dir.name!r}")
+    if not isinstance(item_id, str) or not ID_PATTERN.fullmatch(item_id):
+        errors.append("id must match YYMMDD-HHMM-kebab-slug")
+    if not isinstance(manifest.get("title"), str) or not manifest.get("title", "").strip():
+        errors.append("title must be a non-empty string")
+    if manifest.get("kind") not in KINDS:
+        errors.append("kind must be one of: " + ", ".join(sorted(KINDS)))
+    parent = manifest.get("parent")
+    if parent is not None and (
+        not isinstance(parent, str) or not ID_PATTERN.fullmatch(parent)
     ):
-        errors.append("archived items must have status completed")
-    if location is None:
-        errors.append("item must be located under spec/active or spec/archive")
-    if route == "quick-plan" and not (item_dir / "plan.md").is_file():
-        errors.append("quick-plan items require plan.md")
-    if route == "grill-to-spec" and not (item_dir / "discovery.md").is_file():
-        errors.append("grill-to-spec items require discovery.md")
-    if route == "grill-to-spec" and status in {"planned", "completed"} and not (
-        item_dir / "plan.md"
-    ).is_file():
-        errors.append("planned or completed grill-to-spec items require plan.md")
+        errors.append("parent must be null or a valid item ID")
+    if parent == item_id:
+        errors.append("an item cannot be its own parent")
+    route = manifest.get("route")
+    if route not in ROUTES:
+        errors.append("route must be one of: " + ", ".join(sorted(ROUTES)))
+    status = manifest.get("status")
+    allowed_statuses = TERMINAL_STATUSES | (allow_archive_statuses or set())
+    if schema == 1 and status != "completed":
+        errors.append("schema 1 archives must have status completed")
+    elif schema == 2 and status not in allowed_statuses:
+        errors.append("archived items must have status completed or superseded")
+    replacement = manifest.get("superseded_by") if schema == 2 else None
+    if schema == 2:
+        if status == "superseded":
+            if not isinstance(replacement, str) or not ID_PATTERN.fullmatch(replacement):
+                errors.append("superseded_by must be a valid item ID when status is superseded")
+            elif replacement == item_id:
+                errors.append("an item cannot supersede itself")
+        elif replacement is not None:
+            errors.append("superseded_by must be null unless status is superseded")
+    updated = manifest.get("updated_at")
+    if not isinstance(updated, str) or not updated.strip():
+        errors.append("updated_at must be a non-empty ISO 8601 string")
+    else:
+        try:
+            parsed = dt.datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                errors.append("updated_at must include a timezone offset")
+        except ValueError:
+            errors.append("updated_at must be a parseable ISO 8601 timestamp")
+    target, target_errors = route_artifact(item_dir, route, status)
+    errors.extend(target_errors)
+    if item_location(item_dir, paths) != "archive":
+        errors.append("archive record must be located under spec/archive")
+    if errors:
+        raise ProtocolError(f"invalid item {item_dir.name}: " + "; ".join(errors))
+
+    full_errors = (
+        validate_schema_1_archive_shape(item_dir, manifest)
+        if schema == 1
+        else validate_manifest_shape(item_dir, manifest)
+    )
+    if route == "grill-to-spec":
+        discovery = item_dir / "discovery.md"
+        if not discovery.is_file() or discovery.is_symlink():
+            full_errors.append("grill-to-spec items require regular non-symlink discovery.md")
     if status == "completed":
         for artifact in ("plan.md", "verification.md", "outcome.md"):
             artifact_path = item_dir / artifact
             if not artifact_path.is_file() or artifact_path.is_symlink():
-                errors.append(f"completed items require regular non-symlink {artifact}")
+                full_errors.append(f"completed items require regular non-symlink {artifact}")
+    if status == "superseded":
+        outcome = item_dir / "outcome.md"
+        if not outcome.is_file() or outcome.is_symlink():
+            full_errors.append("superseded items require regular non-symlink outcome.md")
 
-    parent = manifest.get("parent")
-    if parent:
-        parent_paths = [paths["active"] / parent, paths["archive"] / parent]
-        if not any((path / "item.yaml").is_file() for path in parent_paths):
-            errors.append(f"parent item does not exist: {parent}")
+    record = {
+        "schema_version": schema,
+        "id": item_id,
+        "title": manifest["title"],
+        "kind": manifest["kind"],
+        "route": route,
+        "status": status,
+        "updated_at": updated,
+        "parent": parent,
+        "superseded_by": replacement,
+        "route_artifact": target,
+    }
+    return record, full_errors
 
+
+def refinement_dossiers(item_dir: Path) -> tuple[list[Path], list[str]]:
+    """Return canonical sequential dossiers without interpreting their Markdown."""
+    directory = item_dir / "refinements"
+    if not directory.exists():
+        return [], []
+    if not directory.is_dir() or directory.is_symlink():
+        return [], ["refinements must be a regular non-symlink directory"]
+
+    dossiers: list[tuple[int, Path]] = []
+    errors: list[str] = []
+    for path in sorted(directory.iterdir(), key=lambda candidate: candidate.name):
+        match = REFINEMENT_PATTERN.fullmatch(path.name)
+        if not match:
+            errors.append(f"invalid refinement dossier name: refinements/{path.name}")
+            continue
+        number = int(match.group(1))
+        if number == 0:
+            errors.append("refinement dossier numbering starts at R001")
+        if not path.is_file() or path.is_symlink():
+            errors.append(
+                f"refinement dossier must be a regular non-symlink file: refinements/{path.name}"
+            )
+            continue
+        dossiers.append((number, path))
+
+    numbers = [number for number, _ in dossiers if number > 0]
+    if numbers and numbers != list(range(1, max(numbers) + 1)):
+        errors.append("refinement dossiers must be sequential from R001 without gaps")
+    return [path for number, path in dossiers if number > 0], errors
+
+
+def validate_item(
+    item_dir: Path,
+    paths: dict[str, Path],
+    allow_archive_statuses: set[str] | None = None,
+) -> dict[str, Any]:
+    location = item_location(item_dir, paths)
+    if location == "archive":
+        record, full_errors = validate_archive_operational(
+            item_dir, paths, allow_archive_statuses=allow_archive_statuses
+        )
+        if full_errors:
+            raise ProtocolError(f"invalid item {item_dir.name}: " + "; ".join(full_errors))
+        return load_manifest(item_dir)
+
+    manifest = load_manifest(item_dir)
+    errors = validate_manifest_shape(item_dir, manifest)
+    route = manifest.get("route")
+    status = manifest.get("status")
+    if location == "active" and status not in ACTIVE_STATUSES:
+        errors.append("active items must use a nonterminal planning status")
+    if location is None:
+        errors.append("item must be located under spec/active or spec/archive")
+    dossiers, dossier_errors = refinement_dossiers(item_dir)
+    errors.extend(dossier_errors)
+    plan = item_dir / "plan.md"
+    if route == "quick-plan" and not plan.is_file():
+        errors.append("quick-plan items require plan.md")
+    if route == "grill-to-spec" and not (item_dir / "discovery.md").is_file():
+        errors.append("grill-to-spec items require discovery.md")
+    if status == "revision_required" and (not plan.is_file() or plan.is_symlink()):
+        errors.append("revision_required items require regular non-symlink plan.md")
+    if status == "ready_for_spec" and route == "quick-plan" and not dossiers:
+        errors.append("revision ready_for_spec requires a valid current refinements/Rxxx.md")
+    if status == "ready_for_spec" and dossiers and (not plan.is_file() or plan.is_symlink()):
+        errors.append("revision ready_for_spec requires regular non-symlink plan.md")
+    if route == "grill-to-spec" and status == "planned" and not plan.is_file():
+        errors.append("planned grill-to-spec items require plan.md")
     if errors:
         raise ProtocolError(f"invalid item {item_dir.name}: " + "; ".join(errors))
     return manifest
@@ -352,40 +544,109 @@ def replace_region(text: str, start: str, end: str, body: str) -> str:
     return text[:start_index] + "\n" + body.rstrip() + "\n" + text[end_index:]
 
 
+def normalized_active(item_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    target, errors = route_artifact(item_dir, manifest.get("route"), manifest.get("status"))
+    if errors:
+        raise ProtocolError(f"invalid item {item_dir.name}: " + "; ".join(errors))
+    record = dict(manifest)
+    record["route_artifact"] = target
+    return record
+
+
 def table_for(items: list[tuple[Path, dict[str, Any]]], location: str) -> str:
     lines = [
         "| Item | Kind | Status | Updated |",
         "| --- | --- | --- | --- |",
     ]
-    for item_dir, manifest in sorted(items, key=lambda entry: entry[0].name):
-        target = "plan.md" if (item_dir / "plan.md").is_file() else "discovery.md"
-        title = str(manifest["title"]).replace("|", "\\|")
-        updated = str(manifest["updated_at"]).split("T", 1)[0]
+    for item_dir, record in sorted(items, key=lambda entry: entry[0].name):
+        title = str(record["title"]).replace("|", "\\|")
+        updated = str(record["updated_at"]).split("T", 1)[0]
         lines.append(
-            f"| [{title}](./{location}/{item_dir.name}/{target}) | "
-            f"{manifest['kind']} | {manifest['status']} | {updated} |"
+            f"| [{title}](./{location}/{item_dir.name}/{record['route_artifact']}) | "
+            f"{record['kind']} | {record['status']} | {updated} |"
         )
     return "\n".join(lines)
 
 
-def collect_items(
-    directory: Path,
-    paths: dict[str, Path],
-    require_manifests: bool = False,
-) -> list[tuple[Path, dict[str, Any]]]:
-    items: list[tuple[Path, dict[str, Any]]] = []
+def item_directories(directory: Path, require_manifests: bool) -> list[Path]:
     if not directory.is_dir():
-        return items
+        return []
     item_dirs = sorted(
         path for path in directory.iterdir() if path.is_dir() and not path.name.startswith(".")
     )
     for item_dir in item_dirs:
-        if not (item_dir / "item.yaml").is_file():
-            if require_manifests:
-                raise ProtocolError(f"active item manifest not found: {item_dir / 'item.yaml'}", code=3)
-            continue
-        items.append((item_dir, validate_item(item_dir, paths)))
-    return items
+        if require_manifests and not (item_dir / "item.yaml").is_file():
+            raise ProtocolError(f"item manifest not found: {item_dir / 'item.yaml'}", code=3)
+    return [item_dir for item_dir in item_dirs if (item_dir / "item.yaml").is_file()]
+
+
+def collect_active_items(
+    paths: dict[str, Path], require_manifests: bool = False
+) -> list[tuple[Path, dict[str, Any]]]:
+    return [
+        (item_dir, normalized_active(item_dir, validate_item(item_dir, paths)))
+        for item_dir in item_directories(paths["active"], require_manifests)
+    ]
+
+
+def collect_archive_items(
+    paths: dict[str, Path],
+    require_manifests: bool = False,
+    exhaustive: bool = False,
+) -> tuple[list[tuple[Path, dict[str, Any]]], list[dict[str, Any]]]:
+    items: list[tuple[Path, dict[str, Any]]] = []
+    warnings: list[dict[str, Any]] = []
+    for item_dir in item_directories(paths["archive"], require_manifests):
+        record, full_errors = validate_archive_operational(item_dir, paths)
+        if exhaustive and full_errors:
+            raise ProtocolError(f"invalid item {item_dir.name}: " + "; ".join(full_errors))
+        if full_errors:
+            warnings.append(
+                {
+                    "id": record["id"],
+                    "path": str(item_dir.relative_to(paths["root"])),
+                    "issues": full_errors,
+                }
+            )
+        items.append((item_dir, record))
+    return items, warnings
+
+
+def validate_repository_relationships(
+    active_items: list[tuple[Path, dict[str, Any]]],
+    archive_items: list[tuple[Path, dict[str, Any]]],
+) -> None:
+    records: dict[str, dict[str, Any]] = {}
+    for _, record in active_items + archive_items:
+        item_id = str(record["id"])
+        if item_id in records:
+            raise ProtocolError(f"duplicate item ID across active and archive: {item_id}")
+        records[item_id] = record
+    for _, record in active_items + archive_items:
+        item_id = str(record["id"])
+        parent = record.get("parent")
+        if parent and parent not in records:
+            raise ProtocolError(f"invalid item {item_id}: parent item does not exist: {parent}")
+        replacement = record.get("superseded_by")
+        if replacement:
+            target = records.get(replacement)
+            if target is None:
+                raise ProtocolError(
+                    f"invalid item {item_id}: superseded_by item does not exist: {replacement}"
+                )
+
+
+def collect_operational_repository(
+    paths: dict[str, Path],
+) -> tuple[
+    list[tuple[Path, dict[str, Any]]],
+    list[tuple[Path, dict[str, Any]]],
+    list[dict[str, Any]],
+]:
+    active_items = collect_active_items(paths, require_manifests=True)
+    archive_items, warnings = collect_archive_items(paths, require_manifests=True)
+    validate_repository_relationships(active_items, archive_items)
+    return active_items, archive_items, warnings
 
 
 def render_index(
@@ -394,21 +655,23 @@ def render_index(
     archive_items: list[tuple[Path, dict[str, Any]]] | None = None,
 ) -> str:
     text = paths["index"].read_text(encoding="utf-8")
-    if active_items is None:
-        active_items = collect_items(paths["active"], paths, require_manifests=True)
-    if archive_items is None:
-        archive_items = collect_items(paths["archive"], paths, require_manifests=True)
-    active_ids = {str(manifest["id"]) for _, manifest in active_items}
-    archive_ids = {str(manifest["id"]) for _, manifest in archive_items}
-    duplicates = sorted(active_ids & archive_ids)
-    if duplicates:
-        raise ProtocolError("item IDs exist in both active and archive: " + ", ".join(duplicates))
+    if active_items is None or archive_items is None:
+        active_items, archive_items, warnings = collect_operational_repository(paths)
+        report_warnings(warnings)
     text = replace_region(text, ACTIVE_START, ACTIVE_END, table_for(active_items, "active"))
     return replace_region(text, ARCHIVE_START, ARCHIVE_END, table_for(archive_items, "archive"))
 
 
-def update_index(paths: dict[str, Path]) -> None:
-    atomic_write(paths["index"], render_index(paths))
+def update_index(paths: dict[str, Path]) -> list[dict[str, Any]]:
+    active_items, archive_items, warnings = collect_operational_repository(paths)
+    atomic_write(paths["index"], render_index(paths, active_items, archive_items))
+    return warnings
+
+
+def report_warnings(warnings: list[dict[str, Any]]) -> None:
+    for warning in warnings:
+        for issue in warning["issues"]:
+            print(f"WARNING: {warning['path']}: {issue}", file=sys.stderr)
 
 
 def item_from_explicit(
@@ -457,9 +720,7 @@ def resolve_item(
         return item_dir, manifest
 
     matches: list[tuple[Path, dict[str, Any]]] = []
-    for item_dir, manifest in collect_items(
-        paths["active"], paths, require_manifests=True
-    ):
+    for item_dir, manifest in collect_active_items(paths, require_manifests=True):
         if statuses and manifest["status"] not in statuses:
             continue
         if routes and manifest["route"] not in routes:
@@ -488,6 +749,7 @@ def command_create(args: argparse.Namespace, paths: dict[str, Path]) -> None:
         "parent": args.parent,
         "route": args.route,
         "status": status,
+        "superseded_by": None,
         "created_at": created,
         "updated_at": created,
         "external_refs": args.external_ref,
@@ -506,12 +768,13 @@ def command_create(args: argparse.Namespace, paths: dict[str, Path]) -> None:
         content = render_template(paths["templates"] / template_name, values)
         atomic_write(item_dir / template_name, content)
         validate_item(item_dir, paths)
-        update_index(paths)
+        warnings = update_index(paths)
     except Exception:
         for child in item_dir.iterdir():
             child.unlink()
         item_dir.rmdir()
         raise
+    report_warnings(warnings)
     emit(
         {
             "action": "create",
@@ -592,9 +855,11 @@ def canonical_reference_sources(paths: dict[str, Path], item_dir: Path) -> list[
     return sorted(sources)
 
 
-def archive_item_paths(item_id: str, paths: dict[str, Path]) -> tuple[Path, Path]:
+def archive_item_paths(
+    item_id: str, paths: dict[str, Path], command: str = "archive"
+) -> tuple[Path, Path]:
     if not ID_PATTERN.fullmatch(item_id):
-        raise ProtocolError("archive --item requires an explicit work item ID")
+        raise ProtocolError(f"{command} --item requires an explicit work item ID")
     return paths["active"] / item_id, paths["archive"] / item_id
 
 
@@ -626,7 +891,7 @@ def finalize_archived_item(
     destination: Path,
     paths: dict[str, Path],
 ) -> tuple[dict[str, Any], bool]:
-    manifest = validate_item(destination, paths, allow_archive_planned=True)
+    manifest = validate_item(destination, paths, allow_archive_statuses={"planned"})
     if manifest["status"] not in {"planned", "completed"}:
         raise ProtocolError(
             f"archived item {manifest['id']} has unsupported status {manifest['status']!r}"
@@ -639,7 +904,7 @@ def finalize_archived_item(
         manifest["updated_at"] = now_iso()
         write_manifest(destination, manifest)
     manifest = validate_item(destination, paths)
-    update_index(paths)
+    report_warnings(update_index(paths))
     return manifest, finalized
 
 
@@ -697,6 +962,172 @@ def command_archive(args: argparse.Namespace, paths: dict[str, Path]) -> None:
     )
 
 
+def required_supersede_outcome(item_dir: Path) -> None:
+    outcome = item_dir / "outcome.md"
+    if not outcome.is_file() or outcome.is_symlink():
+        raise ProtocolError("supersede requires files: outcome.md")
+
+
+def replacement_item_dir(paths: dict[str, Path], replacement_id: str) -> Path:
+    if not ID_PATTERN.fullmatch(replacement_id):
+        raise ProtocolError("supersede --replacement requires an explicit work item ID")
+    active = paths["active"] / replacement_id
+    archive = paths["archive"] / replacement_id
+    active_manifest = (active / "item.yaml").is_file()
+    archive_manifest = (archive / "item.yaml").is_file()
+    if active_manifest and archive_manifest:
+        raise ProtocolError(f"item exists in both active and archive: {replacement_id}")
+    if active_manifest:
+        return active
+    if archive_manifest:
+        return archive
+    raise ProtocolError(f"replacement work item not found: {replacement_id}", code=3)
+
+
+def validate_replacement_selection(
+    paths: dict[str, Path],
+    replacement_id: str,
+    source_id: str,
+) -> dict[str, Any]:
+    if replacement_id == source_id:
+        raise ProtocolError("replacement must be distinct from the superseded item")
+    item_dir = replacement_item_dir(paths, replacement_id)
+    manifest = validate_item(item_dir, paths)
+    status = manifest["status"]
+    if status == "superseded":
+        raise ProtocolError(f"replacement {replacement_id} is already superseded")
+    if status not in REPLACEMENT_STATUSES:
+        raise ProtocolError(
+            f"replacement {replacement_id} has status {status!r}; expected an active or completed item"
+        )
+    return manifest
+
+
+def preflight_new_supersede(
+    item_dir: Path,
+    destination: Path,
+    paths: dict[str, Path],
+    replacement_id: str,
+    include_outcome: bool,
+) -> dict[str, Any]:
+    if os.path.lexists(destination):
+        raise ProtocolError(f"archive destination already exists: {destination}")
+    manifest = validate_item(item_dir, paths)
+    if manifest["status"] not in ACTIVE_STATUSES:
+        raise ProtocolError(
+            f"item {manifest['id']} has status {manifest['status']!r}; supersede requires an active status"
+        )
+    if include_outcome:
+        required_supersede_outcome(item_dir)
+    validate_replacement_selection(paths, replacement_id, manifest["id"])
+    render_index(paths)
+    references = canonical_reference_sources(paths, item_dir)
+    if references:
+        raise ProtocolError(
+            f"archive blocked by canonical reference spec/active/{item_dir.name} in: "
+            + ", ".join(references)
+        )
+    return manifest
+
+
+def finalize_superseded_item(
+    destination: Path,
+    paths: dict[str, Path],
+    replacement_id: str,
+) -> tuple[dict[str, Any], bool]:
+    manifest = validate_item(destination, paths, allow_archive_statuses=set(ACTIVE_STATUSES))
+    status = manifest["status"]
+    if status in ACTIVE_STATUSES:
+        required_supersede_outcome(destination)
+        validate_replacement_selection(paths, replacement_id, manifest["id"])
+        finalized = True
+        manifest = dict(manifest)
+        manifest["status"] = "superseded"
+        manifest["superseded_by"] = replacement_id
+        manifest["updated_at"] = now_iso()
+        write_manifest(destination, manifest)
+    elif status == "superseded":
+        current = manifest.get("superseded_by")
+        if current != replacement_id:
+            raise ProtocolError(
+                f"archived item {manifest['id']} is already superseded by {current!r}"
+            )
+        finalized = False
+    else:
+        raise ProtocolError(
+            f"archived item {manifest['id']} has unsupported status {status!r}"
+        )
+    manifest = validate_item(destination, paths)
+    report_warnings(update_index(paths))
+    return manifest, finalized
+
+
+def command_supersede(args: argparse.Namespace, paths: dict[str, Path]) -> None:
+    item_dir, destination = archive_item_paths(args.item, paths, command="supersede")
+    active_exists = os.path.lexists(item_dir)
+    archive_exists = os.path.lexists(destination)
+    if active_exists and archive_exists:
+        raise ProtocolError(f"item exists in both active and archive: {args.item}")
+
+    relative_source = str(item_dir.relative_to(paths["root"]))
+    relative_destination = str(destination.relative_to(paths["root"]))
+    if args.check:
+        if not active_exists:
+            if archive_exists:
+                raise ProtocolError(f"archive destination already exists: {destination}")
+            raise ProtocolError(f"active work item not found: {args.item}", code=3)
+        manifest = preflight_new_supersede(
+            item_dir,
+            destination,
+            paths,
+            args.replacement,
+            include_outcome=False,
+        )
+        emit(
+            {
+                "action": "supersede",
+                "check": True,
+                "from": relative_source,
+                "id": manifest["id"],
+                "replacement": args.replacement,
+                "status": "superseded",
+                "to": relative_destination,
+                "valid": True,
+            }
+        )
+        return
+
+    recovered = False
+    if active_exists:
+        preflight_new_supersede(
+            item_dir,
+            destination,
+            paths,
+            args.replacement,
+            include_outcome=True,
+        )
+        os.rename(item_dir, destination)
+    elif archive_exists:
+        recovered = True
+    else:
+        raise ProtocolError(f"work item not found: {args.item}", code=3)
+
+    manifest, finalized = finalize_superseded_item(destination, paths, args.replacement)
+    emit(
+        {
+            "action": "supersede",
+            "check": False,
+            "finalized": finalized,
+            "from": relative_source,
+            "id": manifest["id"],
+            "recovered": recovered,
+            "replacement": args.replacement,
+            "status": "superseded",
+            "to": relative_destination,
+        }
+    )
+
+
 def command_transition(args: argparse.Namespace, paths: dict[str, Path]) -> None:
     item_dir, manifest = resolve_item(paths, args.item, set(), set())
     original = dict(manifest)
@@ -704,8 +1135,23 @@ def command_transition(args: argparse.Namespace, paths: dict[str, Path]) -> None
     target = args.to
     if target not in TRANSITIONS.get(source, set()):
         raise ProtocolError(f"invalid transition: {source} -> {target}")
-    if target == "ready_for_spec" and not (item_dir / "discovery.md").is_file():
-        raise ProtocolError("ready_for_spec requires discovery.md")
+    dossiers, dossier_errors = refinement_dossiers(item_dir)
+    if dossier_errors:
+        raise ProtocolError("invalid refinement artifacts: " + "; ".join(dossier_errors))
+    if source == "discovering" and target == "ready_for_spec" and not (
+        item_dir / "discovery.md"
+    ).is_file():
+        raise ProtocolError("initial ready_for_spec requires discovery.md")
+    if source == "revision_required" and target == "ready_for_spec" and not dossiers:
+        raise ProtocolError(
+            "revision ready_for_spec requires a valid current refinements/Rxxx.md"
+        )
+    if target == "revision_required" and not (item_dir / "plan.md").is_file():
+        raise ProtocolError("revision_required requires plan.md")
+    if source == "ready_for_spec" and target == "revision_required" and not dossiers:
+        raise ProtocolError(
+            "ready_for_spec -> revision_required requires a valid current refinements/Rxxx.md"
+        )
     if target == "planned" and not (item_dir / "plan.md").is_file():
         raise ProtocolError("planned requires plan.md")
     manifest["status"] = target
@@ -713,41 +1159,95 @@ def command_transition(args: argparse.Namespace, paths: dict[str, Path]) -> None
     write_manifest(item_dir, manifest)
     try:
         validate_item(item_dir, paths)
-        update_index(paths)
+        warnings = update_index(paths)
     except Exception:
         write_manifest(item_dir, original)
         raise
+    report_warnings(warnings)
     emit({"action": "transition", "id": manifest["id"], "from": source, "to": target})
 
 
+def validate_exact_references(
+    item_dir: Path, manifest: dict[str, Any], paths: dict[str, Path]
+) -> None:
+    for field in ("parent", "superseded_by"):
+        reference = manifest.get(field)
+        if not reference:
+            continue
+        active = paths["active"] / reference
+        archive = paths["archive"] / reference
+        locations = [path for path in (active, archive) if (path / "item.yaml").is_file()]
+        if not locations:
+            raise ProtocolError(
+                f"invalid item {item_dir.name}: {field} item does not exist: {reference}"
+            )
+        if len(locations) > 1:
+            raise ProtocolError(f"item exists in both active and archive: {reference}")
+        target = locations[0]
+        if item_location(target, paths) == "active":
+            validate_item(target, paths)
+        else:
+            validate_archive_operational(target, paths)
+
+
 def command_validate(args: argparse.Namespace, paths: dict[str, Path]) -> None:
+    selected = sum(bool(value) for value in (args.item, args.operational, args.all))
+    if selected != 1:
+        raise ProtocolError(
+            "validate requires exactly one of --item, --operational, or --all", code=2
+        )
     if args.all:
-        active_items = collect_items(paths["active"], paths, require_manifests=True)
-        archive_items = collect_items(paths["archive"], paths, require_manifests=True)
-        update_index(paths)
+        active_items = collect_active_items(paths, require_manifests=True)
+        archive_items, _ = collect_archive_items(
+            paths, require_manifests=True, exhaustive=True
+        )
+        validate_repository_relationships(active_items, archive_items)
+        atomic_write(paths["index"], render_index(paths, active_items, archive_items))
         emit(
             {
                 "action": "validate",
                 "count": len(active_items) + len(archive_items),
+                "mode": "exhaustive",
                 "valid": True,
+                "warnings": [],
             }
         )
         return
-    if not args.item:
-        raise ProtocolError("validate requires --item or --all", code=2)
+    if args.operational:
+        active_items, archive_items, warnings = collect_operational_repository(paths)
+        atomic_write(paths["index"], render_index(paths, active_items, archive_items))
+        report_warnings(warnings)
+        emit(
+            {
+                "action": "validate",
+                "count": len(active_items) + len(archive_items),
+                "mode": "operational",
+                "valid": True,
+                "warnings": warnings,
+            }
+        )
+        return
     item_dir = item_from_explicit(args.item, paths, locations=("active", "archive"))
     manifest = validate_item(item_dir, paths)
+    validate_exact_references(item_dir, manifest, paths)
     emit({"action": "validate", "id": manifest["id"], "valid": True})
 
 
 def command_index(paths: dict[str, Path]) -> None:
-    update_index(paths)
-    emit({"action": "index", "path": str(paths["index"].relative_to(paths["root"]))})
+    warnings = update_index(paths)
+    report_warnings(warnings)
+    emit(
+        {
+            "action": "index",
+            "path": str(paths["index"].relative_to(paths["root"])),
+            "warnings": warnings,
+        }
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create, resolve, transition, archive, validate, and index spec work items."
+        description="Create, resolve, transition, archive, supersede, validate, and index spec work items."
     )
     parser.add_argument("--root", default=".", help="Repository root, default: current directory")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -779,9 +1279,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run non-mutating archive preflight without requiring outcome.md",
     )
 
-    validate = subparsers.add_parser("validate", help="Validate one item or all items")
+    supersede = subparsers.add_parser(
+        "supersede", help="Archive one active item as superseded by a replacement"
+    )
+    supersede.add_argument("--item", required=True, help="Explicit work item ID")
+    supersede.add_argument(
+        "--replacement", required=True, help="Explicit replacement work item ID"
+    )
+    supersede.add_argument(
+        "--check",
+        action="store_true",
+        help="Run non-mutating supersede preflight without requiring outcome.md",
+    )
+
+    validate = subparsers.add_parser(
+        "validate", help="Validate one item, operational readiness, or exhaustive history"
+    )
     validate.add_argument("--item", help="Explicit item ID, directory, or artifact path")
-    validate.add_argument("--all", action="store_true")
+    validate.add_argument(
+        "--operational",
+        action="store_true",
+        help="Validate current work and the operational archive envelope; warn on audit-only defects",
+    )
+    validate.add_argument("--all", action="store_true", help="Run the exhaustive repository audit")
 
     subparsers.add_parser("index", help="Regenerate managed spec index tables")
     return parser
@@ -805,6 +1325,8 @@ def main() -> int:
             command_transition(args, paths)
         elif args.command == "archive":
             command_archive(args, paths)
+        elif args.command == "supersede":
+            command_supersede(args, paths)
         elif args.command == "validate":
             command_validate(args, paths)
         elif args.command == "index":

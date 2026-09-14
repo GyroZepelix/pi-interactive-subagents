@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: "{{ID}}"
 title: "{{TITLE}}"
 kind: work-item
@@ -6,6 +6,7 @@ work_type: other
 parent: null
 route: quick-plan
 status: planned
+superseded_by: null
 created_at: "{{CREATED_AT}}"
 updated_at: "{{UPDATED_AT}}"
 external_refs: []
