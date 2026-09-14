@@ -18,10 +18,12 @@
 
 No lint, formatter-check, non-emitting type-check, or CI command is defined.
 
+When running the top-level unit suite from inside a spawned subagent, unset `PI_SUBAGENT_ALLOWED` unless the test specifically targets nested allowlisting. A present value intentionally filters discovery and makes top-level profile and command expectations fail (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `spec/archive/260914-1641-fix-frozen-subagent-reply-delivery/verification.md`).
+
 ## Test organization
 
-- `test/test.ts` directly imports production modules and exercises session persistence, validated profile discovery, trust, precedence, canonical identity, fail-closed tools, activity/status transitions, tool registration, runtime names, steering, rendering, and tmux helpers.
-- `test/integration/tmux-surface.test.ts` performs real pane operations without model calls.
+- `test/test.ts` directly imports production modules and exercises session persistence, validated profile discovery, trust, precedence, canonical identity, fail-closed tools, activity/status transitions, tool registration, runtime names, steering acknowledgment and timeout, pending-message auto-exit protection, missing-pane recovery, rendering, and tmux helpers.
+- `test/integration/tmux-surface.test.ts` performs real pane operations without model calls. Its bracketed-paste fixture records framing, byte length, hash, and submission count for a 4,283-byte UTF-8 payload, accepts a short follow-up, and verifies buffer cleanup; the suite also removes a disposable pane to exercise interruption detection (`test/integration/fixtures/bracketed-paste-recorder.mjs`).
 - `test/integration/subagent-lifecycle.test.ts` performs real Pi and model interactions and writes markers under `/tmp`.
 - Integration fixtures define `session-mode`, body and `system-prompt` behavior, and `ask_question`; they do not use removed public spawn overrides.
 - Integration sessions force-load the working-tree extension with `pi -ne -e <path>` to avoid testing an installed package snapshot (`test/integration/harness.ts`).
@@ -42,4 +44,4 @@ No lint, formatter-check, non-emitting type-check, or CI command is defined.
 ## Current limitations
 
 - There is no tracked CI, release automation, formatter, linter, or non-emitting type-check configuration.
-- Stop/interrupt controls, acknowledged transport, shell-readiness redesign, broader configuration, orchestration modularization, and unrelated dead-code cleanup remain deferred.
+- General stop/interrupt controls, correlation-safe acknowledgment for active Pi or Claude input, automatic replay, shell-readiness redesign, broader configuration, orchestration modularization, and unrelated dead-code cleanup remain deferred. Waiting Pi input has bounded activity-based confirmation, while ambiguous timeout recovery remains explicit and operator-controlled.

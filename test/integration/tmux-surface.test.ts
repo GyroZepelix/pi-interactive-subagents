@@ -10,7 +10,12 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { unlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { pollForExit, submitText } from "../../pi-extension/subagents/tmux.ts";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -23,6 +28,7 @@ import {
   untrackSurface,
   sendCommand,
   sendLongCommand,
+  shellEscape,
   readScreen,
   readScreenAsync,
   closeSurface,
@@ -36,6 +42,19 @@ import {
 
 const backends = getAvailableBackends();
 const FOCUS_TEST_SHELL_READY_DELAY_MS = Number(process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS ?? "2500");
+const BRACKETED_PASTE_FIXTURE = fileURLToPath(
+  new URL("./fixtures/bracketed-paste-recorder.mjs", import.meta.url),
+);
+
+function tmuxBufferNames(): string[] {
+  try {
+    return execFileSync("tmux", ["list-buffers", "-F", "#{buffer_name}"], { encoding: "utf8" })
+      .split("\n")
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
 
 function screenContainsMarker(screen: string, marker: string): boolean {
   return screen.replace(/\s+/g, "").includes(marker);
@@ -149,6 +168,69 @@ for (const backend of backends) {
         screenContainsMarker(screen, "_END"),
         `Expected full output (not truncated). Got:\n${screen.slice(-300)}`,
       );
+    });
+
+    it("bracket-pastes a 4,283-byte UTF-8 reply exactly once and remains responsive", async () => {
+      const surface = createTrackedSurface(env, "bracketed-paste-test");
+      const resultFile = join(env.dir, `bracketed-paste-${uniqueId()}.jsonl`);
+      trackTempFile(env, resultFile);
+      await sleep(FOCUS_TEST_SHELL_READY_DELAY_MS);
+
+      sendCommand(
+        surface,
+        `node ${shellEscape(BRACKETED_PASTE_FIXTURE)} ${shellEscape(resultFile)}`,
+      );
+      await waitForScreen(surface, /READY/, 10_000, 50);
+
+      // The live-message caller flattens multiline replies before transport.
+      const prefix = "first π🙂 line second line ";
+      const payload = prefix + "X".repeat(4_283 - Buffer.byteLength(prefix));
+      assert.equal(Buffer.byteLength(payload), 4_283);
+      submitText(surface, payload);
+      await waitForFile(resultFile, 10_000, /"submissionCount":1/);
+
+      const probe = "responsive-π";
+      submitText(surface, probe);
+      await waitForFile(resultFile, 10_000, /"submissionCount":2/);
+      await waitForScreen(surface, /DONE/, 10_000, 50);
+
+      const records = readFileSync(resultFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.deepEqual(records, [
+        {
+          submissionCount: 1,
+          byteLength: 4_283,
+          sha256: createHash("sha256").update(payload).digest("hex"),
+          bracketedPaste: true,
+        },
+        {
+          submissionCount: 2,
+          byteLength: Buffer.byteLength(probe),
+          sha256: createHash("sha256").update(probe).digest("hex"),
+          bracketedPaste: true,
+        },
+      ]);
+      assert.equal(
+        tmuxBufferNames().some((name) => name.startsWith("pi-subagent-")),
+        false,
+        "named live-message buffers must be deleted after successful paste",
+      );
+    });
+
+    it("reports interruption after an operator removes a child pane", async () => {
+      const surface = createTrackedSurface(env, "missing-pane-test");
+      await sleep(1000);
+
+      const pending = pollForExit(surface, new AbortController().signal, { interval: 25 });
+      closeSurface(surface);
+      untrackSurface(env, surface);
+
+      const result = await pending;
+      assert.equal(result.reason, "interrupted");
+      assert.equal(result.exitCode, 1);
+      assert.match(result.errorMessage ?? "", /no longer exists/);
     });
 
     it("reads screen asynchronously", async () => {

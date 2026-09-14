@@ -11,6 +11,7 @@
  * the user's focus.
  */
 import { execFile, execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -164,6 +165,57 @@ export function sendCommand(surface: string, command: string): void {
   execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
 }
 
+type TmuxTextRunner = (
+  args: string[],
+  options?: { input?: string; encoding?: BufferEncoding },
+) => unknown;
+
+function runTmuxTextCommand(
+  args: string[],
+  options?: { input?: string; encoding?: BufferEncoding },
+): unknown {
+  requireTmux();
+  return execFileSync("tmux", args, {
+    ...options,
+    encoding: options?.encoding ?? "utf8",
+  });
+}
+
+/**
+ * Submit text to a TUI pane without exposing it in argv or typing it as a
+ * burst of individual key events. tmux reads the payload from stdin into a
+ * uniquely named server buffer, pastes it with application-negotiated
+ * bracketed-paste framing, removes the buffer, and only then sends Enter.
+ *
+ * Launch commands intentionally continue to use sendCommand/sendLongCommand;
+ * this primitive is for live editor input only.
+ */
+export function submitText(
+  surface: string,
+  text: string,
+  runner: TmuxTextRunner = runTmuxTextCommand,
+): void {
+  const bufferName = `pi-subagent-${process.pid}-${randomUUID()}`;
+  let needsCleanup = true;
+  try {
+    runner(["load-buffer", "-b", bufferName, "-"], { input: text, encoding: "utf8" });
+    runner(["paste-buffer", "-p", "-d", "-b", bufferName, "-t", surface], {
+      encoding: "utf8",
+    });
+    needsCleanup = false; // paste-buffer -d removed it after the successful paste.
+    runner(["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
+  } finally {
+    if (needsCleanup) {
+      try {
+        runner(["delete-buffer", "-b", bufferName], { encoding: "utf8" });
+      } catch {
+        // Preserve the original transport failure. Cleanup is best effort when
+        // the tmux server itself is unavailable.
+      }
+    }
+  }
+}
+
 /**
  * Send a long command to a pane by writing it to a script file first.
  * This avoids terminal line-wrapping issues that break commands exceeding the
@@ -242,7 +294,7 @@ export function closeSurface(surface: string): void {
 
 export interface PollResult {
   /** How the subagent exited */
-  reason: "done" | "sentinel" | "error";
+  reason: "done" | "sentinel" | "error" | "interrupted";
   /** Shell exit code (from sentinel). 0 for file-based exits. */
   exitCode: number;
   /** Error message if reason is "error" (auto-retry exhausted, provider overload, etc.) */
@@ -269,7 +321,19 @@ function interpretExitSidecar(data: any): PollResult {
   return { reason: "done", exitCode: 0 };
 }
 
-export const __pollForExitTest__ = { interpretExitSidecar };
+async function surfaceExists(surface: string): Promise<boolean | null> {
+  try {
+    const { stdout } = await execFileAsync("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], {
+      encoding: "utf8",
+    });
+    return stdout.split("\n").includes(surface);
+  } catch {
+    // A server/transport failure cannot prove that one pane disappeared.
+    return null;
+  }
+}
+
+export const __pollForExitTest__ = { interpretExitSidecar, surfaceExists };
 
 /**
  * Poll until the subagent exits. Checks for a `.exit` sidecar file first
@@ -284,6 +348,8 @@ export async function pollForExit(
     sessionFile?: string;
     sentinelFile?: string;
     onTick?: (elapsed: number) => void;
+    readSurface?: (surface: string, lines: number) => Promise<string>;
+    probeSurface?: (surface: string) => Promise<boolean | null>;
   },
 ): Promise<PollResult> {
   const start = Date.now();
@@ -316,13 +382,15 @@ export async function pollForExit(
 
     // Slow path: read terminal screen for sentinel (crash detection)
     try {
-      const screen = await readScreenAsync(surface, 5);
+      const screen = await (options.readSurface ?? readScreenAsync)(surface, 5);
       const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
       if (match) {
         return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
       }
     } catch {
-      // Surface may have been destroyed — check if .exit file appeared in the meantime
+      // Surface may have been destroyed — first honor a sidecar that appeared
+      // during the failed capture, then distinguish confirmed absence from a
+      // transient tmux/capture failure.
       if (options.sessionFile) {
         try {
           const exitFile = `${options.sessionFile}.exit`;
@@ -332,6 +400,15 @@ export async function pollForExit(
             return interpretExitSidecar(data);
           }
         } catch {}
+      }
+
+      const exists = await (options.probeSurface ?? surfaceExists)(surface);
+      if (exists === false) {
+        return {
+          reason: "interrupted",
+          exitCode: 1,
+          errorMessage: `tmux pane ${surface} no longer exists`,
+        };
       }
     }
 

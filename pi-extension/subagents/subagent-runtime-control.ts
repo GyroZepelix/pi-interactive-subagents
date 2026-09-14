@@ -227,12 +227,17 @@ export default function (pi: ExtensionAPI) {
     //  - runningChildrenCount(): this subagent spawned its own children and is
     //    waiting for their results (delivered as steered turns). Exiting now
     //    would strand those children and drop their results.
-    // In both cases the session parks as `waiting` and resumes when the next
+    //  - ctx.hasPendingMessages(): Pi has accepted steering/follow-up input
+    //    that its current loop has not drained yet. This can remain true at
+    //    agent_end even after input cleared awaitingAnswer.
+    // In all cases the session parks as `waiting` and resumes when the next
     // turn lands.
     const hasPendingChildren = runningChildrenCount() > 0;
+    const hasPendingMessages = ctx.hasPendingMessages();
     const shouldExit =
       !awaitingAnswer &&
       !hasPendingChildren &&
+      !hasPendingMessages &&
       autoExit &&
       shouldAutoExitOnAgentEnd(userTookOver, messages);
 

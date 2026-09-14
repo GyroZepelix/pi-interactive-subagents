@@ -52,7 +52,7 @@ import {
   summarizeSessionStats,
 } from "../pi-extension/subagents/session.ts";
 
-import { shellEscape } from "../pi-extension/subagents/tmux.ts";
+import { pollForExit, shellEscape, submitText } from "../pi-extension/subagents/tmux.ts";
 import {
   advanceStatusState,
   capStatusLines,
@@ -3811,7 +3811,10 @@ describe("subagent runtime control", () => {
         // Reply arrives MID-RUN as a steer: input fires, no new agent_start.
         emit("input");
         let shutdown = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+        emit("agent_end", { messages: [] }, {
+          hasPendingMessages() { return false; },
+          shutdown() { shutdown = true; },
+        });
         assert.equal(shutdown, true, "reply consumed mid-run → agent_end should exit, not park");
       } finally {
         restore();
@@ -3827,7 +3830,10 @@ describe("subagent runtime control", () => {
         await ask();
         // No input yet — the orchestrator has not replied.
         let shutdown = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+        emit("agent_end", { messages: [] }, {
+          hasPendingMessages() { return false; },
+          shutdown() { shutdown = true; },
+        });
         assert.equal(shutdown, false, "pending question with no reply must park, not exit");
       } finally {
         restore();
@@ -3842,19 +3848,140 @@ describe("subagent runtime control", () => {
         emit("agent_start");
         await ask();
         let shutdown1 = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown1 = true; } });
+        emit("agent_end", { messages: [] }, {
+          hasPendingMessages() { return false; },
+          shutdown() { shutdown1 = true; },
+        });
         assert.equal(shutdown1, false, "parks while waiting");
         // Reply arrives as a fresh turn after the subagent had parked.
         emit("input");
         emit("agent_start");
         let shutdown2 = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown2 = true; } });
+        emit("agent_end", { messages: [] }, {
+          hasPendingMessages() { return false; },
+          shutdown() { shutdown2 = true; },
+        });
         assert.equal(shutdown2, true, "after the reply turn, agent_end should exit");
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it("parks through a late queued reply and exits only after its continuation completes", () => {
+      const dir = createTestDir();
+      const { emit, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+      try {
+        emit("agent_start");
+        emit("input"); // late steer accepted while the current agent loop is settling
+
+        let firstShutdown = false;
+        emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, {
+          hasPendingMessages() { return true; },
+          shutdown() { firstShutdown = true; },
+        });
+        assert.equal(firstShutdown, false, "queued Pi-owned input must suppress auto-exit");
+
+        emit("agent_start"); // Pi drains the queue and begins the answer turn
+        let secondShutdown = false;
+        emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, {
+          hasPendingMessages() { return false; },
+          shutdown() { secondShutdown = true; },
+        });
+        assert.equal(secondShutdown, true, "normal auto-exit resumes after the queued reply turn");
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+describe("tmux text submission and exit polling", () => {
+  it("loads live text from stdin, bracket-pastes it, deletes the buffer, then submits Enter", () => {
+    const calls: Array<{ args: string[]; options?: { input?: string } }> = [];
+    const runner = (args: string[], options?: { input?: string }) => {
+      calls.push({ args, options });
+      return "";
+    };
+    const payload = "large π payload\nsecond line";
+
+    submitText("%42", payload, runner);
+
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[0].args.slice(0, 3), ["load-buffer", "-b", calls[0].args[2]]);
+    assert.equal(calls[0].args.at(-1), "-");
+    assert.equal(calls[0].options?.input, payload);
+    const bufferName = calls[0].args[2];
+    assert.ok(bufferName.startsWith(`pi-subagent-${process.pid}-`));
+    assert.deepEqual(calls[1].args, ["paste-buffer", "-p", "-d", "-b", bufferName, "-t", "%42"]);
+    assert.deepEqual(calls[2].args, ["send-keys", "-t", "%42", "Enter"]);
+    assert.equal(calls.some((call) => call.args[0] === "delete-buffer"), false);
+  });
+
+  it("uses collision-resistant buffer names and cleans up before propagating load or paste failures", () => {
+    const names: string[] = [];
+    for (let run = 0; run < 2; run++) {
+      const failureCalls: string[][] = [];
+      assert.throws(() => submitText("%7", "secret", (args) => {
+        failureCalls.push(args);
+        if (args[0] === "load-buffer") names.push(args[2]);
+        if (args[0] === (run === 0 ? "load-buffer" : "paste-buffer")) throw new Error("tmux failed");
+        return "";
+      }), /tmux failed/);
+      assert.deepEqual(failureCalls.at(-1)?.slice(0, 2), ["delete-buffer", "-b"]);
+    }
+    assert.equal(new Set(names).size, 2);
+
+    const calls: string[][] = [];
+    assert.throws(() => submitText("%7", "secret", (args) => {
+      calls.push(args);
+      if (args[0] === "paste-buffer") throw new Error("paste failed");
+      return "";
+    }), /paste failed/);
+    assert.equal(calls.some((args) => args[0] === "send-keys"), false);
+    assert.deepEqual(calls.at(-1)?.slice(0, 2), ["delete-buffer", "-b"]);
+  });
+
+  it("keeps payload text out of argv and does not retain a buffer when Enter fails", () => {
+    const calls: Array<{ args: string[]; input?: string }> = [];
+    const payload = "sensitive π text";
+    assert.throws(() => submitText("%7", payload, (args, options) => {
+      calls.push({ args, input: options?.input });
+      if (args[0] === "send-keys") throw new Error("enter failed");
+      return "";
+    }), /enter failed/);
+
+    assert.equal(calls.flatMap((call) => call.args).includes(payload), false);
+    assert.equal(calls[0].input, payload);
+    assert.equal(calls.some((call) => call.args[0] === "delete-buffer"), false);
+    assert.deepEqual(calls.map((call) => call.args[0]), ["load-buffer", "paste-buffer", "send-keys"]);
+  });
+
+  it("keeps polling after a transient capture/probe failure", async () => {
+    let reads = 0;
+    const result = await pollForExit("%9", new AbortController().signal, {
+      interval: 1,
+      async readSurface() {
+        reads += 1;
+        if (reads === 1) throw new Error("transient capture failure");
+        return "__SUBAGENT_DONE_0__";
+      },
+      async probeSurface() { return null; },
+    });
+    assert.equal(reads, 2);
+    assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
+  });
+
+  it("converges with an interrupted result when the pane is confirmed missing", async () => {
+    const result = await pollForExit("%404", new AbortController().signal, {
+      interval: 1,
+      async readSurface() { throw new Error("capture failed"); },
+      async probeSurface() { return false; },
+    });
+    assert.equal(result.reason, "interrupted");
+    assert.equal(result.exitCode, 1);
+    assert.match(result.errorMessage ?? "", /no longer exists/);
   });
 });
 
@@ -4249,6 +4376,24 @@ describe("subagent interruption", () => {
     };
   }
 
+  function activity(sequence: number, overrides: Record<string, unknown> = {}) {
+    return {
+      version: 1,
+      runningChildId: "a1",
+      createdAt: 1,
+      updatedAt: sequence + 1,
+      sequence,
+      latestEvent: "agent_end",
+      phase: "waiting",
+      agentActive: false,
+      turnActive: false,
+      providerActive: false,
+      toolActive: false,
+      waitingSince: sequence + 1,
+      ...overrides,
+    };
+  }
+
   it("registers subagent_message and not the old interrupt/resume tools", () => {
     const { api, registeredTools } = createMockExtensionApi();
     (subagentsModule as any).default(api);
@@ -4429,7 +4574,7 @@ describe("subagent interruption", () => {
     assert.equal(sentText, "do this then that");
   });
 
-  it("returns an explicit error when steering delivery fails", () => {
+  it("returns an explicit error when steering submission fails", () => {
     const testApi = (subagentsModule as any).__test__;
     const running = makeRunning();
 
@@ -4437,67 +4582,168 @@ describe("subagent interruption", () => {
       throw new Error("mux write failed");
     });
 
-    assert.match(result.error, /Failed to deliver message/);
+    assert.match(result.error, /Failed to submit message/);
   });
 
-  it("delivers a steer message and forces local status waiting", () => {
+  it("accepts only newer same-child input or active activity as a waiting-reply acknowledgment", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const validInput = { ok: true, activity: activity(11, { latestEvent: "input" }) };
+    const validActive = {
+      ok: true,
+      activity: activity(12, { latestEvent: "agent_start", phase: "active", agentActive: true }),
+    };
+
+    assert.equal(testApi.activityAcknowledgesReply(validInput, "a1", 10), true);
+    assert.equal(testApi.activityAcknowledgesReply(validActive, "a1", 10), true);
+    assert.equal(
+      testApi.activityAcknowledgesReply({ ok: true, activity: activity(10, { latestEvent: "input" }) }, "a1", 10),
+      false,
+    );
+    assert.equal(
+      testApi.activityAcknowledgesReply({ ok: true, activity: activity(11, { runningChildId: "other", latestEvent: "input" }) }, "a1", 10),
+      false,
+    );
+    assert.equal(testApi.activityAcknowledgesReply({ ok: false, reason: "invalid" }, "a1", 10), false);
+    assert.equal(
+      testApi.activityAcknowledgesReply({ ok: true, activity: activity(11) }, "a1", 10),
+      false,
+    );
+  });
+
+  it("confirms a waiting Pi reply only after newer child activity", async () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
-    let sentSurface = "";
+    const reads = [
+      { ok: true, activity: activity(10) },
+      { ok: true, activity: activity(10, { latestEvent: "input" }) },
+      { ok: false, reason: "wrong-id" },
+      { ok: true, activity: activity(11, { latestEvent: "input" }) },
+    ];
+    let clock = 0;
     let sentText = "";
     runningMap.clear();
 
-    const activeState = observeStatus(
-      createStatusState({ source: "pi", startTimeMs: 0 }),
-      {
-        snapshot: "present",
-        updatedAt: 5_000,
-        sequence: 1,
-        phase: "active",
-        active: true,
-        activeScope: "tool",
-        activeSince: 5_000,
-        activityLabel: "bash",
-      },
-      5_000,
-    );
-
     try {
-      runningMap.set("a1", makeRunning({ statusState: activeState }));
-
-      const result = withMockedNow(20_000, () =>
-        testApi.handleSubagentSteer({ name: "Implementer", message: "keep going" }, (surface: string, text: string) => {
-          sentSurface = surface;
-          sentText = text;
-        }),
+      runningMap.set("a1", makeRunning({ activityFile: "activity.json" }));
+      const result = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "first line\nsecond line" },
+        {
+          send(_surface: string, text: string) { sentText = text; },
+          timeoutMs: 100,
+          pollMs: 10,
+          now: () => clock,
+          sleep: async (ms: number) => { clock += ms; },
+          readActivity: () => reads.shift() ?? { ok: true, activity: activity(11, { latestEvent: "input" }) },
+        },
       );
 
-      assert.equal(sentSurface, "pane-1");
-      assert.equal(sentText, "keep going");
-      assert.equal(result.content[0].text.includes('Message delivered to running subagent "Implementer"'), true);
-      assert.deepEqual(result.details, { id: "a1", name: "Implementer", status: "steered" });
-      const snapshot = classifyStatus(runningMap.get("a1").statusState, 20_000);
-      assert.equal(snapshot.kind, "waiting");
+      assert.equal(sentText, "first line second line");
+      assert.deepEqual(result.details, { id: "a1", name: "Implementer", status: "delivered" });
+      assert.match(result.content[0].text, /newer child activity confirmed/);
+      assert.equal(runningMap.get("a1").pendingWaitingReply, false);
+    } finally {
+      runningMap.clear();
+    }
+  });
+
+  it("does not submit a second waiting reply while the first acknowledgment is pending", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    let sends = 0;
+    runningMap.clear();
+
+    try {
+      runningMap.set("a1", makeRunning({ activityFile: "activity.json", pendingWaitingReply: true }));
+      const result = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "duplicate" },
+        {
+          send() { sends += 1; },
+          readActivity: () => ({ ok: true, activity: activity(10) }),
+        },
+      );
+      assert.equal(sends, 0);
+      assert.match(result.details.error, /already awaiting confirmation/);
       assert.equal(runningMap.has("a1"), true);
     } finally {
       runningMap.clear();
     }
   });
 
-  it("requires a message when steering", () => {
+  it("times out a waiting Pi reply as unconfirmed without resending or removing it", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    let clock = 0;
+    let sends = 0;
+    runningMap.clear();
+
+    try {
+      runningMap.set("a1", makeRunning({ activityFile: "activity.json" }));
+      const result = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "keep going" },
+        {
+          send() { sends += 1; },
+          timeoutMs: 100,
+          pollMs: 25,
+          now: () => clock,
+          sleep: async (ms: number) => { clock += ms; },
+          readActivity: () => ({ ok: true, activity: activity(10) }),
+        },
+      );
+
+      assert.equal(sends, 1);
+      assert.deepEqual(result.details, { id: "a1", name: "Implementer", status: "unconfirmed" });
+      assert.match(result.content[0].text, /Do not resend or terminate it automatically/);
+      assert.equal(runningMap.has("a1"), true);
+      assert.equal(runningMap.get("a1").pendingWaitingReply, false);
+    } finally {
+      runningMap.clear();
+    }
+  });
+
+  it("reports active Pi and Claude live messages as submitted rather than delivered", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    runningMap.clear();
+
+    try {
+      for (const running of [
+        makeRunning({ activityFile: "activity.json" }),
+        makeRunning({ cli: "claude" }),
+      ]) {
+        runningMap.set("a1", running);
+        const result = await testApi.handleSubagentSteer(
+          { name: "Implementer", message: "keep going" },
+          {
+            send() {},
+            now: () => 20_000,
+            readActivity: () => ({
+              ok: true,
+              activity: activity(4, { latestEvent: "tool_call", phase: "active", agentActive: true }),
+            }),
+          },
+        );
+        assert.deepEqual(result.details, { id: "a1", name: "Implementer", status: "submitted" });
+        assert.match(result.content[0].text, /cannot uniquely confirm consumption/);
+      }
+    } finally {
+      runningMap.clear();
+    }
+  });
+
+  it("requires a message when steering", async () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
     runningMap.clear();
     try {
       runningMap.set("a1", makeRunning());
-      const result = testApi.handleSubagentSteer({ name: "Implementer", message: "  " }, () => {});
+      const result = await testApi.handleSubagentSteer({ name: "Implementer", message: "  " });
       assert.match(result.content[0].text, /`message` is required/);
     } finally {
       runningMap.clear();
     }
   });
 
-  it("leaves status unchanged when steering delivery fails in the tool path", () => {
+  it("leaves status unchanged when steering submission fails in the tool path", async () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
     runningMap.clear();
@@ -4519,18 +4765,64 @@ describe("subagent interruption", () => {
 
     try {
       runningMap.set("a1", makeRunning({ statusState: activeState }));
-
-      const result = withMockedNow(20_000, () =>
-        testApi.handleSubagentSteer({ name: "Implementer", message: "go" }, () => {
-          throw new Error("mux write failed");
-        }),
+      const result = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "go" },
+        {
+          send() { throw new Error("mux write failed"); },
+          now: () => 20_000,
+        },
       );
 
-      assert.match(result.content[0].text, /Failed to deliver message/);
+      assert.match(result.content[0].text, /Failed to submit message/);
       assert.equal(classifyStatus(runningMap.get("a1").statusState, 20_000).kind, "active");
     } finally {
       runningMap.clear();
     }
+  });
+
+  it("removes a confirmed-missing pane from the running map while preserving same-name resume registration", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    runningMap.clear();
+
+    await withIsolatedAgentEnv(async ({ projectDir }) => {
+      const sessionFile = createSessionFile(projectDir, [{ type: "session", id: "child-id" }]);
+      registerName(projectDir, "Implementer", { sessionFile, sessionId: "child-id" });
+      const running = makeRunning({ sessionFile, startTime: Date.now() });
+      runningMap.set("a1", running);
+
+      const result = await testApi.watchSubagent(
+        running,
+        new AbortController().signal,
+        async () => ({
+          reason: "interrupted",
+          exitCode: 1,
+          errorMessage: "tmux pane pane-1 no longer exists",
+        }),
+      );
+
+      assert.equal(result.interrupted, true);
+      assert.equal(runningMap.has("a1"), false);
+      assert.equal(resolveNameInRegistry(projectDir, "Implementer")?.sessionFile, sessionFile);
+      assert.match(testApi.resolveResultPresentation(result, "Implementer"), /same name to resume/);
+    });
+    runningMap.clear();
+  });
+
+  it("does not offer same-name resume for an interrupted Claude child", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const presentation = testApi.resolveResultPresentation(
+      {
+        exitCode: 1,
+        elapsed: 5,
+        summary: "pane disappeared",
+        interrupted: true,
+        resumeSupported: false,
+      },
+      "ClaudeWorker",
+    );
+    assert.match(presentation, /Claude Code sessions cannot be resumed/);
+    assert.doesNotMatch(presentation, /Follow up with subagent_message/);
   });
 
   it("formats exit code 130 as an ordinary failure", () => {

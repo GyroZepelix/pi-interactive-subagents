@@ -20,7 +20,7 @@ Durable current-state codebase knowledge. Read this file first when answering co
 
 - [Conventions index](./conventions/index.md): Routing for repository-specific working rules.
 - [Agent profiles](./conventions/agent-profiles.md): Validated user-managed profiles, trust-aware discovery, precedence, and nesting.
-- [Runtime safety](./conventions/runtime-safety.md): Tool isolation, resume invariants, and shell boundaries.
+- [Runtime safety](./conventions/runtime-safety.md): Tool isolation, resume invariants, and shell/live-input boundaries.
 - [TypeScript modules](./conventions/typescript-modules.md): ESM imports, module boundaries, and test seams.
 
 ## Reflection and recall
@@ -32,8 +32,9 @@ Durable current-state codebase knowledge. Read this file first when answering co
 - [Versioned resume session](./dreams/2026-09-10-1843-completed-session.md): Completed slice 02.02 and the high-assurance T02 gate with strict versioned snapshots, exact new-mode resume, legacy compatibility, and Current advanced to `03.01`.
 - [Final profile-extension verification session](./dreams/2026-09-10-1958-completed-session.md): Completed Current 03.01 and whole-plan verification, synchronized user and indexed wiki guidance, and stopped with archive preflight blocked by missing helper support.
 - [Global profiles and safe Cursor provider session](./dreams/2026-09-10-2217-completed-session.md): Completed five global role profiles, rejected a provider that bypassed read-only boundaries, migrated to canonical provider models, verified isolation, and archived the item.
+- [Frozen subagent reply-delivery checkpoint](./dreams/2026-09-14-1744-gamemaster-checkpoint-260914-1641-fix-frozen-subagent-reply-delivery-direct.md): Recovered interrupted implementation work, verified bracketed live transport, bounded acknowledgment, pending-message lifecycle protection, and explicit recovery, then archived the completed item.
 
 ## Stale or needs review
 
 - Unverified: no tracked CI, release, formatter, linter, type-check configuration, or preexisting architectural history is available.
-- Deferred: stop/interrupt controls, acknowledged transport, shell-readiness redesign, broader configuration, orchestration modularization, and unrelated dead-code cleanup.
+- Deferred: general stop/interrupt controls, correlation-safe acknowledgment for active Pi or Claude input, automatic replay, shell-readiness redesign, broader configuration, orchestration modularization, and unrelated dead-code cleanup.

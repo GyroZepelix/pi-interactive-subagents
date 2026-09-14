@@ -28,9 +28,13 @@ Snapshot parsing is a strict union. Reject unknown, mixed, incomplete, malformed
 
 Resume never re-reads profiles or package settings. It intentionally executes current contents at valid stored paths, but preflights profile and required framework files before pane creation and refuses missing, non-file, non-canonical, duplicate-canonical, or reserved-framework paths. A finished Pi session must not resume without a valid snapshot, and canonical session paths are reserved while a resume is launching so concurrent calls cannot open the same JSONL twice. Finished Claude children are not resumable (`pi-extension/subagents/index.ts`).
 
-## Shell boundaries
+## Shell and live-input boundaries
 
 - Build shell commands through `shellEscape`, and use `sendLongCommand` for generated launch scripts (`pi-extension/subagents/tmux.ts`, `pi-extension/subagents/index.ts`).
+- Live Pi and Claude messages are not shell commands. Normalize them in the caller, load them into a UUID-qualified tmux buffer through stdin, paste with application-negotiated bracketed framing and deletion, then send Enter separately. Never regress live text to a shell argument or a large `send-keys -l` burst (`pi-extension/subagents/tmux.ts`, `pi-extension/subagents/index.ts`).
+- tmux command success proves submission, not child consumption. Confirm waiting Pi delivery only from newer same-child activity; otherwise report submitted or unconfirmed. Never automatically replay or kill after an ambiguous timeout (`pi-extension/subagents/index.ts`, `pi-extension/subagents/activity.ts`).
+- At child `agent_end`, include Pi-owned pending messages with pending questions and running nested children when deciding whether auto-exit is safe. A late accepted steer must drain before shutdown is reconsidered (`pi-extension/subagents/subagent-runtime-control.ts`).
+- A transient capture failure does not establish pane loss. Confirm absence before releasing the running entry; preserve Pi resume registration and keep termination or replay operator-controlled (`pi-extension/subagents/tmux.ts`, `pi-extension/subagents/index.ts`).
 - Generated task, system-prompt, and resume-message artifacts include a per-launch UUID after the sanitized runtime-name slug so concurrent distinct names cannot overwrite one another's content (`pi-extension/subagents/index.ts`).
 - A `cli: claude` profile invokes `claude --dangerously-skip-permissions`. Only explicitly trusted profiles should enable this path (`pi-extension/subagents/index.ts`).
 

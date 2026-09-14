@@ -1,0 +1,24 @@
+schema_version: 2
+id: 260914-1641-fix-frozen-subagent-reply-delivery
+title: Fix frozen subagent reply delivery
+kind: work-item
+work_type: bug
+parent: null
+route: quick-plan
+status: completed
+superseded_by: null
+created_at: '2026-09-14T16:41:24+02:00'
+updated_at: '2026-09-14T17:41:37+02:00'
+external_refs:
+- system: tmux
+  type: documentation
+  key: send-keys
+  url: https://man.openbsd.org/tmux.1#send-keys
+- system: tmux
+  type: issue
+  key: '1682'
+  url: https://github.com/tmux/tmux/issues/1682
+wiki_refs:
+- wiki/architecture.md
+- wiki/development.md
+- wiki/conventions/runtime-safety.md

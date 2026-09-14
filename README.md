@@ -106,7 +106,8 @@ subagent_message({ name: "inspector", message: "Also check authorization middlew
 
 Names are unique within one parent session and remain registered after a child finishes.
 
-- A running Pi or Claude child receives the message in its live pane.
+- A running Pi or Claude child receives the message through a temporary tmux buffer and application-negotiated bracketed paste; the normalized message is not placed in a shell command or tmux argument.
+- For a waiting Pi child, the call briefly waits for newer same-child activity before reporting delivery. A timeout reports delivery as unconfirmed and does not resend or terminate the child. Active Pi and Claude paths report submission because their activity cannot uniquely acknowledge one message.
 - A finished Pi child resumes asynchronously and later reports another result.
 - Pi resume replays a strictly validated launch-time capability snapshot. It does not reread the profile or package settings.
 - New snapshots retain selected built-ins and ordered canonical profile extension paths. Resume uses the current contents at those paths and is refused before pane creation if required state or files are missing, malformed, non-canonical, duplicated, or reserved.
@@ -116,6 +117,12 @@ Names are unique within one parent session and remain registered after a child f
 ### Ask the parent
 
 Every Pi child receives `ask_question`, even when its profile has no ordinary tools. Calling it parks the child and notifies the parent. The parent replies through `subagent_message`, and the child continues with that reply as its next message.
+
+### Recover an unresponsive child
+
+An unconfirmed live message is ambiguous: the child may already have accepted it. The extension never kills the pane or replays the message automatically.
+
+If a child remains unresponsive, inspect its pane and session first. To recover explicitly, find the target child pane with `tmux list-panes -a -F '#{pane_id} #{pane_title} #{pane_current_command}'`, then terminate only that child process or pane (for example, `tmux kill-pane -t %42`). Do not terminate the parent Pi pane. The watcher reports the interruption, removes the stale running entry, and preserves the registered session. After that notification, `subagent_message` with the same runtime name resumes the Pi session. Review the preserved session before deciding whether to replay any work. Finished Claude sessions remain non-resumable.
 
 ## Security model
 

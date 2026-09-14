@@ -21,6 +21,7 @@ import {
   createSurface,
   sendCommand,
   sendLongCommand,
+  submitText,
   pollForExit,
   closeSurface,
   shellEscape,
@@ -450,13 +451,35 @@ function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
 function resolveResultPresentation(
   result: Pick<
     SubagentResult,
-    "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage"
+    | "exitCode"
+    | "elapsed"
+    | "summary"
+    | "sessionFile"
+    | "sessionId"
+    | "errorMessage"
+    | "interrupted"
+    | "resumeSupported"
   >,
   name: string,
 ): string {
   // Name is the persistent handle: the same name steers a running subagent or
   // resumes a finished one, so follow-ups always reference it.
   const sessionRef = `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
+
+  if (result.interrupted) {
+    const isResumable = result.resumeSupported !== false;
+    const preservedState = isResumable
+      ? "Its running entry was removed and its Pi session was preserved. "
+      : "Its running entry was removed. ";
+    const recovery = isResumable
+      ? `Use subagent_message with the same name to resume it; the interrupted message may ` +
+        "already have been accepted, so review the session before replaying work."
+      : "Claude Code sessions cannot be resumed through subagent_message.";
+    return (
+      `Sub-agent "${name}" was interrupted because its tmux pane disappeared. ` +
+      preservedState + recovery + (isResumable ? sessionRef : "")
+    );
+  }
 
   if (result.errorMessage) {
     // Auto-retry exhausted or other agent-loop error. The subagent did not
@@ -493,6 +516,10 @@ interface SubagentResult {
   error?: string;
   /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
   errorMessage?: string;
+  /** True when the externally owned tmux pane disappeared before completion. */
+  interrupted?: boolean;
+  /** Whether an interrupted child can resume through subagent_message. */
+  resumeSupported?: boolean;
   /** Aggregate usage/model/tool stats parsed from the completed session file. */
   stats?: SessionStats;
 }
@@ -520,6 +547,9 @@ interface RunningSubagent {
   cli?: string;
   sentinelFile?: string;
   statusState: SubagentStatusState;
+  /** Serializes acknowledgment for an idle waiting child so one activity
+   * advance cannot confirm two concurrently submitted replies. */
+  pendingWaitingReply?: boolean;
   /**
    * When true, status transitions (stalled/recovered) do not wake the parent
    * session via a steer message. The widget still updates locally. Used for
@@ -1046,14 +1076,11 @@ function activityLabel(activity: SubagentActivityState): string | undefined {
   return activity.activeScope;
 }
 
-function observeRunningSubagent(running: RunningSubagent, observedAt = Date.now()) {
-  if (running.cli === "claude") return;
-
-  const activityFile = running.activityFile;
-  const read: ActivityReadResult = activityFile
-    ? readSubagentActivityFile(activityFile, running.id)
-    : { ok: false, reason: "missing" };
-
+function applyRunningActivityRead(
+  running: RunningSubagent,
+  read: ActivityReadResult,
+  observedAt = Date.now(),
+): void {
   running.activityRead = read.ok
     ? { ok: true }
     : { ok: false, reason: read.reason, error: read.error };
@@ -1079,6 +1106,21 @@ function observeRunningSubagent(running: RunningSubagent, observedAt = Date.now(
     snapshot: read.reason,
     snapshotError: read.error,
   }, observedAt);
+}
+
+function observeRunningSubagent(
+  running: RunningSubagent,
+  observedAt = Date.now(),
+  readActivity: (activityFile: string, runningChildId: string) => ActivityReadResult =
+    readSubagentActivityFile,
+) {
+  if (running.cli === "claude") return;
+
+  const activityFile = running.activityFile;
+  const read: ActivityReadResult = activityFile
+    ? readActivity(activityFile, running.id)
+    : { ok: false, reason: "missing" };
+  applyRunningActivityRead(running, read, observedAt);
 }
 
 /**
@@ -1197,7 +1239,7 @@ function resolveRunningByName(name: string):
 function steerSubagent(
   running: RunningSubagent,
   message: string,
-  send: (surface: string, command: string) => void = sendCommand,
+  send: (surface: string, text: string) => void = submitText,
 ): { ok: true } | { error: string } {
   const flattened = message.replace(/\s*\n\s*/g, " ").trim();
   try {
@@ -1206,15 +1248,63 @@ function steerSubagent(
   } catch (error: any) {
     return {
       error:
-        `Failed to deliver message to subagent "${running.name}" via tmux: ` +
+        `Failed to submit message to subagent "${running.name}" via tmux: ` +
         `${error?.message ?? String(error)}`,
     };
   }
 }
 
-function handleSubagentSteer(
+const WAITING_REPLY_ACK_TIMEOUT_MS = 2_500;
+const WAITING_REPLY_ACK_POLL_MS = 50;
+
+function activityAcknowledgesReply(
+  read: ActivityReadResult,
+  runningChildId: string,
+  baselineSequence: number,
+): boolean {
+  if (!read.ok || read.activity.runningChildId !== runningChildId) return false;
+  if (read.activity.sequence <= baselineSequence) return false;
+  return read.activity.latestEvent === "input" || read.activity.phase === "active";
+}
+
+async function waitForWaitingReplyAcknowledgment(
+  running: RunningSubagent,
+  baselineSequence: number,
+  options: {
+    timeoutMs?: number;
+    pollMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    readActivity?: (activityFile: string, runningChildId: string) => ActivityReadResult;
+  } = {},
+): Promise<boolean> {
+  if (!running.activityFile) return false;
+  const timeoutMs = options.timeoutMs ?? WAITING_REPLY_ACK_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? WAITING_REPLY_ACK_POLL_MS;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const readActivity = options.readActivity ?? readSubagentActivityFile;
+  const deadline = now() + timeoutMs;
+
+  for (;;) {
+    const read = readActivity(running.activityFile, running.id);
+    applyRunningActivityRead(running, read, now());
+    if (activityAcknowledgesReply(read, running.id, baselineSequence)) return true;
+    if (now() >= deadline) return false;
+    await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+  }
+}
+
+async function handleSubagentSteer(
   params: { name?: string; message?: string },
-  send: (surface: string, command: string) => void = sendCommand,
+  options: {
+    send?: (surface: string, text: string) => void;
+    timeoutMs?: number;
+    pollMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    readActivity?: (activityFile: string, runningChildId: string) => ActivityReadResult;
+  } = {},
 ) {
   const message = params.message?.trim();
   if (!message) {
@@ -1231,28 +1321,82 @@ function handleSubagentSteer(
   }
 
   const running = resolved.running;
-  const now = Date.now();
-  observeRunningSubagent(running, now);
+  const now = options.now ?? Date.now;
+  const observedAt = now();
+  observeRunningSubagent(running, observedAt, options.readActivity);
+  const waitingBaseline =
+    running.cli !== "claude" &&
+    running.activityRead?.ok === true &&
+    running.activity?.phase === "waiting"
+      ? running.activity.sequence
+      : null;
 
-  const steer = steerSubagent(running, message, send);
+  if (waitingBaseline != null && running.pendingWaitingReply) {
+    const err =
+      `A reply to waiting subagent "${running.name}" is already awaiting confirmation. ` +
+      `Do not resend automatically; wait for that call to settle.`;
+    return {
+      content: [{ type: "text" as const, text: err }],
+      details: { error: err, id: running.id, name: running.name },
+    };
+  }
+
+  if (waitingBaseline != null) running.pendingWaitingReply = true;
+  const steer = steerSubagent(running, message, options.send ?? submitText);
   if ("error" in steer) {
+    running.pendingWaitingReply = false;
     return {
       content: [{ type: "text" as const, text: steer.error }],
       details: { error: steer.error, id: running.id, name: running.name },
     };
   }
 
-  running.statusState = forceStatusAfterInterrupt(running.statusState, now);
+  if (waitingBaseline != null) {
+    let confirmed = false;
+    try {
+      confirmed = await waitForWaitingReplyAcknowledgment(running, waitingBaseline, options);
+    } finally {
+      running.pendingWaitingReply = false;
+    }
+    updateWidget();
+
+    if (confirmed) {
+      return {
+        content: [{
+          type: "text" as const,
+          text:
+            `Message delivered to waiting subagent "${running.name}"; newer child activity ` +
+            `confirmed that it consumed or started processing the reply.`,
+        }],
+        details: { id: running.id, name: running.name, status: "delivered" },
+      };
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text:
+          `Message was submitted to waiting subagent "${running.name}", but delivery could not ` +
+          `be confirmed before the timeout. Do not resend or terminate it automatically because ` +
+          `the reply may still run. If the pane is wedged, explicitly terminate that child or pane; ` +
+          `the watcher will release the running name and preserve the session for a same-name resume.`,
+      }],
+      details: { id: running.id, name: running.name, status: "unconfirmed" },
+    };
+  }
+
+  running.statusState = forceStatusAfterInterrupt(running.statusState, observedAt);
   updateWidget();
 
   return {
     content: [{
       type: "text" as const,
       text:
-        `Message delivered to running subagent "${running.name}". It picks this up at its next ` +
-        `turn boundary. If it exits, its result still arrives as a steer message.`,
+        `Message submitted to running subagent "${running.name}". tmux accepted the input, but ` +
+        `this child's activity stream cannot uniquely confirm consumption. If it exits, its result ` +
+        `still arrives as a steer message.`,
     }],
-    details: { id: running.id, name: running.name, status: "steered" },
+    details: { id: running.id, name: running.name, status: "submitted" },
   };
 }
 
@@ -1338,6 +1482,8 @@ export const __test__ = {
   buildPiPromptArgs,
   formatWidgetRightLabel,
   observeRunningSubagent,
+  activityAcknowledgesReply,
+  waitForWaitingReplyAcknowledgment,
   resolveRunningByName,
   uniqueRunningName,
   claimRuntimeName,
@@ -1349,6 +1495,7 @@ export const __test__ = {
   handleSubagentSteer,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  watchSubagent,
   runningSubagents,
   formatElapsed,
   formatTokens,
@@ -1686,11 +1833,12 @@ function deliverPendingQuestion(running: RunningSubagent): void {
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
+  poll: typeof pollForExit = pollForExit,
 ): Promise<SubagentResult> {
   const { name, task, surface, startTime, sessionFile } = running;
 
   try {
-    const result = await pollForExit(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
+    const result = await poll(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
       interval: 1000,
       sessionFile,
       sentinelFile: running.sentinelFile,
@@ -1701,6 +1849,21 @@ async function watchSubagent(
     });
 
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
+
+    if (result.reason === "interrupted") {
+      runningSubagents.delete(running.id);
+      return {
+        name,
+        task,
+        summary: result.errorMessage ?? `tmux pane ${surface} no longer exists`,
+        sessionFile,
+        exitCode: 1,
+        elapsed,
+        error: "interrupted",
+        interrupted: true,
+        resumeSupported: running.cli !== "claude",
+      };
+    }
 
     if (running.cli === "claude") {
       // Claude Code result extraction
@@ -2019,6 +2182,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   sessionFile: result.sessionFile,
                   ...(result.sessionId ? { sessionId: result.sessionId } : {}),
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+                  ...(result.interrupted ? { interrupted: true } : {}),
                   ...(result.claudeSessionId ? { claudeSessionId: result.claudeSessionId } : {}),
                   ...(result.stats ? { stats: result.stats } : {}),
                 },
@@ -2198,13 +2362,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "so the SAME name works whether the subagent is running or finished: if it is still running, your message steers its live session; " +
         "if it has finished, your message resumes that session and continues it. " +
         "`name` and `message` are both required. " +
-        "Steering a running subagent returns immediately with a local acknowledgement and does NOT, by itself, emit a new result. " +
+        "Steering an active running subagent reports local submission; a waiting Pi child is acknowledged only after newer child activity, with bounded unconfirmed fallback. It does NOT, by itself, emit a new result. " +
         "Resuming is a fire-and-forget async call: when the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up. " +
         "DO NOT poll, sleep, tail logs, or read session files to detect completion — the harness handles delivery. " +
         "DO NOT fabricate or assume results. After calling, either end your turn or work on other independent tasks.",
       promptSnippet:
         "Message a subagent by name: steers it if running, resumes it if finished (same name either way). " +
-        "`name` and `message` are required. Steering returns immediately; resuming delivers its result later as a steer message. " +
+        "`name` and `message` are required. Active steering reports submission; waiting Pi steering briefly awaits child activity confirmation. Resuming delivers its result later as a steer message. " +
         "Do not poll or fabricate results.",
       parameters: Type.Object({
         name: Type.String({
@@ -2229,12 +2393,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       renderResult(result, _opts, theme) {
         const details = result.details as any;
 
-        if (details?.status === "steered") {
+        if (["delivered", "submitted", "unconfirmed"].includes(details?.status)) {
+          const icon = details.status === "delivered" ? theme.fg("success", "✓") : theme.fg("accent", "○");
+          const label = details.status === "delivered"
+            ? "message delivered"
+            : details.status === "submitted"
+              ? "message submitted"
+              : "delivery unconfirmed";
           return new Text(
-            theme.fg("success", "✓") +
+            icon +
               " " +
               theme.fg("toolTitle", theme.bold(details.name ?? "subagent")) +
-              theme.fg("dim", " — message delivered"),
+              theme.fg("dim", ` — ${label}`),
             0,
             0,
           );
@@ -2271,7 +2441,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // A name that matches a currently-running subagent always steers it.
         const runningMatch = Array.from(runningSubagents.values()).find((r) => r.name === requestedName);
         if (runningMatch) {
-          return handleSubagentSteer({ name: requestedName, message: params.message });
+          return await handleSubagentSteer({ name: requestedName, message: params.message });
         }
 
         // ── Resume a finished session by name ──
@@ -2310,7 +2480,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         for (const r of runningSubagents.values()) {
           if (canonicalSessionPath(r.sessionFile) === canonicalSessionPath(sessionPath)) {
             const err = `Subagent "${requestedName}" is still running as "${r.name}". Your message will steer it; resending as a steer.`;
-            return handleSubagentSteer({ name: r.name, message: params.message });
+            return await handleSubagentSteer({ name: r.name, message: params.message });
           }
         }
 
@@ -2490,6 +2660,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   sessionFile: sessionPath,
                   sessionId: resumedSessionId,
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+                  ...(result.interrupted ? { interrupted: true } : {}),
                 },
               },
               { triggerTurn: true, deliverAs: "steer" },

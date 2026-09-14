@@ -99,3 +99,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/map.md`, `wiki/architecture.md`, `wiki/conventions/index.md`, `wiki/conventions/runtime-safety.md`, `wiki/conventions/typescript-modules.md`, and `wiki/log.md`.
 - Verification: current source and documentation searches found no remaining activation route or stale claim; all 199 model-free unit tests passed; package dry-run excluded the deleted module and repository-only files.
 - Notes: archived historical references remain unchanged, `wiki/state.md` was unchanged because no ingest, lint, or dedupe checkpoint advanced, and model-consuming lifecycle tests remain approval-gated.
+
+## [2026-09-14] dream | frozen subagent reply delivery
+
+- Trigger: `/dream` run after Gamemaster reconciliation of the completed and archived direct implementation for `260914-1641-fix-frozen-subagent-reply-delivery`.
+- Inputs: current conversation, `spec/archive/260914-1641-fix-frozen-subagent-reply-delivery/{plan,verification,outcome}.md`, changed transport/lifecycle source and tests, review verdicts, and current runtime wiki pages.
+- Wiki pages changed: `wiki/dreams/2026-09-14-1744-gamemaster-checkpoint-260914-1641-fix-frozen-subagent-reply-delivery-direct.md`, `wiki/development.md`, `wiki/conventions/index.md`, `wiki/index.md`, and `wiki/log.md`.
+- Verification: re-read changed files, checked the checkpoint marker and relative links, ran memory safety scans, confirmed wiki-only Dream write scope, and ran `git diff --check`.
+- Notes: existing architecture and runtime-safety pages already held the core transport and recovery guidance; no observation, `MEMORY.md` pointer, or state checkpoint update qualified. The configured-model lifecycle suite remains approval-gated.
