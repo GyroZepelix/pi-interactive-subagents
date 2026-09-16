@@ -7,16 +7,27 @@
  * automatically when their agent loop ends (see the `agent_end` handler);
  * interactive agents end when the human exits the pane.
  *
- * `ask_question` keeps the session OPEN: it writes a `${sessionFile}.ask`
- * signal the parent's watcher picks up, parks the session in a "waiting" state
- * (auto-exit is suppressed for that turn via `awaitingAnswer`), and the parent
- * replies with subagent_message — which lands as the subagent's next turn.
+ * `ask_question` keeps its tool promise pending after atomically publishing a
+ * correlated request. The parent submits a private answer envelope through the
+ * existing tmux input path; this protected extension consumes and acknowledges
+ * that envelope, resolves the tool, and lets the same agent run continue.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import {
+  QUESTION_PROTOCOL_VERSION,
+  createQuestionId,
+  parseQuestionAnswer,
+  questionAcknowledgmentPath,
+  questionRequestPath,
+  removeMatchingQuestionAcknowledgment,
+  removeMatchingQuestionRequest,
+  writeQuestionAcknowledgment,
+  writeQuestionRequest,
+} from "./question-protocol.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -178,11 +189,28 @@ export default function (pi: ExtensionAPI) {
 
   let userTookOver = false;
   let agentStarted = false;
-  // Set when ask_question is called; suppresses auto-exit so the session stays
-  // open while it waits for the orchestrator's reply. Cleared when the reply
-  // lands — on `input` (covers a reply steered into the current run) and on
-  // `agent_start` (covers a reply that starts a fresh turn after parking).
-  let awaitingAnswer = false;
+  interface PendingQuestion {
+    id: string;
+    sessionFile: string;
+    signal?: AbortSignal;
+    abortHandler?: () => void;
+    resolve(answer: string): void;
+    reject(error: Error): void;
+  }
+  let pendingQuestion: PendingQuestion | null = null;
+
+  function clearPendingQuestion(record: PendingQuestion): void {
+    if (record.signal && record.abortHandler) {
+      record.signal.removeEventListener("abort", record.abortHandler);
+    }
+    if (pendingQuestion === record) pendingQuestion = null;
+  }
+
+  function abortError(): Error {
+    const error = new Error("ask_question was aborted before an answer arrived");
+    error.name = "AbortError";
+    return error;
+  }
 
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
@@ -191,21 +219,36 @@ export default function (pi: ExtensionAPI) {
     renderWidget(ctx, null);
   });
 
-  pi.on("input", () => {
+  pi.on("input", (event) => {
+    const parsed = parseQuestionAnswer((event as any).text ?? "");
+    if (parsed.private) {
+      const record = pendingQuestion;
+      const answer = parsed.answer;
+      // Private protocol input is always contained. Malformed, stale, and
+      // mismatched envelopes must never become a queued child message.
+      if (!record || !answer || answer.id !== record.id) return { action: "handled" };
+
+      try {
+        writeQuestionAcknowledgment(questionAcknowledgmentPath(record.sessionFile), record.id);
+      } catch {
+        // Without the exact marker the parent cannot distinguish acceptance
+        // from an ambiguous tmux submission, so keep waiting rather than
+        // resolving an answer that can never be confirmed.
+        return { action: "handled" };
+      }
+
+      recorder.input();
+      removeMatchingQuestionRequest(questionRequestPath(record.sessionFile), record.id);
+      clearPendingQuestion(record);
+      record.resolve(answer.answer);
+      return { action: "handled" };
+    }
+
     recorder.input();
-    // A submitted message is the orchestrator's (or a human's) reply — the
-    // pending ask_question has been answered, however it was delivered. Clear
-    // here, not only on agent_start, because a reply steered in *mid-run* is
-    // absorbed into the current run (pi's `steer` behavior injects it before
-    // the next LLM call): no new agent_start fires, so without this the flag
-    // would stay set and agent_end would park the session as `waiting` even
-    // though the answer already arrived and was consumed. (The `input` event
-    // fires for mid-run steers because prompt() emits it before queueing.)
-    awaitingAnswer = false;
     // Ignore the initial task message that starts an autonomous subagent.
-    // Only inputs after the first agent run has started count as user takeover.
-    if (!shouldMarkUserTookOver(agentStarted)) return;
-    userTookOver = true;
+    // Only ordinary inputs after the first agent run has started count as user takeover.
+    if (shouldMarkUserTookOver(agentStarted)) userTookOver = true;
+    return { action: "continue" };
   });
 
   pi.on("before_agent_start", () => {
@@ -214,28 +257,24 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_start", () => {
     agentStarted = true;
-    // A new turn is starting — any pending ask_question has now been answered
-    // (or superseded), so let auto-exit resume normally when this turn ends.
-    awaitingAnswer = false;
     recorder.agentStart();
   });
 
   pi.on("agent_end", (event, ctx) => {
     const messages = (event as any).messages as any[] | undefined;
     // Never shut down while this session still has work in flight:
-    //  - awaitingAnswer: an ask_question is pending the orchestrator's reply.
+    //  - pendingQuestion: an ask_question is pending the orchestrator's reply.
     //  - runningChildrenCount(): this subagent spawned its own children and is
     //    waiting for their results (delivered as steered turns). Exiting now
     //    would strand those children and drop their results.
     //  - ctx.hasPendingMessages(): Pi has accepted steering/follow-up input
-    //    that its current loop has not drained yet. This can remain true at
-    //    agent_end even after input cleared awaitingAnswer.
+    //    that its current loop has not drained yet.
     // In all cases the session parks as `waiting` and resumes when the next
     // turn lands.
     const hasPendingChildren = runningChildrenCount() > 0;
     const hasPendingMessages = ctx.hasPendingMessages();
     const shouldExit =
-      !awaitingAnswer &&
+      !pendingQuestion &&
       !hasPendingChildren &&
       !hasPendingMessages &&
       autoExit &&
@@ -319,6 +358,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", (event) => {
+    const record = pendingQuestion;
+    if (record) {
+      removeMatchingQuestionRequest(questionRequestPath(record.sessionFile), record.id);
+      removeMatchingQuestionAcknowledgment(questionAcknowledgmentPath(record.sessionFile), record.id);
+      clearPendingQuestion(record);
+      record.reject(abortError());
+    }
     recorder.sessionShutdown((event as any).reason);
   });
 
@@ -338,7 +384,7 @@ export default function (pi: ExtensionAPI) {
       "Ask the orchestrator (the parent agent that spawned you) a single question and pause until they reply. " +
       "Use this when requirements are ambiguous, a decision would materially affect your work, you're blocked, " +
       "or you need information or confirmation only the orchestrator has. Prefer asking over guessing. " +
-      "Your session stays open while you wait — the answer arrives as your next message, then you continue. " +
+      "Your tool call stays pending while you wait; the matching answer is returned as its result, then you continue. " +
       "Ask exactly one question per call; make separate calls for unrelated questions.",
     promptSnippet:
       "Use this tool to ask the orchestrator one clarifying, missing-requirement, preference, or decision question before continuing — instead of guessing.",
@@ -348,7 +394,7 @@ export default function (pi: ExtensionAPI) {
       "Prefer this tool over guessing when requirements, preferences, or implementation choices are unclear.",
       "Use it when multiple valid paths exist and the right one depends on the orchestrator's intent.",
       "Give enough context in the question that the orchestrator can answer without re-reading your whole task.",
-      "After asking, stop and wait — the reply will arrive as your next message.",
+      "After asking, wait for this tool call to return the orchestrator's answer.",
     ],
     parameters: Type.Object({
       question: Type.String({
@@ -356,7 +402,7 @@ export default function (pi: ExtensionAPI) {
           "The single freeform question to ask the orchestrator. Include enough context to answer it directly.",
       }),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
       if (!sessionFile) {
         throw new Error(
@@ -364,29 +410,63 @@ export default function (pi: ExtensionAPI) {
             "PI_SUBAGENT_SESSION environment variable is not set.",
         );
       }
+      if (pendingQuestion) {
+        throw new Error("ask_question already has a pending question in this child process");
+      }
+      if (params.question.trim() === "") throw new Error("ask_question requires a non-empty question");
+      if (signal?.aborted) throw abortError();
 
-      // Keep the session open: suppress auto-exit for this turn and park in the
-      // "waiting" phase. The parent's watcher picks up the `.ask` signal and
-      // notifies the orchestrator, who replies via subagent_message.
-      awaitingAnswer = true;
-      recorder.askQuestion();
-      const askData = {
-        name: process.env.PI_SUBAGENT_NAME ?? "subagent",
-        agent: process.env.PI_SUBAGENT_AGENT ?? "",
-        question: params.question,
-      };
-      writeFileSync(`${sessionFile}.ask`, JSON.stringify(askData));
+      const id = createQuestionId();
+      const requestFile = questionRequestPath(sessionFile);
+      const acknowledgmentFile = questionAcknowledgmentPath(sessionFile);
+      removeMatchingQuestionAcknowledgment(acknowledgmentFile, id);
 
+      const answer = new Promise<string>((resolve, reject) => {
+        const record: PendingQuestion = {
+          id,
+          sessionFile,
+          signal,
+          resolve,
+          reject,
+        };
+        record.abortHandler = () => {
+          if (pendingQuestion !== record) return;
+          removeMatchingQuestionRequest(requestFile, id);
+          removeMatchingQuestionAcknowledgment(acknowledgmentFile, id);
+          clearPendingQuestion(record);
+          reject(abortError());
+        };
+        pendingQuestion = record;
+        signal?.addEventListener("abort", record.abortHandler, { once: true });
+      });
+
+      try {
+        writeQuestionRequest(requestFile, {
+          version: QUESTION_PROTOCOL_VERSION,
+          id,
+          name: process.env.PI_SUBAGENT_NAME?.trim() || "subagent",
+          agent: process.env.PI_SUBAGENT_AGENT ?? "",
+          question: params.question,
+        });
+        recorder.askQuestion();
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        const record = pendingQuestion;
+        if (record?.id === id) {
+          clearPendingQuestion(record);
+          record.reject(failure);
+        }
+        await answer.catch(() => undefined);
+        throw failure;
+      }
+
+      const orchestratorAnswer = await answer;
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              "Question sent to the orchestrator. Stop here and wait — do not continue working or " +
-              "assume an answer. Their reply will arrive as your next message.",
-          },
-        ],
-        details: { question: params.question },
+        content: [{
+          type: "text",
+          text: `The orchestrator replied:\n\n${orchestratorAnswer}`,
+        }],
+        details: { id, question: params.question, answer: orchestratorAnswer },
       };
     },
 

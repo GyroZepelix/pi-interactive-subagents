@@ -83,6 +83,20 @@ import capabilityActivationExtension, {
   SUBAGENT_BUILTIN_TOOLS_ENV,
 } from "../pi-extension/subagents/subagent-capability-activation.ts";
 import { __pollForExitTest__ } from "../pi-extension/subagents/tmux.ts";
+import {
+  QUESTION_ANSWER_PREFIX,
+  QUESTION_PROTOCOL_VERSION,
+  createQuestionId,
+  encodeQuestionAnswer,
+  parseQuestionAnswer,
+  parseQuestionRequest,
+  questionAcknowledgmentPath,
+  questionRequestPath,
+  readQuestionAcknowledgment,
+  readQuestionRequest,
+  writeQuestionAcknowledgment,
+  writeQuestionRequest,
+} from "../pi-extension/subagents/question-protocol.ts";
 
 // --- Helpers ---
 
@@ -3383,6 +3397,48 @@ describe("subagent discovery", () => {
     });
   });
 });
+describe("question protocol", () => {
+  it("strictly round-trips requests and private multiline answers", () => {
+    withTempDir((dir) => {
+      const id = createQuestionId();
+      const requestFile = join(dir, "session.ask");
+      const request = {
+        version: QUESTION_PROTOCOL_VERSION,
+        id,
+        name: "worker",
+        agent: "implementer",
+        question: "Choose one?",
+      } as const;
+      writeQuestionRequest(requestFile, request);
+      assert.deepEqual(readQuestionRequest(requestFile), request);
+      assert.deepEqual(parseQuestionRequest({ ...request, extra: true }), null);
+
+      const encoded = encodeQuestionAnswer(id, "/slash\nline two  ");
+      assert.equal(encoded.startsWith("/"), false);
+      assert.deepEqual(parseQuestionAnswer(encoded), {
+        private: true,
+        answer: { version: QUESTION_PROTOCOL_VERSION, id, answer: "/slash\nline two  " },
+      });
+      assert.deepEqual(parseQuestionAnswer(`${QUESTION_ANSWER_PREFIX}{bad`), {
+        private: true,
+        answer: null,
+      });
+      assert.deepEqual(parseQuestionAnswer("ordinary"), { private: false });
+    });
+  });
+
+  it("accepts only exact ID-only acknowledgment markers", () => {
+    withTempDir((dir) => {
+      const file = join(dir, "session.ask.ack");
+      const id = createQuestionId();
+      writeQuestionAcknowledgment(file, id);
+      assert.equal(readQuestionAcknowledgment(file), id);
+      writeFileSync(file, `${id}\nextra\n`);
+      assert.equal(readQuestionAcknowledgment(file), null);
+    });
+  });
+});
+
 describe("subagent runtime control", () => {
   describe("shouldMarkUserTookOver", () => {
     it("ignores the initial injected task before the first agent run", () => {
@@ -3696,83 +3752,15 @@ describe("subagent runtime control", () => {
   });
 
   describe("ask_question tool", () => {
-    function setupSubagentExtension(sessionFile: string) {
-      const saved = {
-        session: process.env.PI_SUBAGENT_SESSION,
-        name: process.env.PI_SUBAGENT_NAME,
-        agent: process.env.PI_SUBAGENT_AGENT,
-        autoExit: process.env.PI_SUBAGENT_AUTO_EXIT,
-      };
-      process.env.PI_SUBAGENT_SESSION = sessionFile;
-      process.env.PI_SUBAGENT_NAME = "inspector-2";
-      process.env.PI_SUBAGENT_AGENT = "inspector";
-      process.env.PI_SUBAGENT_AUTO_EXIT = "1";
-      const mock = createMockExtensionApi();
-      subagentRuntimeControlExtension(mock.api);
-      const restore = () => {
-        restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
-        restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
-        restoreEnvVar("PI_SUBAGENT_AGENT", saved.agent);
-        restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", saved.autoExit);
-      };
-      return { mock, restore };
-    }
-
-    it("registers ask_question without the retired ping tool", () => {
-      const dir = createTestDir();
-      const { mock, restore } = setupSubagentExtension(join(dir, "s.jsonl"));
-      try {
-        const names = mock.registeredTools.map((t) => t.name);
-        assert.ok(names.includes("ask_question"));
-        assert.ok(!names.includes(["caller", "ping"].join("_")));
-        const tool = mock.registeredTools.find((t) => t.name === "ask_question");
-        assert.deepEqual(Object.keys(tool.parameters.properties), ["question"]);
-        assert.match(tool.description, /orchestrator/i);
-      } finally {
-        restore();
-        rmSync(dir, { recursive: true, force: true });
-      }
-    });
-
-    it("writes a .ask signal with name/agent/question and does NOT shut the session down", async () => {
-      const dir = createTestDir();
-      const sessionFile = join(dir, "s.jsonl");
-      const { mock, restore } = setupSubagentExtension(sessionFile);
-      try {
-        const tool = mock.registeredTools.find((t) => t.name === "ask_question");
-        let shutdownCalled = false;
-        const ctx = { shutdown() { shutdownCalled = true; } } as any;
-        const out = await tool.execute("call-1", { question: "Which API base URL?" }, undefined, undefined, ctx);
-
-        assert.equal(shutdownCalled, false, "ask_question must keep the session open");
-        assert.match(out.content[0].text, /wait/i);
-
-        const askFile = `${sessionFile}.ask`;
-        assert.ok(existsSync(askFile), ".ask signal file should be written");
-        const payload = JSON.parse(readFileSync(askFile, "utf-8"));
-        assert.equal(payload.question, "Which API base URL?");
-        assert.equal(payload.name, "inspector-2");
-        assert.equal(payload.agent, "inspector");
-        // No .exit sidecar — the session is not exiting.
-        assert.ok(!existsSync(`${sessionFile}.exit`));
-      } finally {
-        restore();
-        rmSync(dir, { recursive: true, force: true });
-      }
-    });
-
-    // Regression tests for the mid-run reply race: a reply steered in while the
-    // asking run is still open fires `input` but NOT `agent_start`, so the flag
-    // must be cleared on `input` or the session parks forever.
     function setupCapturingExtension(sessionFile: string) {
-      const handlers = new Map<string, Array<(...args: any[]) => void>>();
+      const handlers = new Map<string, Array<(...args: any[]) => any>>();
       const tools: any[] = [];
       const api = {
-        on(event: string, handler: (...args: any[]) => void) {
+        on(event: string, handler: (...args: any[]) => any) {
           if (!handlers.has(event)) handlers.set(event, []);
           handlers.get(event)!.push(handler);
         },
-        registerTool(t: any) { tools.push(t); },
+        registerTool(tool: any) { tools.push(tool); },
         registerCommand() {}, registerMessageRenderer() {}, registerShortcut() {},
         sendUserMessage() {}, sendMessage() {}, getAllTools() { return []; },
       } as any;
@@ -3787,114 +3775,152 @@ describe("subagent runtime control", () => {
       process.env.PI_SUBAGENT_AGENT = "inspector";
       process.env.PI_SUBAGENT_AUTO_EXIT = "1";
       subagentRuntimeControlExtension(api);
-      const emit = (event: string, ...args: any[]) =>
-        (handlers.get(event) ?? []).forEach((h) => h(...args));
+      const emit = async (event: string, ...args: any[]) => {
+        for (const handler of handlers.get(event) ?? []) {
+          const result = await handler(...args);
+          if (result?.action === "handled") return result;
+        }
+        return { action: "continue" };
+      };
       const restore = () => {
         restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
         restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
         restoreEnvVar("PI_SUBAGENT_AGENT", saved.agent);
         restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", saved.autoExit);
       };
-      const ask = async () => {
-        const tool = tools.find((t) => t.name === "ask_question");
-        await tool.execute("c1", { question: "v1 or v2?" }, undefined, undefined, { shutdown() {} });
-      };
-      return { emit, ask, restore };
+      const tool = tools.find((candidate) => candidate.name === "ask_question");
+      return { emit, handlers, tool, tools, restore };
     }
 
-    it("exits (does not park) when the reply arrives mid-run via input", async () => {
+    it("registers ask_question without the retired ping tool", () => {
       const dir = createTestDir();
-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+      const { tool, tools, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
       try {
-        emit("agent_start");
-        await ask(); // sets awaitingAnswer mid-run
-        // Reply arrives MID-RUN as a steer: input fires, no new agent_start.
-        emit("input");
-        let shutdown = false;
-        emit("agent_end", { messages: [] }, {
-          hasPendingMessages() { return false; },
-          shutdown() { shutdown = true; },
-        });
-        assert.equal(shutdown, true, "reply consumed mid-run → agent_end should exit, not park");
+        const names = tools.map((candidate) => candidate.name);
+        assert.ok(names.includes("ask_question"));
+        assert.ok(!names.includes(["caller", "ping"].join("_")));
+        assert.deepEqual(Object.keys(tool.parameters.properties), ["question"]);
+        assert.match(tool.description, /orchestrator/i);
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
 
-    it("parks as waiting at agent_end while the reply is still pending (no input yet)", async () => {
+    it("keeps the tool pending until the exact private answer is handled", async () => {
       const dir = createTestDir();
-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+      const sessionFile = join(dir, "s.jsonl");
+      const { emit, tool, restore } = setupCapturingExtension(sessionFile);
       try {
-        emit("agent_start");
-        await ask();
-        // No input yet — the orchestrator has not replied.
-        let shutdown = false;
-        emit("agent_end", { messages: [] }, {
-          hasPendingMessages() { return false; },
-          shutdown() { shutdown = true; },
+        let settled = false;
+        const resultPromise = tool.execute(
+          "call-1",
+          { question: "Which API base URL?" },
+          undefined,
+          undefined,
+          { shutdown() {} },
+        ).then((result: any) => {
+          settled = true;
+          return result;
         });
-        assert.equal(shutdown, false, "pending question with no reply must park, not exit");
+
+        await Promise.resolve();
+        assert.equal(settled, false, "ask_question must remain pending before an answer");
+        const request = readQuestionRequest(questionRequestPath(sessionFile));
+        assert.ok(request);
+        assert.equal(request.question, "Which API base URL?");
+        assert.equal(request.name, "inspector-2");
+        assert.equal(request.agent, "inspector");
+
+        const mismatch = await emit("input", {
+          type: "input",
+          text: encodeQuestionAnswer(createQuestionId(), "wrong"),
+        });
+        assert.deepEqual(mismatch, { action: "handled" });
+        assert.equal(settled, false, "a mismatched ID must not resolve the question");
+
+        const handled = await emit("input", {
+          type: "input",
+          text: encodeQuestionAnswer(request.id, "/keep\nexact spacing  "),
+        });
+        assert.deepEqual(handled, { action: "handled" });
+        const result = await resultPromise;
+        assert.equal(result.terminate, undefined);
+        assert.equal(result.details.answer, "/keep\nexact spacing  ");
+        assert.match(result.content[0].text, /orchestrator replied/i);
+        assert.equal(readQuestionAcknowledgment(questionAcknowledgmentPath(sessionFile)), request.id);
+        assert.equal(existsSync(questionRequestPath(sessionFile)), false);
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
 
-    it("exits when the reply arrives as a new turn (agent_start also clears the flag)", async () => {
-      const dir = createTestDir();
-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
-      try {
-        emit("agent_start");
-        await ask();
-        let shutdown1 = false;
-        emit("agent_end", { messages: [] }, {
-          hasPendingMessages() { return false; },
-          shutdown() { shutdown1 = true; },
-        });
-        assert.equal(shutdown1, false, "parks while waiting");
-        // Reply arrives as a fresh turn after the subagent had parked.
-        emit("input");
-        emit("agent_start");
-        let shutdown2 = false;
-        emit("agent_end", { messages: [] }, {
-          hasPendingMessages() { return false; },
-          shutdown() { shutdown2 = true; },
-        });
-        assert.equal(shutdown2, true, "after the reply turn, agent_end should exit");
-      } finally {
-        restore();
-        rmSync(dir, { recursive: true, force: true });
-      }
-    });
-
-    it("parks through a late queued reply and exits only after its continuation completes", () => {
+    it("contains malformed private input and leaves ordinary input unchanged", async () => {
       const dir = createTestDir();
       const { emit, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
       try {
-        emit("agent_start");
-        emit("input"); // late steer accepted while the current agent loop is settling
+        assert.deepEqual(
+          await emit("input", { type: "input", text: `${QUESTION_ANSWER_PREFIX}{bad` }),
+          { action: "handled" },
+        );
+        assert.deepEqual(
+          await emit("input", { type: "input", text: "ordinary follow-up" }),
+          { action: "continue" },
+        );
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
 
-        let firstShutdown = false;
-        emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, {
-          hasPendingMessages() { return true; },
-          shutdown() { firstShutdown = true; },
-        });
-        assert.equal(firstShutdown, false, "queued Pi-owned input must suppress auto-exit");
+    it("rejects a second question while one is pending", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "s.jsonl");
+      const { emit, tool, restore } = setupCapturingExtension(sessionFile);
+      try {
+        const first = tool.execute("c1", { question: "first?" }, undefined, undefined, {});
+        await assert.rejects(
+          tool.execute("c2", { question: "second?" }, undefined, undefined, {}),
+          /already has a pending question/,
+        );
+        const request = readQuestionRequest(questionRequestPath(sessionFile));
+        assert.ok(request);
+        await emit("input", { type: "input", text: encodeQuestionAnswer(request.id, "done") });
+        await first;
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
 
-        emit("agent_start"); // Pi drains the queue and begins the answer turn
-        let secondShutdown = false;
-        emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, {
-          hasPendingMessages() { return false; },
-          shutdown() { secondShutdown = true; },
-        });
-        assert.equal(secondShutdown, true, "normal auto-exit resumes after the queued reply turn");
+    it("aborts promptly and removes only matching rendezvous artifacts", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "s.jsonl");
+      const { tool, restore } = setupCapturingExtension(sessionFile);
+      const controller = new AbortController();
+      try {
+        const resultPromise = tool.execute(
+          "c1",
+          { question: "still needed?" },
+          controller.signal,
+          undefined,
+          {},
+        );
+        const request = readQuestionRequest(questionRequestPath(sessionFile));
+        assert.ok(request);
+        writeQuestionAcknowledgment(questionAcknowledgmentPath(sessionFile), request.id);
+        controller.abort();
+        await assert.rejects(resultPromise, (error: any) => error?.name === "AbortError");
+        assert.equal(existsSync(questionRequestPath(sessionFile)), false);
+        assert.equal(existsSync(questionAcknowledgmentPath(sessionFile)), false);
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
   });
+
 });
 
 describe("tmux text submission and exit polling", () => {
@@ -4583,6 +4609,130 @@ describe("subagent interruption", () => {
     });
 
     assert.match(result.error, /Failed to submit message/);
+  });
+
+  it("routes a pending-question answer as an exact private envelope and requires its matching ack", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const questionId = createQuestionId();
+    let submitted = "";
+    let clock = 0;
+    let reads = 0;
+    runningMap.clear();
+
+    try {
+      runningMap.set("a1", makeRunning({
+        pendingQuestion: {
+          id: questionId,
+          answerSubmitted: false,
+          confirmationPending: false,
+          sawWaiting: true,
+        },
+      }));
+      const result = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "/slash\nline two  " },
+        {
+          send(_surface: string, text: string) { submitted = text; },
+          timeoutMs: 100,
+          pollMs: 10,
+          now: () => clock,
+          sleep: async (ms: number) => { clock += ms; },
+          readAcknowledgment: () => (++reads >= 2 ? questionId : null),
+        },
+      );
+
+      assert.deepEqual(parseQuestionAnswer(submitted), {
+        private: true,
+        answer: {
+          version: QUESTION_PROTOCOL_VERSION,
+          id: questionId,
+          answer: "/slash\nline two  ",
+        },
+      });
+      assert.equal(runningMap.get("a1").pendingQuestion, undefined);
+      assert.deepEqual(result.details, {
+        id: "a1",
+        name: "Implementer",
+        questionId,
+        status: "delivered",
+      });
+    } finally {
+      runningMap.clear();
+    }
+  });
+
+  it("retains the one-answer guard after a question acknowledgment timeout", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const questionId = createQuestionId();
+    let clock = 0;
+    let sends = 0;
+    runningMap.clear();
+
+    try {
+      runningMap.set("a1", makeRunning({
+        pendingQuestion: {
+          id: questionId,
+          answerSubmitted: false,
+          confirmationPending: false,
+          sawWaiting: true,
+        },
+      }));
+      const first = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "answer" },
+        {
+          send() { sends += 1; },
+          timeoutMs: 20,
+          pollMs: 10,
+          now: () => clock,
+          sleep: async (ms: number) => { clock += ms; },
+          readAcknowledgment: () => null,
+        },
+      );
+      const duplicate = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "answer again" },
+        { send() { sends += 1; }, readAcknowledgment: () => null },
+      );
+
+      assert.equal(sends, 1);
+      assert.equal(first.details.status, "unconfirmed");
+      assert.match(duplicate.details.error, /already submitted/);
+      assert.equal(runningMap.get("a1").pendingQuestion.answerSubmitted, true);
+    } finally {
+      runningMap.clear();
+    }
+  });
+
+  it("registers a strict atomic question request once and ignores mismatched identity", () => {
+    const testApi = (subagentsModule as any).__test__;
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      const running = makeRunning({ sessionFile, name: "Implementer", agent: "implementer" });
+      const id = createQuestionId();
+      writeQuestionRequest(questionRequestPath(sessionFile), {
+        version: QUESTION_PROTOCOL_VERSION,
+        id,
+        name: "Other",
+        agent: "implementer",
+        question: "wrong child?",
+      });
+      testApi.deliverPendingQuestion(running);
+      assert.equal(running.pendingQuestion, undefined);
+      assert.equal(existsSync(questionRequestPath(sessionFile)), false);
+
+      writeQuestionRequest(questionRequestPath(sessionFile), {
+        version: QUESTION_PROTOCOL_VERSION,
+        id,
+        name: "Implementer",
+        agent: "implementer",
+        question: "Proceed?",
+      });
+      testApi.deliverPendingQuestion(running);
+      assert.equal(running.pendingQuestion.id, id);
+      assert.equal(existsSync(questionRequestPath(sessionFile)), false);
+      testApi.deliverPendingQuestion(running);
+      assert.equal(running.pendingQuestion.id, id);
+    });
   });
 
   it("accepts only newer same-child input or active activity as a waiting-reply acknowledgment", () => {

@@ -31,6 +31,7 @@ import {
   trackTempFile,
   readScreen,
   PI_TIMEOUT,
+  TEST_MODEL,
   type TestEnv,
 } from "./harness.ts";
 
@@ -240,35 +241,52 @@ for (const backend of backends) {
 
     // ── ask_question ──
 
-    it("subagent ask_question sends a question back to the parent", async () => {
+    it("subagent ask_question consumes one answer and continues the same run", async () => {
       const id = uniqueId();
+      const markerFile = `/tmp/pi-integ-ping-${id}.txt`;
+      const expectedAnswer = `ANSWER_${id}`;
+      trackTempFile(env, markerFile);
 
       const surface = createTrackedSurface(env, `ping-${id}`);
       await sleep(1000);
 
+      const childTask = [
+        `QUESTION_MARKER=PING_TEST_${id}`,
+        `EXPECTED_ANSWER=${expectedAnswer}`,
+        `COMMAND=printf 'PING_CONTINUED_${id}\\n' > '${markerFile}'`,
+      ].join("; ");
       const task = [
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Ping-${id}"`,
         `  agent: "test-ping"`,
-        `  task: "PING_TEST_${id}"`,
-        `Just call the subagent tool once. Do not do anything else before calling it.`,
+        `  model: "${TEST_MODEL}"`,
+        `  task: "${childTask}"`,
+        `Call it once and do nothing else before the question arrives.`,
+        `When Ping-${id} asks its question, call subagent_message exactly once with:`,
+        `  name: "Ping-${id}"`,
+        `  message: "${expectedAnswer}"`,
+        `After its final result arrives, say PING_LIFECYCLE_COMPLETE_${id}.`,
       ].join("\n");
 
       startPi(surface, env.dir, task);
 
-      // The test-ping profile calls ask_question, which notifies the outer pi
-      // and keeps the child parked until a reply arrives.
       const questionPattern = new RegExp(
         `Ping-${id}[\\s\\S]*asks a question[\\s\\S]*PING_TEST_${id}`,
         "i",
       );
-      const screen = await waitForScreen(surface, questionPattern, PI_TIMEOUT, 300);
+      const questionScreen = await waitForScreen(surface, questionPattern, PI_TIMEOUT, 300);
+      assert.match(questionScreen, questionPattern);
 
-      assert.match(
-        screen,
-        questionPattern,
-        `Screen should show the subagent question notification. Got:\n${screen.slice(-800)}`,
+      const marker = await waitForFile(markerFile, PI_TIMEOUT, /PING_CONTINUED_/);
+      assert.equal(marker, `PING_CONTINUED_${id}\n`, "the post-answer continuation must run exactly once");
+
+      const completed = await waitForScreen(
+        surface,
+        new RegExp(`PING_LIFECYCLE_COMPLETE_${id}|PING_CONTINUED_ONCE`, "i"),
+        PI_TIMEOUT,
+        300,
       );
+      assert.match(completed, /PING_CONTINUED_ONCE|PING_LIFECYCLE_COMPLETE_/i);
     });
 
     // ── Agent discovery ──

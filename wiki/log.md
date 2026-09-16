@@ -107,3 +107,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/dreams/2026-09-14-1744-gamemaster-checkpoint-260914-1641-fix-frozen-subagent-reply-delivery-direct.md`, `wiki/development.md`, `wiki/conventions/index.md`, `wiki/index.md`, and `wiki/log.md`.
 - Verification: re-read changed files, checked the checkpoint marker and relative links, ran memory safety scans, confirmed wiki-only Dream write scope, and ran `git diff --check`.
 - Notes: existing architecture and runtime-safety pages already held the core transport and recovery guidance; no observation, `MEMORY.md` pointer, or state checkpoint update qualified. The configured-model lifecycle suite remains approval-gated.
+
+## [2026-09-16] update | correlated parent-question rendezvous
+
+- Trigger: fixing `ask_question` children that generated fabricated waiting commentary after successfully asking the parent.
+- Inputs: `pi-extension/subagents/question-protocol.ts`, `pi-extension/subagents/subagent-runtime-control.ts`, `pi-extension/subagents/index.ts`, focused tests, Pi 0.85.1 input-handler semantics, and work item `260916-2339-stop-child-generation-after-ask-question`.
+- Wiki pages changed: `wiki/architecture.md` and `wiki/log.md`.
+- Verification: model-free protocol, runtime, routing, tmux, packaging, spec, Markdown, and patch-integrity checks passed; the separately approved GPT-5.5 lifecycle test and both independent reviews also passed.
+- Notes: `wiki/state.md` was unchanged because no ingest, lint, dedupe, or Git checkpoint advanced.

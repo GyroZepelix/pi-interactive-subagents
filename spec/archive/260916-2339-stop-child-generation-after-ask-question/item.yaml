@@ -1,0 +1,13 @@
+schema_version: 2
+id: 260916-2339-stop-child-generation-after-ask-question
+title: Stop child generation after ask_question
+kind: work-item
+work_type: bug
+parent: null
+route: quick-plan
+status: completed
+superseded_by: null
+created_at: '2026-09-16T23:39:43+02:00'
+updated_at: '2026-09-17T00:22:52+02:00'
+external_refs: []
+wiki_refs: []

@@ -26,13 +26,9 @@ Durable current-state codebase knowledge. Read this file first when answering co
 ## Reflection and recall
 
 - [Observation queue](./observations.md): Tentative findings for later Dream comparison; not normal implementation guidance.
-- [Profile-hardening implementation session](./dreams/2026-09-09-1616-completed-session.md): Completed user-managed profile migration, fail-closed runtime hardening, repeated review corrections, verification, and checkpoint handoff.
-- [Profile capability-resolution session](./dreams/2026-09-10-1503-completed-session.md): Completed and independently verified T01 profile schema and asynchronous package resolution; Current advanced to `02.01` with T02 and T03 pending.
-- [Child capability-launch session](./dreams/2026-09-10-1752-completed-session.md): Completed and independently verified slice 02.01 child isolation, protected extension ordering, dynamic activation, and nesting inheritance; Current advanced to `02.02`.
-- [Versioned resume session](./dreams/2026-09-10-1843-completed-session.md): Completed slice 02.02 and the high-assurance T02 gate with strict versioned snapshots, exact new-mode resume, legacy compatibility, and Current advanced to `03.01`.
-- [Final profile-extension verification session](./dreams/2026-09-10-1958-completed-session.md): Completed Current 03.01 and whole-plan verification, synchronized user and indexed wiki guidance, and stopped with archive preflight blocked by missing helper support.
-- [Global profiles and safe Cursor provider session](./dreams/2026-09-10-2217-completed-session.md): Completed five global role profiles, rejected a provider that bypassed read-only boundaries, migrated to canonical provider models, verified isolation, and archived the item.
-- [Frozen subagent reply-delivery checkpoint](./dreams/2026-09-14-1744-gamemaster-checkpoint-260914-1641-fix-frozen-subagent-reply-delivery-direct.md): Recovered interrupted implementation work, verified bracketed live transport, bounded acknowledgment, pending-message lifecycle protection, and explicit recovery, then archived the completed item.
+- [Dream episode catalog](./dreams/episodes.jsonl): Metadata-only routing for immutable session episodes.
+- Per-spec Dream ledgers: `wiki/dreams/by-spec/<item-id>.md`.
+- Workflow retrospectives: `wiki/dreams/retrospectives/<item-id>.md`.
 
 ## Stale or needs review
 

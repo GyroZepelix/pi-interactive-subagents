@@ -70,6 +70,15 @@ import {
   type SubagentSessionMode,
 } from "./agents.ts";
 import { SUBAGENT_BUILTIN_TOOLS_ENV } from "./subagent-protocol.ts";
+import {
+  encodeQuestionAnswer,
+  questionAcknowledgmentPath,
+  questionRequestPath,
+  readQuestionAcknowledgment,
+  readQuestionRequest,
+  removeMatchingQuestionAcknowledgment,
+  removeMatchingQuestionRequest,
+} from "./question-protocol.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -548,8 +557,15 @@ interface RunningSubagent {
   sentinelFile?: string;
   statusState: SubagentStatusState;
   /** Serializes acknowledgment for an idle waiting child so one activity
-   * advance cannot confirm two concurrently submitted replies. */
+   * advance cannot confirm two concurrently submitted generic replies. */
   pendingWaitingReply?: boolean;
+  /** Correlated ask_question state registered from the child's atomic request. */
+  pendingQuestion?: {
+    id: string;
+    answerSubmitted: boolean;
+    confirmationPending: boolean;
+    sawWaiting: boolean;
+  };
   /**
    * When true, status transitions (stalled/recovered) do not wake the parent
    * session via a steer message. The widget still updates locally. Used for
@@ -1295,6 +1311,66 @@ async function waitForWaitingReplyAcknowledgment(
   }
 }
 
+function clearMatchingPendingQuestion(running: RunningSubagent, id: string): boolean {
+  if (running.pendingQuestion?.id !== id) return false;
+  removeMatchingQuestionRequest(questionRequestPath(running.sessionFile), id);
+  removeMatchingQuestionAcknowledgment(questionAcknowledgmentPath(running.sessionFile), id);
+  delete running.pendingQuestion;
+  return true;
+}
+
+function reconcilePendingQuestion(running: RunningSubagent): void {
+  const pending = running.pendingQuestion;
+  if (!pending) return;
+  if (running.activity?.phase === "waiting") pending.sawWaiting = true;
+  if (pending.confirmationPending) return;
+
+  if (readQuestionAcknowledgment(questionAcknowledgmentPath(running.sessionFile)) === pending.id) {
+    clearMatchingPendingQuestion(running, pending.id);
+    return;
+  }
+
+  // After a submitted answer, a later non-tool active phase proves the child
+  // progressed beyond question waiting even if the short-lived ack marker was
+  // missed. Tool activity alone may be a sibling call from the original batch.
+  const activity = running.activity;
+  if (
+    pending.answerSubmitted &&
+    pending.sawWaiting &&
+    activity?.phase === "active" &&
+    activity.activeScope !== "tool" &&
+    activity.latestEvent !== "input"
+  ) {
+    clearMatchingPendingQuestion(running, pending.id);
+  }
+}
+
+async function waitForQuestionAcknowledgment(
+  running: RunningSubagent,
+  id: string,
+  options: {
+    timeoutMs?: number;
+    pollMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    readAcknowledgment?: (path: string) => string | null;
+  } = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? WAITING_REPLY_ACK_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? WAITING_REPLY_ACK_POLL_MS;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const readAcknowledgment = options.readAcknowledgment ?? readQuestionAcknowledgment;
+  const acknowledgmentFile = questionAcknowledgmentPath(running.sessionFile);
+  const deadline = now() + timeoutMs;
+
+  for (;;) {
+    if (readAcknowledgment(acknowledgmentFile) === id) return true;
+    if (now() >= deadline) return false;
+    await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+  }
+}
+
 async function handleSubagentSteer(
   params: { name?: string; message?: string },
   options: {
@@ -1304,10 +1380,11 @@ async function handleSubagentSteer(
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     readActivity?: (activityFile: string, runningChildId: string) => ActivityReadResult;
+    readAcknowledgment?: (path: string) => string | null;
   } = {},
 ) {
-  const message = params.message?.trim();
-  if (!message) {
+  const rawMessage = params.message;
+  if (typeof rawMessage !== "string" || rawMessage.trim() === "") {
     const err = "`message` is required to steer a running subagent.";
     return { content: [{ type: "text" as const, text: err }], details: { error: err } };
   }
@@ -1324,6 +1401,85 @@ async function handleSubagentSteer(
   const now = options.now ?? Date.now;
   const observedAt = now();
   observeRunningSubagent(running, observedAt, options.readActivity);
+  reconcilePendingQuestion(running);
+
+  const pendingQuestion = running.pendingQuestion;
+  if (pendingQuestion) {
+    if (pendingQuestion.answerSubmitted) {
+      const err =
+        `An answer to question ${pendingQuestion.id} from subagent "${running.name}" was already submitted. ` +
+        `Do not resend automatically; wait for acknowledgment or a child-state transition.`;
+      return {
+        content: [{ type: "text" as const, text: err }],
+        details: { error: err, id: running.id, name: running.name, questionId: pendingQuestion.id },
+      };
+    }
+
+    pendingQuestion.answerSubmitted = true;
+    pendingQuestion.confirmationPending = true;
+    try {
+      (options.send ?? submitText)(
+        running.surface,
+        encodeQuestionAnswer(pendingQuestion.id, rawMessage),
+      );
+    } catch (error: any) {
+      if (running.pendingQuestion?.id === pendingQuestion.id) {
+        pendingQuestion.answerSubmitted = false;
+        pendingQuestion.confirmationPending = false;
+      }
+      const err =
+        `Failed to submit answer to subagent "${running.name}" via tmux: ` +
+        `${error?.message ?? String(error)}`;
+      return {
+        content: [{ type: "text" as const, text: err }],
+        details: { error: err, id: running.id, name: running.name, questionId: pendingQuestion.id },
+      };
+    }
+
+    let confirmed = false;
+    try {
+      confirmed = await waitForQuestionAcknowledgment(running, pendingQuestion.id, options);
+    } finally {
+      if (running.pendingQuestion?.id === pendingQuestion.id) {
+        pendingQuestion.confirmationPending = false;
+      }
+    }
+    updateWidget();
+
+    if (confirmed) {
+      clearMatchingPendingQuestion(running, pendingQuestion.id);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Answer delivered to question ${pendingQuestion.id} from subagent "${running.name}".`,
+        }],
+        details: {
+          id: running.id,
+          name: running.name,
+          questionId: pendingQuestion.id,
+          status: "delivered",
+        },
+      };
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text:
+          `Answer was submitted to question ${pendingQuestion.id} from subagent "${running.name}", ` +
+          `but matching acknowledgment was not observed before the timeout. Do not resend or ` +
+          `terminate it automatically because the answer may still be processed.`,
+      }],
+      details: {
+        id: running.id,
+        name: running.name,
+        questionId: pendingQuestion.id,
+        status: "unconfirmed",
+      },
+    };
+  }
+
+  const message = rawMessage.trim();
   const waitingBaseline =
     running.cli !== "claude" &&
     running.activityRead?.ok === true &&
@@ -1484,6 +1640,9 @@ export const __test__ = {
   observeRunningSubagent,
   activityAcknowledgesReply,
   waitForWaitingReplyAcknowledgment,
+  waitForQuestionAcknowledgment,
+  reconcilePendingQuestion,
+  deliverPendingQuestion,
   resolveRunningByName,
   uniqueRunningName,
   claimRuntimeName,
@@ -1789,44 +1948,81 @@ function copyClaudeSession(sentinelFile: string): string | null {
 }
 
 /**
- * Detect an `ask_question` signal from a still-running subagent and notify the
- * orchestrator without ending the subagent. Each subagent has its own
- * `${sessionFile}.ask` file and its own watcher, so parallel questions from
- * multiple subagents are delivered independently. The file is deleted after
- * delivery so it fires once per question (a subagent may ask again later).
+ * Register one strict atomic `ask_question` request and notify the orchestrator.
+ * Correlation state stays on the running child until its exact acknowledgment
+ * arrives or post-answer activity proves that question waiting ended.
  */
 function deliverPendingQuestion(running: RunningSubagent): void {
-  const askFile = `${running.sessionFile}.ask`;
-  let payload: any = null;
-  try {
-    if (!existsSync(askFile)) return;
-    payload = JSON.parse(readFileSync(askFile, "utf-8"));
-  } catch {
-    // Malformed/partway-written file — drop it and move on.
-  }
-  try {
-    unlinkSync(askFile);
-  } catch {}
-  if (!payload?.question) return;
+  reconcilePendingQuestion(running);
 
-  const name = running.name; // unique per session (deduped at spawn) — targets the reply
+  const askFile = questionRequestPath(running.sessionFile);
+  if (!existsSync(askFile)) return;
+  const request = readQuestionRequest(askFile);
+  if (!request) {
+    // Atomic publication means an invalid complete payload cannot become valid
+    // later. Contain it rather than repeatedly surfacing untrusted content.
+    try { unlinkSync(askFile); } catch {}
+    return;
+  }
+  if (request.name !== running.name || request.agent !== (running.agent ?? "")) {
+    removeMatchingQuestionRequest(askFile, request.id);
+    return;
+  }
+
+  if (running.pendingQuestion) {
+    if (running.pendingQuestion.id === request.id) {
+      removeMatchingQuestionRequest(askFile, request.id);
+    }
+    return;
+  }
+
+  running.pendingQuestion = {
+    id: request.id,
+    answerSubmitted: false,
+    confirmationPending: false,
+    sawWaiting: running.activity?.phase === "waiting",
+  };
+  removeMatchingQuestionRequest(askFile, request.id);
+
+  const name = running.name;
   const sessionId = existsSync(running.sessionFile) ? getSessionId(running.sessionFile) : null;
   const elapsed = Math.floor((Date.now() - running.startTime) / 1000);
-  const replyHint = `\n\nReply with subagent_message({ name: "${name}", message: "…" }) — the same name works whether it is still running or has since exited. It stays open until you reply.`;
+  const replyHint = `\n\nReply with subagent_message({ name: "${name}", message: "…" }). The answer is correlated to this question and the same child run continues after it is acknowledged.`;
 
   latestPi?.sendMessage(
     {
       customType: "subagent_question",
-      content: `Sub-agent "${name}" asks (${formatElapsed(elapsed)}):\n\n${payload.question}${replyHint}`,
+      content: `Sub-agent "${name}" asks (${formatElapsed(elapsed)}):\n\n${request.question}${replyHint}`,
       display: true,
       details: {
         name,
         agent: running.agent,
-        question: payload.question,
+        questionId: request.id,
+        question: request.question,
         ...(sessionId ? { sessionId } : {}),
       },
     },
     { triggerTurn: true, deliverAs: "steer" },
+  );
+}
+
+function cleanupRunningQuestion(running: RunningSubagent): void {
+  const pending = running.pendingQuestion;
+  if (pending) {
+    clearMatchingPendingQuestion(running, pending.id);
+    return;
+  }
+
+  // The pane may disappear between atomic publication and the watcher's first
+  // registration tick. In that case recover the exact ID from the strict
+  // request before removing only that request's artifacts.
+  const requestFile = questionRequestPath(running.sessionFile);
+  const request = readQuestionRequest(requestFile);
+  if (!request) return;
+  removeMatchingQuestionRequest(requestFile, request.id);
+  removeMatchingQuestionAcknowledgment(
+    questionAcknowledgmentPath(running.sessionFile),
+    request.id,
   );
 }
 
@@ -1851,6 +2047,7 @@ async function watchSubagent(
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
 
     if (result.reason === "interrupted") {
+      cleanupRunningQuestion(running);
       runningSubagents.delete(running.id);
       return {
         name,
@@ -1896,6 +2093,7 @@ async function watchSubagent(
       }
 
       closeSurface(surface);
+      cleanupRunningQuestion(running);
       runningSubagents.delete(running.id);
 
       return { name, task, summary, exitCode: result.exitCode, elapsed, ...(sessionId ? { claudeSessionId: sessionId } : {}) };
@@ -1924,6 +2122,7 @@ async function watchSubagent(
     const subagentSessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
 
     closeSurface(surface);
+    cleanupRunningQuestion(running);
     runningSubagents.delete(running.id);
 
     return {
@@ -1941,6 +2140,7 @@ async function watchSubagent(
     try {
       closeSurface(surface);
     } catch {}
+    cleanupRunningQuestion(running);
     runningSubagents.delete(running.id);
 
     if (signal.aborted) {
@@ -2362,13 +2562,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "so the SAME name works whether the subagent is running or finished: if it is still running, your message steers its live session; " +
         "if it has finished, your message resumes that session and continues it. " +
         "`name` and `message` are both required. " +
-        "Steering an active running subagent reports local submission; a waiting Pi child is acknowledged only after newer child activity, with bounded unconfirmed fallback. It does NOT, by itself, emit a new result. " +
+        "A pending question answer requires its exact acknowledgment; other waiting Pi messages use newer child activity, both with bounded unconfirmed fallback. Active running messages report local submission. It does NOT, by itself, emit a new result. " +
         "Resuming is a fire-and-forget async call: when the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up. " +
         "DO NOT poll, sleep, tail logs, or read session files to detect completion — the harness handles delivery. " +
         "DO NOT fabricate or assume results. After calling, either end your turn or work on other independent tasks.",
       promptSnippet:
         "Message a subagent by name: steers it if running, resumes it if finished (same name either way). " +
-        "`name` and `message` are required. Active steering reports submission; waiting Pi steering briefly awaits child activity confirmation. Resuming delivers its result later as a steer message. " +
+        "`name` and `message` are required. Active steering reports submission; question replies require exact acknowledgment and other waiting Pi messages briefly await child activity. Resuming delivers its result later as a steer message. " +
         "Do not poll or fabricate results.",
       parameters: Type.Object({
         name: Type.String({
@@ -2602,6 +2802,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           id,
           name,
           task: message,
+          ...(loadout.agent ? { agent: loadout.agent } : {}),
           surface,
           startTime,
           sessionFile: sessionPath,
