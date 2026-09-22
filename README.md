@@ -6,7 +6,7 @@ This fork is tmux-only.
 
 ## How it works
 
-`subagent` returns immediately after launching a child Pi session in a tmux pane. A widget tracks running children, and completion wakes the parent with the result. Independent tool calls can launch multiple children concurrently.
+`subagent` returns immediately after launching a child Pi session in a tmux pane. A widget tracks running children, and completion wakes the parent with the result. Auto-exit Pi children finalize only after Pi settles automatic retries, recovery, and queued continuation. Independent tool calls can launch multiple children concurrently.
 
 ```text
 + Subagents --------------------------- 2 running +
@@ -25,7 +25,7 @@ The default is 500 milliseconds.
 
 ## Requirements
 
-- Pi 0.85.1 (the verified target)
+- Pi 0.87.0 (the verified target)
 - tmux
 
 ## Installation

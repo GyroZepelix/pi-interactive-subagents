@@ -73,7 +73,7 @@ import {
 } from "../pi-extension/subagents/activity.ts";
 import {
   shouldMarkUserTookOver,
-  shouldAutoExitOnAgentEnd,
+  shouldFinalizeOnAgentSettled,
   findLatestAssistantError,
   runningChildrenCount,
 } from "../pi-extension/subagents/subagent-runtime-control.ts";
@@ -3440,6 +3440,57 @@ describe("question protocol", () => {
 });
 
 describe("subagent runtime control", () => {
+  function setupCapturingExtension(
+    sessionFile: string,
+    options: { autoExit?: boolean; activityFile?: string; runningChildId?: string } = {},
+  ) {
+    const handlers = new Map<string, Array<(...args: any[]) => any>>();
+    const tools: any[] = [];
+    const api = {
+      on(event: string, handler: (...args: any[]) => any) {
+        if (!handlers.has(event)) handlers.set(event, []);
+        handlers.get(event)!.push(handler);
+      },
+      registerTool(tool: any) { tools.push(tool); },
+      registerCommand() {}, registerMessageRenderer() {}, registerShortcut() {},
+      sendUserMessage() {}, sendMessage() {}, getAllTools() { return []; },
+    } as any;
+    const saved = {
+      session: process.env.PI_SUBAGENT_SESSION,
+      name: process.env.PI_SUBAGENT_NAME,
+      agent: process.env.PI_SUBAGENT_AGENT,
+      autoExit: process.env.PI_SUBAGENT_AUTO_EXIT,
+      activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
+      runningChildId: process.env.PI_SUBAGENT_ID,
+    };
+    process.env.PI_SUBAGENT_SESSION = sessionFile;
+    process.env.PI_SUBAGENT_NAME = "inspector-2";
+    process.env.PI_SUBAGENT_AGENT = "inspector";
+    process.env.PI_SUBAGENT_AUTO_EXIT = options.autoExit === false ? "0" : "1";
+    if (options.activityFile) process.env.PI_SUBAGENT_ACTIVITY_FILE = options.activityFile;
+    else delete process.env.PI_SUBAGENT_ACTIVITY_FILE;
+    if (options.runningChildId) process.env.PI_SUBAGENT_ID = options.runningChildId;
+    else delete process.env.PI_SUBAGENT_ID;
+    subagentRuntimeControlExtension(api);
+    const emit = async (event: string, ...args: any[]) => {
+      for (const handler of handlers.get(event) ?? []) {
+        const result = await handler(...args);
+        if (result?.action === "handled") return result;
+      }
+      return { action: "continue" };
+    };
+    const restore = () => {
+      restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
+      restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
+      restoreEnvVar("PI_SUBAGENT_AGENT", saved.agent);
+      restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", saved.autoExit);
+      restoreEnvVar("PI_SUBAGENT_ACTIVITY_FILE", saved.activityFile);
+      restoreEnvVar("PI_SUBAGENT_ID", saved.runningChildId);
+    };
+    const tool = tools.find((candidate) => candidate.name === "ask_question");
+    return { emit, handlers, tool, tools, restore };
+  }
+
   describe("shouldMarkUserTookOver", () => {
     it("ignores the initial injected task before the first agent run", () => {
       assert.equal(shouldMarkUserTookOver(false), false);
@@ -3450,28 +3501,28 @@ describe("subagent runtime control", () => {
     });
   });
 
-  describe("shouldAutoExitOnAgentEnd", () => {
-    it("auto-exits after normal completion when there was no takeover", () => {
+  describe("shouldFinalizeOnAgentSettled", () => {
+    it("finalizes after normal completion when there was no takeover", () => {
       const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
+      assert.equal(shouldFinalizeOnAgentSettled(false, messages), true);
     });
 
-    it("auto-exits after normal completion even when the user sent the prompt", () => {
+    it("finalizes after normal completion even when the user sent the prompt", () => {
       const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(true, messages), true);
+      assert.equal(shouldFinalizeOnAgentSettled(true, messages), true);
     });
 
     it("stays open after Escape aborts the run", () => {
       const messages = [{ role: "assistant", stopReason: "aborted" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), false);
+      assert.equal(shouldFinalizeOnAgentSettled(false, messages), false);
     });
 
-    it("still exits when the latest turn ended with stopReason=error", () => {
+    it("still finalizes when the latest run ended with stopReason=error", () => {
       // Auto-exit subagents must shut down on retry-exhaustion errors so the
       // parent is woken. The error sidecar (written separately) carries the
       // failure detail; staying open would just strand the implementer.
       const messages = [{ role: "assistant", stopReason: "error", errorMessage: "529 overloaded" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
+      assert.equal(shouldFinalizeOnAgentSettled(false, messages), true);
     });
   });
 
@@ -3545,6 +3596,217 @@ describe("subagent runtime control", () => {
       withGlobal(() => -1, () => assert.equal(runningChildrenCount(), 0));
       withGlobal(() => "two", () => assert.equal(runningChildrenCount(), 0));
       withGlobal(() => { throw new Error("boom"); }, () => assert.equal(runningChildrenCount(), 0));
+    });
+  });
+
+  describe("settled auto-exit lifecycle", () => {
+    const normalMessages = [{ role: "assistant", stopReason: "stop" }];
+    const settledContext = (pending: () => boolean, shutdown: () => void) => ({
+      hasPendingMessages: pending,
+      shutdown,
+    });
+
+    it("replaces a transient error with a successful retry before finalizing", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "session.jsonl");
+      const activityFile = join(dir, "activity.json");
+      const childId = "retry-child";
+      const { emit, restore } = setupCapturingExtension(sessionFile, { activityFile, runningChildId: childId });
+      let shutdowns = 0;
+      const ctx = settledContext(() => false, () => { shutdowns += 1; });
+      try {
+        await emit("agent_start", { type: "agent_start" }, ctx);
+        await emit("agent_end", {
+          type: "agent_end",
+          messages: [{ role: "assistant", stopReason: "error", errorMessage: "temporary 529" }],
+        }, ctx);
+
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+        assert.equal(shutdowns, 0);
+        let activity = readSubagentActivityFile(activityFile, childId);
+        assert.ok(activity.ok);
+        assert.equal(activity.activity.phase, "waiting");
+        assert.equal(activity.activity.latestEvent, "agent_end");
+
+        await emit("agent_start", { type: "agent_start" }, ctx);
+        activity = readSubagentActivityFile(activityFile, childId);
+        assert.ok(activity.ok);
+        assert.equal(activity.activity.phase, "active");
+        assert.equal(activity.activity.latestEvent, "agent_start");
+
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+        assert.equal(shutdowns, 1);
+        activity = readSubagentActivityFile(activityFile, childId);
+        assert.ok(activity.ok);
+        assert.equal(activity.activity.phase, "done");
+        assert.equal(activity.activity.latestEvent, "agent_settled");
+
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 1, "duplicate settlement must not finalize twice");
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("writes the latest exhausted error only after settlement", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "session.jsonl");
+      const activityFile = join(dir, "activity.json");
+      const childId = "error-child";
+      const { emit, restore } = setupCapturingExtension(sessionFile, { activityFile, runningChildId: childId });
+      let shutdowns = 0;
+      const ctx = settledContext(() => false, () => { shutdowns += 1; });
+      try {
+        await emit("agent_end", {
+          type: "agent_end",
+          messages: [{ role: "assistant", stopReason: "error", errorMessage: "final 529" }],
+        }, ctx);
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+        assert.equal(shutdowns, 0);
+
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.deepEqual(JSON.parse(readFileSync(`${sessionFile}.exit`, "utf8")), {
+          type: "error",
+          errorMessage: "final 529",
+          stopReason: "error",
+        });
+        assert.equal(shutdowns, 1);
+        const activity = readSubagentActivityFile(activityFile, childId);
+        assert.ok(activity.ok);
+        assert.equal(activity.activity.phase, "done");
+        assert.equal(activity.activity.latestEvent, "agent_settled");
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves an aborted final run waiting without completion artifacts", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "session.jsonl");
+      const activityFile = join(dir, "activity.json");
+      const childId = "abort-child";
+      const { emit, restore } = setupCapturingExtension(sessionFile, { activityFile, runningChildId: childId });
+      let shutdowns = 0;
+      const ctx = settledContext(() => false, () => { shutdowns += 1; });
+      try {
+        await emit("agent_end", {
+          type: "agent_end",
+          messages: [{ role: "assistant", stopReason: "aborted" }],
+        }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+        assert.equal(shutdowns, 0);
+        const activity = readSubagentActivityFile(activityFile, childId);
+        assert.ok(activity.ok);
+        assert.equal(activity.activity.phase, "waiting");
+        assert.equal(activity.activity.latestEvent, "agent_end");
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rechecks Pi-owned pending messages at each settlement", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "session.jsonl");
+      const { emit, restore } = setupCapturingExtension(sessionFile);
+      let pendingMessages = true;
+      let shutdowns = 0;
+      const ctx = settledContext(() => pendingMessages, () => { shutdowns += 1; });
+      try {
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 0);
+
+        pendingMessages = false;
+        await emit("agent_start", { type: "agent_start" }, ctx);
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 1);
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rechecks running nested children at each settlement", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "session.jsonl");
+      const key = Symbol.for("pi-subagents/running-children-count");
+      const previous = (globalThis as any)[key];
+      let runningChildren = 1;
+      (globalThis as any)[key] = () => runningChildren;
+      const { emit, restore } = setupCapturingExtension(sessionFile);
+      let shutdowns = 0;
+      const ctx = settledContext(() => false, () => { shutdowns += 1; });
+      try {
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 0);
+
+        runningChildren = 0;
+        await emit("agent_start", { type: "agent_start" }, ctx);
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 1);
+      } finally {
+        (globalThis as any)[key] = previous;
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rechecks a pending parent question at each settlement", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "session.jsonl");
+      const { emit, tool, restore } = setupCapturingExtension(sessionFile);
+      let shutdowns = 0;
+      const ctx = settledContext(() => false, () => { shutdowns += 1; });
+      try {
+        const answerPromise = tool.execute("question-1", { question: "continue?" }, undefined, undefined, ctx);
+        await Promise.resolve();
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 0);
+
+        const request = readQuestionRequest(questionRequestPath(sessionFile));
+        assert.ok(request);
+        await emit("input", {
+          type: "input",
+          text: encodeQuestionAnswer(request.id, "yes"),
+        });
+        await answerPromise;
+        await emit("agent_start", { type: "agent_start" }, ctx);
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 1);
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps non-auto-exit profiles waiting after settlement", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "session.jsonl");
+      const { emit, restore } = setupCapturingExtension(sessionFile, { autoExit: false });
+      let shutdowns = 0;
+      const ctx = settledContext(() => false, () => { shutdowns += 1; });
+      try {
+        await emit("agent_end", { type: "agent_end", messages: normalMessages }, ctx);
+        await emit("agent_settled", { type: "agent_settled" }, ctx);
+        assert.equal(shutdowns, 0);
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -3752,46 +4014,6 @@ describe("subagent runtime control", () => {
   });
 
   describe("ask_question tool", () => {
-    function setupCapturingExtension(sessionFile: string) {
-      const handlers = new Map<string, Array<(...args: any[]) => any>>();
-      const tools: any[] = [];
-      const api = {
-        on(event: string, handler: (...args: any[]) => any) {
-          if (!handlers.has(event)) handlers.set(event, []);
-          handlers.get(event)!.push(handler);
-        },
-        registerTool(tool: any) { tools.push(tool); },
-        registerCommand() {}, registerMessageRenderer() {}, registerShortcut() {},
-        sendUserMessage() {}, sendMessage() {}, getAllTools() { return []; },
-      } as any;
-      const saved = {
-        session: process.env.PI_SUBAGENT_SESSION,
-        name: process.env.PI_SUBAGENT_NAME,
-        agent: process.env.PI_SUBAGENT_AGENT,
-        autoExit: process.env.PI_SUBAGENT_AUTO_EXIT,
-      };
-      process.env.PI_SUBAGENT_SESSION = sessionFile;
-      process.env.PI_SUBAGENT_NAME = "inspector-2";
-      process.env.PI_SUBAGENT_AGENT = "inspector";
-      process.env.PI_SUBAGENT_AUTO_EXIT = "1";
-      subagentRuntimeControlExtension(api);
-      const emit = async (event: string, ...args: any[]) => {
-        for (const handler of handlers.get(event) ?? []) {
-          const result = await handler(...args);
-          if (result?.action === "handled") return result;
-        }
-        return { action: "continue" };
-      };
-      const restore = () => {
-        restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
-        restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
-        restoreEnvVar("PI_SUBAGENT_AGENT", saved.agent);
-        restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", saved.autoExit);
-      };
-      const tool = tools.find((candidate) => candidate.name === "ask_question");
-      return { emit, handlers, tool, tools, restore };
-    }
-
     it("registers ask_question without the retired ping tool", () => {
       const dir = createTestDir();
       const { tool, tools, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
@@ -4277,10 +4499,11 @@ describe("subagent activity snapshots", () => {
       assert.equal(read.activity.waitingSince, 3_000);
 
       currentNow = 4_000;
-      recorder.agentEndDone();
+      recorder.agentSettledDone();
       read = readSubagentActivityFile(activityFile, "child-2");
       assert.ok(read.ok);
       assert.equal(read.activity.phase, "done");
+      assert.equal(read.activity.latestEvent, "agent_settled");
       assert.equal(read.activity.agentActive, false);
     });
   });

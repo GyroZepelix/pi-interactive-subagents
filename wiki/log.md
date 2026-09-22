@@ -115,3 +115,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/architecture.md` and `wiki/log.md`.
 - Verification: model-free protocol, runtime, routing, tmux, packaging, spec, Markdown, and patch-integrity checks passed; the separately approved GPT-5.5 lifecycle test and both independent reviews also passed.
 - Notes: `wiki/state.md` was unchanged because no ingest, lint, dedupe, or Git checkpoint advanced.
+
+## [2026-09-22] update | settled subagent finalization
+
+- Trigger: implementation of `260922-1641-finalize-subagents-only-after-agent-settlement` moved auto-exit from low-level run end to Pi's final settled notification and aligned the development baseline.
+- Inputs: `pi-extension/subagents/subagent-runtime-control.ts`, `pi-extension/subagents/activity.ts`, deterministic lifecycle regressions in `test/test.ts`, `package.json`, `package-lock.json`, and the active work-item plan.
+- Wiki pages changed: `wiki/overview.md`, `wiki/architecture.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
+- Verification: the Pi 0.87.0 dependency graph, all 222 model-free unit tests, 9 tmux surface tests, and package contents passed before the durable guidance update.
+- Notes: `agent_end` remains a recoverable waiting boundary; only `agent_settled` records terminal auto-exit activity. `wiki/state.md` was unchanged because no ingest, lint, dedupe, or Git checkpoint advanced. The model-consuming lifecycle check remains separately approval-gated.

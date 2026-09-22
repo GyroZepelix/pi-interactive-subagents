@@ -51,7 +51,7 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `skills` | Comma-delimited string or YAML string array | Empty list. Do not use together with `skill`. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | Optional. Applied with a profile model. |
 | `subagent_agents` | Comma-delimited string or YAML string array | Empty list. A non-empty list grants nested spawning and restricts targets to these effective names. |
-| `auto-exit` | YAML boolean | `false`. When true, a completed autonomous turn shuts down and reports its final response to the parent. |
+| `auto-exit` | YAML boolean | `false`. When true, the child shuts down and reports its final response only after Pi settles automatic retries, recovery, and queued continuation. |
 | `interactive` | YAML boolean | Inverse of `auto-exit`. Controls whether stall and recovery transitions wake the parent; the widget still updates. |
 | `system-prompt` | `append` or `replace` | When omitted, the body is inserted into the task wrapper. Otherwise the body is passed through the corresponding Pi system-prompt flag. |
 | `session-mode` | `standalone`, `lineage-only`, or `fork` | `standalone`. See [Session modes](#session-modes). |

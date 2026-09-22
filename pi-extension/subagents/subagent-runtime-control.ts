@@ -4,8 +4,8 @@
  * - Provides an `ask_question` tool for asking the parent orchestrator a question
  *
  * Subagents do NOT self-terminate via a tool. Auto-exit agents shut down
- * automatically when their agent loop ends (see the `agent_end` handler);
- * interactive agents end when the human exits the pane.
+ * automatically after Pi reports that the agent is settled; interactive agents
+ * end when the human exits the pane.
  *
  * `ask_question` keeps its tool promise pending after atomically publishing a
  * correlated request. The parent submits a private answer envelope through the
@@ -42,8 +42,8 @@ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
  * symbol. A subagent that spawns children and then writes a "waiting for
  * results" message would otherwise auto-exit the instant that turn ends —
  * killing the session before its children report back. Reading this count lets
- * `agent_end` keep the session open until every child has finished and its
- * result has been delivered.
+ * the settlement handler keep the session open until every child has finished
+ * and its result has been delivered.
  *
  * Returns 0 when the spawning tools are not loaded, so non-spawning agents
  * auto-exit exactly as before.
@@ -59,7 +59,7 @@ export function runningChildrenCount(): number {
   }
 }
 
-export function shouldAutoExitOnAgentEnd(
+export function shouldFinalizeOnAgentSettled(
   _userTookOver: boolean,
   messages: any[] | undefined,
 ): boolean {
@@ -95,7 +95,7 @@ export interface SubagentErrorInfo {
  * failure instead of silently treating the run as completed.
  *
  * Returns `null` when the latest assistant turn completed normally or was
- * aborted by the user (handled separately by shouldAutoExitOnAgentEnd).
+ * aborted by the user (handled separately by shouldFinalizeOnAgentSettled).
  */
 export function findLatestAssistantError(
   messages: any[] | undefined,
@@ -189,6 +189,8 @@ export default function (pi: ExtensionAPI) {
 
   let userTookOver = false;
   let agentStarted = false;
+  let latestAgentEndMessages: any[] | undefined;
+  let finalized = false;
   interface PendingQuestion {
     id: string;
     sessionFile: string;
@@ -260,8 +262,22 @@ export default function (pi: ExtensionAPI) {
     recorder.agentStart();
   });
 
-  pi.on("agent_end", (event, ctx) => {
-    const messages = (event as any).messages as any[] | undefined;
+  pi.on("agent_end", (event) => {
+    // agent_end closes one low-level run, but Pi may still retry, compact and
+    // recover, or drain queued work. Keep only the latest run outcome and leave
+    // the recorder enabled for any subsequent lifecycle events.
+    latestAgentEndMessages = (event as any).messages as any[] | undefined;
+    recorder.agentEndWaiting();
+    if (autoExit) {
+      // Reset any recorded manual input marker. Auto-exit is decided by whether
+      // the latest agent run completed normally, not by who initiated it.
+      userTookOver = false;
+    }
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    if (finalized || !autoExit) return;
+
     // Never shut down while this session still has work in flight:
     //  - pendingQuestion: an ask_question is pending the orchestrator's reply.
     //  - runningChildrenCount(): this subagent spawned its own children and is
@@ -269,52 +285,42 @@ export default function (pi: ExtensionAPI) {
     //    would strand those children and drop their results.
     //  - ctx.hasPendingMessages(): Pi has accepted steering/follow-up input
     //    that its current loop has not drained yet.
-    // In all cases the session parks as `waiting` and resumes when the next
-    // turn lands.
+    // A later run can replace latestAgentEndMessages before Pi settles again.
     const hasPendingChildren = runningChildrenCount() > 0;
     const hasPendingMessages = ctx.hasPendingMessages();
-    const shouldExit =
-      !pendingQuestion &&
-      !hasPendingChildren &&
-      !hasPendingMessages &&
-      autoExit &&
-      shouldAutoExitOnAgentEnd(userTookOver, messages);
-
-    if (shouldExit) {
-      // Surface stopReason: "error" turns (auto-retry exhausted, provider
-      // overload, etc.) to the parent via the .exit sidecar so the watcher
-      // can report a clear failure with the underlying error message.
-      // Without this the parent would only see exit code 0 and a stale
-      // assistant message, mistaking the crash for a successful completion.
-      const errorInfo = findLatestAssistantError(messages);
-      const sessionFile = process.env.PI_SUBAGENT_SESSION;
-      if (errorInfo && sessionFile) {
-        try {
-          writeFileSync(
-            `${sessionFile}.exit`,
-            JSON.stringify({
-              type: "error",
-              errorMessage: errorInfo.errorMessage,
-              stopReason: errorInfo.stopReason,
-            }),
-          );
-        } catch {
-          // Best effort — even without the sidecar, watcher's session-file
-          // fallback can still recover the errorMessage.
-        }
-      }
-
-      recorder.agentEndDone();
-      ctx.shutdown();
+    if (
+      pendingQuestion ||
+      hasPendingChildren ||
+      hasPendingMessages ||
+      !shouldFinalizeOnAgentSettled(userTookOver, latestAgentEndMessages)
+    ) {
       return;
     }
 
-    recorder.agentEndWaiting();
-    if (autoExit) {
-      // Reset any recorded manual input marker. Auto-exit is decided by whether
-      // the latest agent turn completed normally, not by who initiated it.
-      userTookOver = false;
+    // Surface a final stopReason: "error" to the parent via the existing .exit
+    // sidecar. Transient errors never reach this path because each later
+    // agent_end replaces the captured outcome before settlement.
+    const errorInfo = findLatestAssistantError(latestAgentEndMessages);
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    if (errorInfo && sessionFile) {
+      try {
+        writeFileSync(
+          `${sessionFile}.exit`,
+          JSON.stringify({
+            type: "error",
+            errorMessage: errorInfo.errorMessage,
+            stopReason: errorInfo.stopReason,
+          }),
+        );
+      } catch {
+        // Best effort — even without the sidecar, watcher's session-file
+        // fallback can still recover the errorMessage.
+      }
     }
+
+    finalized = true;
+    recorder.agentSettledDone();
+    ctx.shutdown();
   });
 
   pi.on("turn_start", (event) => {

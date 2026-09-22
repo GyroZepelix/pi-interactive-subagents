@@ -34,8 +34,8 @@
     "config.json.example"
   ],
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@earendil-works/pi-tui": "^0.85.1",
-    "typebox": "1.3.7"
+    "@earendil-works/pi-coding-agent": "^0.87.0",
+    "@earendil-works/pi-tui": "^0.87.0",
+    "typebox": "1.3.27"
   }
 }

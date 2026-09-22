@@ -2,7 +2,7 @@
 
 ## Prerequisites and setup
 
-- Runtime use targets Pi 0.85.1 and requires tmux. Pi must run inside tmux, for example `tmux new -A -s pi 'pi'` (`README.md`, `package.json`, `pi-extension/subagents/tmux.ts`).
+- Runtime use is verified against Pi 0.87.0 and requires tmux. Pi must run inside tmux, for example `tmux new -A -s pi 'pi'` (`README.md`, `package.json`, `package-lock.json`, `pi-extension/subagents/tmux.ts`).
 - The project is an ESM package and Pi loads `pi-extension/subagents/index.ts` through the `pi.extensions` manifest field (`package.json`).
 - Install locked development dependencies with `npm ci`. Dependency changes require lockfile regeneration and review (`README.md`, `package.json`, `package-lock.json`).
 
@@ -22,7 +22,7 @@ When running the top-level unit suite from inside a spawned subagent, unset `PI_
 
 ## Test organization
 
-- `test/test.ts` directly imports production modules and exercises session persistence, validated profile discovery, trust, precedence, canonical identity, fail-closed tools, activity/status transitions, tool registration, runtime names, steering acknowledgment and timeout, pending-message auto-exit protection, missing-pane recovery, rendering, and tmux helpers.
+- `test/test.ts` directly imports production modules and exercises session persistence, validated profile discovery, trust, precedence, canonical identity, fail-closed tools, activity/status transitions, tool registration, runtime names, steering acknowledgment and timeout, settled auto-exit event sequences (including retry recovery, final error, abort, and outstanding-work guards), missing-pane recovery, rendering, and tmux helpers.
 - `test/integration/tmux-surface.test.ts` performs real pane operations without model calls. Its bracketed-paste fixture records framing, byte length, hash, and submission count for a 4,283-byte UTF-8 payload, accepts a short follow-up, and verifies buffer cleanup; the suite also removes a disposable pane to exercise interruption detection (`test/integration/fixtures/bracketed-paste-recorder.mjs`).
 - `test/integration/subagent-lifecycle.test.ts` performs real Pi and model interactions and writes markers under `/tmp`.
 - Integration fixtures define `session-mode`, body and `system-prompt` behavior, and `ask_question`; they do not use removed public spawn overrides.

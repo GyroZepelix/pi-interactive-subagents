@@ -11,7 +11,8 @@ The package is an in-process Pi extension that supervises child Pi or optional C
 3. Before pane creation, the extension rejects unknown profiles, unresolved or invalid package extension selections, invalid generated Pi loadouts or runtime overrides, self-spawn, missing tmux or parent state, and colliding explicit runtime names (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`).
 4. The extension creates a detached right-hand tmux split, seeds a child session when required, and writes task, launch-script, activity, registry, and sandbox artifacts under the parent Pi session directories (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`, `pi-extension/subagents/tmux.ts`).
 5. A new child Pi process starts with extension discovery and built-ins disabled. It loads `subagent-runtime-control.ts` first, optional spawning control second, canonical profile extensions in resolved order, and tool-free `subagent-capability-activation.ts` last. The activation control enables only selected built-ins plus declared extension tools (`pi-extension/subagents/index.ts`, `pi-extension/subagents/subagent-capability-activation.ts`).
-6. The tool returns immediately. A background watcher polls activity and completion signals, updates the widget, extracts the last assistant result and usage, closes the pane, and sends a steer message to the parent. A confirmed missing pane instead produces an interrupted result, releases the running entry, and leaves a Pi session registered for explicit same-name recovery (`pi-extension/subagents/index.ts`, `pi-extension/subagents/activity.ts`, `pi-extension/subagents/status.ts`, `pi-extension/subagents/tmux.ts`).
+6. For an auto-exit Pi child, each `agent_end` replaces the captured low-level run outcome and records a recoverable waiting snapshot. Finalization waits for `agent_settled`, then rechecks pending questions, running nested children, Pi-owned queued messages, and abort state before writing any final error sidecar, recording terminal activity, and requesting shutdown (`pi-extension/subagents/subagent-runtime-control.ts`, `pi-extension/subagents/activity.ts`).
+7. The tool returns immediately. A background watcher polls activity and completion signals, updates the widget, extracts the last assistant result and usage, closes the pane, and sends a steer message to the parent. A confirmed missing pane instead produces an interrupted result, releases the running entry, and leaves a Pi session registered for explicit same-name recovery (`pi-extension/subagents/index.ts`, `pi-extension/subagents/activity.ts`, `pi-extension/subagents/status.ts`, `pi-extension/subagents/tmux.ts`).
 
 ## Messaging and resume
 
@@ -24,7 +25,7 @@ The package is an in-process Pi extension that supervises child Pi or optional C
 
 - Pi session JSONL files are authoritative for conversation entries and result summaries (`pi-extension/subagents/session.ts`).
 - Structurally validated Pi loadout sidecars preserve model, identity, capability mode, selected built-ins or legacy strict tools, exact ordered profile extension paths, nested-spawn state, working directory, and Pi agent directory for safe preflighted resume (`pi-extension/subagents/session.ts`, `pi-extension/subagents/index.ts`).
-- Activity snapshots are version 1 JSON files written by temp-file rename. Invalid or wrong-child snapshots are rejected (`pi-extension/subagents/activity.ts`).
+- Activity snapshots are version 1 JSON files written by temp-file rename. `agent_end` is a waiting state that remains writable across retry activity; terminal auto-exit records `latestEvent: "agent_settled"`. Invalid or wrong-child snapshots are rejected (`pi-extension/subagents/activity.ts`).
 - `config.json` is an untracked local override; `config.json.example` is the fallback. The current schema accepts only `status.enabled` (`.gitignore`, `config.json.example`, `pi-extension/subagents/status.ts`).
 
 ## Invariants
@@ -38,6 +39,6 @@ The package is an in-process Pi extension that supervises child Pi or optional C
 
 ## Integrations and tradeoffs
 
-- The extension targets Pi 0.85.1 APIs and tmux command behavior. Profile extension paths resolve read-only from exact configured global package sources or, for trusted project profiles, project-first package settings with safe global fallback (`package.json`, `pi-extension/subagents/agents.ts`).
+- The verified development baseline targets Pi 0.87.0 APIs and matching TypeBox, while public peer ranges remain wildcard. Profile extension paths resolve read-only from exact configured global package sources or, for trusted project profiles, project-first package settings with safe global fallback (`package.json`, `package-lock.json`, `pi-extension/subagents/agents.ts`).
 - A profile with `cli: claude` uses a bundled Stop hook and launches Claude Code with `--dangerously-skip-permissions`; this path should be treated as explicitly trusted configuration (`pi-extension/subagents/index.ts`, `pi-extension/subagents/plugin/hooks/on-stop.sh`).
 - Unverified: no design history predates the repository's single current commit, so rationale beyond source comments and README statements is unavailable (`git log`).

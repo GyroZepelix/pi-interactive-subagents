@@ -11,7 +11,7 @@ The repository ships an ESM Pi package whose registered extension entry point is
 ## Stack and runtime
 
 - TypeScript is executed directly by Pi/Node; local imports retain `.ts` extensions (`package.json`, `pi-extension/subagents/*.ts`).
-- Runtime APIs target Pi 0.85.1 through `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox` (`package.json`).
+- Runtime APIs use a verified Pi 0.87.0 development baseline through `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and matching `typebox`; public peer ranges remain wildcard (`package.json`, `package-lock.json`).
 - tmux is the only supported pane backend and both `$TMUX` and the `tmux` executable are required (`README.md`, `pi-extension/subagents/tmux.ts`).
 - Runtime state is file-backed under Pi session and artifact directories, not in a project database (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`).
 

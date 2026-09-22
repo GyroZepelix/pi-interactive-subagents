@@ -25,6 +25,7 @@ Repository-local planning and execution artifacts.
 | [Repair agent profile drift and remove obsolete safe-bash](./archive/260910-2235-repair-agent-profile-drift-and-remove-obsolete-safe-bash/plan.md) | work-item | completed | 2026-09-11 |
 | [Fix frozen subagent reply delivery](./archive/260914-1641-fix-frozen-subagent-reply-delivery/plan.md) | work-item | completed | 2026-09-14 |
 | [Stop child generation after ask_question](./archive/260916-2339-stop-child-generation-after-ask-question/plan.md) | work-item | completed | 2026-09-17 |
+| [Finalize subagents only after agent settlement](./archive/260922-1641-finalize-subagents-only-after-agent-settlement/plan.md) | work-item | completed | 2026-09-22 |
 <!-- spec-items:archive:end -->
 
 ## Templates
