@@ -123,3 +123,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/overview.md`, `wiki/architecture.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
 - Verification: the Pi 0.87.0 dependency graph, all 222 model-free unit tests, 9 tmux surface tests, and package contents passed before the durable guidance update.
 - Notes: `agent_end` remains a recoverable waiting boundary; only `agent_settled` records terminal auto-exit activity. `wiki/state.md` was unchanged because no ingest, lint, dedupe, or Git checkpoint advanced. The model-consuming lifecycle check remains separately approval-gated.
+
+## [2026-09-25] update | Antigravity harness contract
+
+- Trigger: implementation of `260925-1525-add-antigravity-harness-support` added a third, read-only external harness with exact completed-conversation continuation.
+- Inputs: `pi-extension/subagents/agy.ts`, `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`, focused tests, and the active plan.
+- Wiki pages changed: `wiki/architecture.md`, `wiki/map.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
+- Verification: source claims were compared with the implementation and focused model-free tests; full safe verification and independent reviews are recorded in the work-item verification artifact.
+- Notes: no external dotfiles or AGY settings were changed. `wiki/state.md` was unchanged because no ingest, lint, dedupe, or Git checkpoint advanced. Real prompt-free reads and exact live-model resume remain explicitly unverified without separate approval.

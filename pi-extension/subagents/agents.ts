@@ -15,6 +15,7 @@ import {
   statSync,
   type Dirent,
 } from "node:fs";
+import { translateAgyTools } from "./agy.ts";
 import {
   basename,
   dirname,
@@ -29,7 +30,7 @@ import {
 export type AgentSource = "global" | "project";
 export type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
 export type SystemPromptMode = "append" | "replace";
-export type AgentCli = "pi" | "claude";
+export type AgentCli = "pi" | "claude" | "agy";
 
 export interface AgentExtensionSelector {
   package: string;
@@ -119,7 +120,7 @@ const THINKING_VALUES = new Set([
 ]);
 const SYSTEM_PROMPT_VALUES = new Set(["append", "replace"]);
 const SESSION_MODE_VALUES = new Set(["standalone", "lineage-only", "fork"]);
-const CLI_VALUES = new Set(["pi", "claude"]);
+const CLI_VALUES = new Set(["pi", "claude", "agy"]);
 const BUILTIN_TOOL_VALUES = new Set([
   "read",
   "write",
@@ -549,6 +550,37 @@ export function parseAgentDefinition(
       if (hasOwn(frontmatter, field)) {
         diagnostics.push(
           diagnostic(filePath, field, `cannot be used with cli: claude; ${field} is Pi-only`),
+        );
+      }
+    }
+  }
+  if (cli === "agy") {
+    for (const field of [
+      "extensions",
+      "skill",
+      "skills",
+      "subagent_agents",
+      "system-prompt",
+      "session-mode",
+      "auto-exit",
+      "interactive",
+    ] as const) {
+      if (hasOwn(frontmatter, field)) {
+        diagnostics.push(
+          diagnostic(filePath, field, `cannot be used with cli: agy; ${field} has no supported AGY mapping`),
+        );
+      }
+    }
+    for (const tool of builtinTools) {
+      try {
+        translateAgyTools([tool]);
+      } catch {
+        diagnostics.push(
+          diagnostic(
+            filePath,
+            "builtin-tools",
+            `entry "${tool}" cannot be used with cli: agy; supported tools: read, grep, find, ls`,
+          ),
         );
       }
     }

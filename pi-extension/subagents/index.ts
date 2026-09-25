@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import {
   isMuxAvailable,
+  isCommandAvailable,
   muxSetupHint,
   createSurface,
   sendCommand,
@@ -79,6 +80,20 @@ import {
   removeMatchingQuestionAcknowledgment,
   removeMatchingQuestionRequest,
 } from "./question-protocol.ts";
+import {
+  agyAgentDefinitionPath,
+  buildAgyAgentName,
+  buildAgyCommand,
+  parseAgyResult,
+  readAgyResumeState,
+  serializeAgyAgent,
+  translateAgyTools,
+  validateAgyReplayState,
+  writeAgyAgent,
+  writeAgyResumeState,
+  type AgyResumeState,
+  type AgyUsage,
+} from "./agy.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -468,22 +483,31 @@ function resolveResultPresentation(
     | "errorMessage"
     | "interrupted"
     | "resumeSupported"
+    | "cli"
   >,
   name: string,
 ): string {
-  // Name is the persistent handle: the same name steers a running subagent or
-  // resumes a finished one, so follow-ups always reference it.
-  const sessionRef = `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
+  // Name is the persistent handle. AGY only advertises a follow-up after an
+  // exact conversation snapshot was successfully persisted.
+  const sessionRef = result.cli === "agy" && result.resumeSupported === false
+    ? ""
+    : `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
 
   if (result.interrupted) {
     const isResumable = result.resumeSupported !== false;
     const preservedState = isResumable
-      ? "Its running entry was removed and its Pi session was preserved. "
+      ? result.cli === "agy"
+        ? "Its running entry was removed and its exact prior AGY conversation snapshot was preserved. "
+        : "Its running entry was removed and its Pi session was preserved. "
       : "Its running entry was removed. ";
     const recovery = isResumable
-      ? `Use subagent_message with the same name to resume it; the interrupted message may ` +
-        "already have been accepted, so review the session before replaying work."
-      : "Claude Code sessions cannot be resumed through subagent_message.";
+      ? result.cli === "agy"
+        ? "Use subagent_message with the same name to continue the last successfully persisted AGY conversation."
+        : `Use subagent_message with the same name to resume it; the interrupted message may ` +
+          "already have been accepted, so review the session before replaying work."
+      : result.cli === "agy"
+        ? "No valid AGY conversation snapshot was persisted, so same-name resume is unavailable."
+        : "Claude Code sessions cannot be resumed through subagent_message.";
     return (
       `Sub-agent "${name}" was interrupted because its tmux pane disappeared. ` +
       preservedState + recovery + (isResumable ? sessionRef : "")
@@ -491,10 +515,14 @@ function resolveResultPresentation(
   }
 
   if (result.errorMessage) {
-    // Auto-retry exhausted or other agent-loop error. The subagent did not
-    // produce a usable result — surface the underlying provider/network
-    // failure so the orchestrator can decide whether to retry, resume, or
-    // change approach instead of silently treating the run as completed.
+    if (result.cli === "agy") {
+      return (
+        `AGY sub-agent "${name}" failed after ${formatElapsed(result.elapsed)}.\n\n` +
+        `Error: ${result.errorMessage}\n\n` +
+        `No successful AGY result or new resumable conversation state was recorded.`
+      );
+    }
+    // Auto-retry exhausted or other Pi agent-loop error.
     return (
       `Sub-agent "${name}" failed after ${formatElapsed(result.elapsed)} ` +
       `(provider/agent error — auto-retry exhausted).\n\n` +
@@ -515,11 +543,14 @@ function resolveResultPresentation(
 interface SubagentResult {
   name: string;
   task: string;
+  cli?: "pi" | "claude" | "agy";
   summary: string;
   sessionFile?: string;
   /** Canonical session header id, used for follow-ups via subagent_message. */
   sessionId?: string;
   claudeSessionId?: string;
+  agyConversationId?: string;
+  agyUsage?: AgyUsage | null;
   exitCode: number;
   elapsed: number;
   error?: string;
@@ -527,8 +558,10 @@ interface SubagentResult {
   errorMessage?: string;
   /** True when the externally owned tmux pane disappeared before completion. */
   interrupted?: boolean;
-  /** Whether an interrupted child can resume through subagent_message. */
+  /** Whether this child can resume through subagent_message. */
   resumeSupported?: boolean;
+  /** Best-effort persistence diagnostic after a valid external result. */
+  persistenceError?: string;
   /** Aggregate usage/model/tool stats parsed from the completed session file. */
   stats?: SessionStats;
 }
@@ -553,8 +586,12 @@ interface RunningSubagent {
     error?: string;
   };
   abortController?: AbortController;
-  cli?: string;
+  cli?: "pi" | "claude" | "agy";
   sentinelFile?: string;
+  agyStdoutFile?: string;
+  agyStderrFile?: string;
+  agyStateFile?: string;
+  agyRegistryPersisted?: boolean;
   statusState: SubagentStatusState;
   /** Serializes acknowledgment for an idle waiting child so one activity
    * advance cannot confirm two concurrently submitted generic replies. */
@@ -676,13 +713,15 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
 
   for (const agent of agents) {
     const elapsed = formatElapsedMMSS(agent.startTime);
-    const agentTag = agent.agent ? ` (${agent.agent})` : "";
+    const harnessTag = agent.cli === "agy" ? "agy" : null;
+    const tags = [agent.agent, harnessTag].filter((tag): tag is string => !!tag);
+    const agentTag = tags.length > 0 ? ` (${tags.join(" · ")})` : "";
     const snapshot = classifyStatus(agent.statusState, Date.now());
     const icon = widgetIcon(snapshot.kind);
     const left = ` ${icon} ${elapsed}  ${agent.name}${agentTag} `;
     const right = statusConfig.enabled
       ? formatWidgetRightLabel(snapshot)
-      : agent.cli === "claude"
+      : agent.cli === "claude" || agent.cli === "agy"
         ? " running… "
         : " starting… ";
 
@@ -769,6 +808,7 @@ interface PreparedAgentSandbox {
 }
 
 interface PreparedAgentLaunch {
+  harness: "pi" | "claude" | "agy";
   effectiveModel?: string;
   effectiveSkills: readonly string[];
   effectiveThinking?: AgentDefinition["thinking"];
@@ -784,6 +824,7 @@ interface PreparedAgentLaunch {
   loadout: SubagentLoadout | null;
   capabilities: PreparedAgentSandbox;
   capabilityEnvironment: string[];
+  agyNativeTools: string[];
 }
 
 function prepareAgentSandbox(
@@ -868,7 +909,16 @@ function prepareAgentLaunch(
     sandbox,
     grantSpawning ? agent.subagentAgents : [],
   );
-  const loadout: SubagentLoadout | null = agent.cli === "claude" ? null : {
+  const harness = agent.cli ?? "pi";
+  let agyNativeTools: string[] = [];
+  if (harness === "agy") {
+    try {
+      agyNativeTools = translateAgyTools(sandbox.builtinTools);
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  const loadout: SubagentLoadout | null = harness !== "pi" ? null : {
     version: 1,
     capabilityMode: "extension-grants",
     agent: normalizedParams.agent ?? null,
@@ -904,6 +954,7 @@ function prepareAgentLaunch(
 
   return {
     launch: {
+      harness,
       effectiveModel,
       effectiveSkills,
       effectiveThinking,
@@ -919,6 +970,7 @@ function prepareAgentLaunch(
       loadout,
       capabilities: sandbox,
       capabilityEnvironment,
+      agyNativeTools,
     },
   };
 }
@@ -1130,7 +1182,7 @@ function observeRunningSubagent(
   readActivity: (activityFile: string, runningChildId: string) => ActivityReadResult =
     readSubagentActivityFile,
 ) {
-  if (running.cli === "claude") return;
+  if (running.cli !== undefined && running.cli !== "pi") return;
 
   const activityFile = running.activityFile;
   const read: ActivityReadResult = activityFile
@@ -1398,6 +1450,15 @@ async function handleSubagentSteer(
   }
 
   const running = resolved.running;
+  if (running.cli === "agy") {
+    const err =
+      `Active steering is unsupported for AGY subagent "${running.name}". ` +
+      `Wait for its one-shot run to finish, then use the same name to continue the persisted conversation.`;
+    return {
+      content: [{ type: "text" as const, text: err }],
+      details: { error: err, id: running.id, name: running.name, status: "unsupported" },
+    };
+  }
   const now = options.now ?? Date.now;
   const observedAt = now();
   observeRunningSubagent(running, observedAt, options.readActivity);
@@ -1689,6 +1750,7 @@ async function launchSubagent(
   const startTime = Date.now();
   const id = randomUUID();
   const {
+    harness,
     effectiveModel,
     effectiveSkills,
     effectiveInteractive,
@@ -1701,12 +1763,104 @@ async function launchSubagent(
     fullTask,
     loadout,
     capabilityEnvironment,
+    agyNativeTools,
   } = prepared;
 
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile) throw new Error("No session file");
   const sessionId = ctx.sessionManager.getSessionId();
   const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
+
+  // AGY is an artifact-backed one-shot external harness. Build and validate its
+  // complete capability and replay contract before creating a tmux pane.
+  if (harness === "agy") {
+    const agentRoot = join(artifactDir, "agy", "workspaces", id);
+    const agentName = buildAgyAgentName(agentDefs.name, id);
+    const description = agentDefs.description?.trim() || `Pi subagent profile ${agentDefs.name}`;
+    const identity = agentDefs.body?.trim();
+    if (!identity) throw new Error(`AGY agent "${agentDefs.name}" has no identity body`);
+    const agentMarkdown = serializeAgyAgent({
+      name: agentName,
+      description,
+      nativeTools: agyNativeTools,
+      identity,
+    });
+    const taskFile = join(artifactDir, "agy", "tasks", `${id}.txt`);
+    const stdoutFile = join(artifactDir, "agy", "results", `${id}.json`);
+    const stderrFile = join(artifactDir, "agy", "results", `${id}.stderr.txt`);
+    const stateFile = join(artifactDir, "agy", "state", `${id}.json`);
+    mkdirSync(dirname(taskFile), { recursive: true });
+    mkdirSync(dirname(stdoutFile), { recursive: true });
+    writeFileSync(taskFile, params.task, { encoding: "utf8", mode: 0o600 });
+    writeFileSync(stdoutFile, "", { encoding: "utf8", mode: 0o600 });
+    writeFileSync(stderrFile, "", { encoding: "utf8", mode: 0o600 });
+    writeAgyAgent(agentRoot, agentName, agentMarkdown);
+    const agyState: AgyResumeState = {
+      version: 1,
+      harness: "agy",
+      conversationId: null,
+      profileName: agentDefs.name,
+      runtimeName: params.name,
+      description,
+      cwd: resolve(targetCwdForSession),
+      model: effectiveModel ?? null,
+      effort: prepared.effectiveThinking ?? null,
+      identity,
+      logicalTools: [...prepared.capabilities.builtinTools],
+      nativeTools: [...agyNativeTools],
+      agentRoot: resolve(agentRoot),
+      agentName,
+      agentMarkdown,
+    };
+    writeAgyResumeState(stateFile, agyState);
+    const replayError = validateAgyReplayState(agyState);
+    if (replayError) throw new Error(`Cannot launch AGY agent safely: ${replayError}`);
+    const definitionPath = agyAgentDefinitionPath(agentRoot, agentName);
+    if (!isExistingFile(definitionPath)) throw new Error(`Generated AGY agent is missing: ${definitionPath}`);
+
+    const surfacePreCreated = !!options?.surface;
+    const surface = options?.surface ?? createSurface(params.name);
+    if (!surfacePreCreated) {
+      await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
+    }
+    const agyCommand = buildAgyCommand({
+      agentRoot,
+      agentName,
+      taskFile,
+      stdoutFile,
+      stderrFile,
+      model: effectiveModel ?? null,
+      effort: prepared.effectiveThinking ?? null,
+    });
+    const command = `cd ${shellEscape(agyState.cwd)} && ${agyCommand}`;
+    const launchScriptFile = join(artifactDir, "subagent-scripts", `${agentName}.sh`);
+    sendLongCommand(surface, command, {
+      scriptPath: launchScriptFile,
+      scriptPreamble: [
+        `# AGY subagent launch script for ${params.name}`,
+        `# Generated: ${new Date().toISOString()}`,
+        `# Surface: ${surface}`,
+      ].join("\n"),
+    });
+    const running: RunningSubagent = {
+      id,
+      name: params.name,
+      task: params.task,
+      agent: params.agent,
+      surface,
+      startTime,
+      sessionFile: stdoutFile,
+      launchScriptFile,
+      cli: "agy",
+      agyStdoutFile: stdoutFile,
+      agyStderrFile: stderrFile,
+      agyStateFile: stateFile,
+      interactive: false,
+      statusState: createStatusState({ source: "agy", startTimeMs: startTime }),
+    };
+    runningSubagents.set(id, running);
+    return running;
+  }
 
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
 
@@ -2006,6 +2160,12 @@ function deliverPendingQuestion(running: RunningSubagent): void {
   );
 }
 
+function hasValidAgyResumeSnapshot(stateFile: string | undefined): boolean {
+  if (!stateFile) return false;
+  const state = readAgyResumeState(stateFile);
+  return !!state?.conversationId && validateAgyReplayState(state) === null;
+}
+
 function cleanupRunningQuestion(running: RunningSubagent): void {
   const pending = running.pendingQuestion;
   if (pending) {
@@ -2030,6 +2190,7 @@ async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
   poll: typeof pollForExit = pollForExit,
+  close: (surface: string) => void = closeSurface,
 ): Promise<SubagentResult> {
   const { name, task, surface, startTime, sessionFile } = running;
 
@@ -2057,8 +2218,90 @@ async function watchSubagent(
         exitCode: 1,
         elapsed,
         error: "interrupted",
+        cli: running.cli,
         interrupted: true,
-        resumeSupported: running.cli !== "claude",
+        resumeSupported: running.cli === "agy"
+          ? hasValidAgyResumeSnapshot(running.agyStateFile)
+          : running.cli !== "claude",
+      };
+    }
+
+    if (running.cli === "agy") {
+      const stdout = running.agyStdoutFile && existsSync(running.agyStdoutFile)
+        ? readFileSync(running.agyStdoutFile, "utf8")
+        : "";
+      const stderr = running.agyStderrFile && existsSync(running.agyStderrFile)
+        ? readFileSync(running.agyStderrFile, "utf8")
+        : "";
+      const parsed = parseAgyResult(stdout, stderr);
+      close(surface);
+
+      if (!parsed.ok || result.exitCode !== 0) {
+        const failure = parsed.ok
+          ? `AGY exited with code ${result.exitCode} after returning a success envelope`
+          : parsed.error;
+        runningSubagents.delete(running.id);
+        return {
+          name,
+          task,
+          cli: "agy",
+          summary: failure,
+          sessionFile,
+          exitCode: result.exitCode === 0 ? 1 : result.exitCode,
+          elapsed,
+          errorMessage: failure,
+          resumeSupported: false,
+        };
+      }
+
+      let persistenceError: string | undefined;
+      let resumeSupported = false;
+      if (running.agyRegistryPersisted === false) {
+        persistenceError = "AGY result completed, but its same-name registry entry could not be persisted";
+      } else if (running.agyStateFile) {
+        const state = readAgyResumeState(running.agyStateFile);
+        if (state) {
+          try {
+            writeAgyResumeState(running.agyStateFile, {
+              ...state,
+              conversationId: parsed.conversationId,
+            });
+            resumeSupported = true;
+          } catch (error) {
+            persistenceError = `AGY result completed, but exact resume state could not be persisted: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        } else {
+          persistenceError = "AGY result completed, but its strict resume snapshot is missing or malformed";
+        }
+      } else {
+        persistenceError = "AGY result completed, but no resume snapshot path was recorded";
+      }
+
+      const usage = parsed.usage;
+      const stats: SessionStats | undefined = usage ? {
+        model: readAgyResumeState(running.agyStateFile ?? "")?.model ?? null,
+        toolCount: 0,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheWriteTokens: 0,
+        contextTokens: usage.totalTokens,
+        cost: 0,
+      } : undefined;
+      runningSubagents.delete(running.id);
+      return {
+        name,
+        task,
+        cli: "agy",
+        summary: persistenceError ? `${parsed.response}\n\n${persistenceError}.` : parsed.response,
+        sessionFile,
+        agyConversationId: parsed.conversationId,
+        agyUsage: parsed.usage,
+        exitCode: 0,
+        elapsed,
+        resumeSupported,
+        ...(persistenceError ? { persistenceError } : {}),
+        ...(stats ? { stats } : {}),
       };
     }
 
@@ -2092,7 +2335,7 @@ async function watchSubagent(
         try { unlinkSync(running.sentinelFile + ".transcript"); } catch {}
       }
 
-      closeSurface(surface);
+      close(surface);
       cleanupRunningQuestion(running);
       runningSubagents.delete(running.id);
 
@@ -2121,7 +2364,7 @@ async function watchSubagent(
     const stats = existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
     const subagentSessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
 
-    closeSurface(surface);
+    close(surface);
     cleanupRunningQuestion(running);
     runningSubagents.delete(running.id);
 
@@ -2138,7 +2381,7 @@ async function watchSubagent(
     };
   } catch (err: any) {
     try {
-      closeSurface(surface);
+      close(surface);
     } catch {}
     cleanupRunningQuestion(running);
     runningSubagents.delete(running.id);
@@ -2147,20 +2390,28 @@ async function watchSubagent(
       return {
         name,
         task,
+        cli: running.cli,
         summary: "Subagent cancelled.",
         exitCode: 1,
         elapsed: Math.floor((Date.now() - startTime) / 1000),
         error: "cancelled",
         sessionFile,
+        resumeSupported: running.cli === "agy"
+          ? hasValidAgyResumeSnapshot(running.agyStateFile)
+          : running.cli !== "claude",
       };
     }
     return {
       name,
       task,
+      cli: running.cli,
       summary: `Subagent error: ${err?.message ?? String(err)}`,
       exitCode: 1,
       elapsed: Math.floor((Date.now() - startTime) / 1000),
       error: err?.message ?? String(err),
+      resumeSupported: running.cli === "agy"
+        ? hasValidAgyResumeSnapshot(running.agyStateFile)
+        : running.cli !== "claude",
     };
   }
 }
@@ -2300,6 +2551,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
+        // Validate external executable availability before any pane is created.
+        if (preparedLaunch.launch.harness === "agy" && !isCommandAvailable("agy")) {
+          const err =
+            `Agent "${agentDefs.name}" requires the Antigravity CLI executable \`agy\`, ` +
+            `but it is not available on PATH. Install or expose agy and retry; no fallback was launched.`;
+          return {
+            content: [{ type: "text", text: err }],
+            details: { error: "agy not available", agent: agentDefs.name },
+          };
+        }
+
         // Validate prerequisites (need mux + a session file to derive the
         // artifact dir that hosts this session's name registry).
         if (!isMuxAvailable()) {
@@ -2347,10 +2609,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Persist name → session so subagent_message({ name }) can resume this
         // subagent after it finishes (and after a pi restart). Done at launch,
         // not completion, so the handle exists even if the parent dies mid-run.
-        registerName(parentArtifactDir, running.name, {
-          sessionFile: running.sessionFile,
-          sessionId: getSessionId(running.sessionFile),
-        });
+        if (running.cli === "agy") {
+          if (!running.agyStateFile) throw new Error("AGY launch did not produce a resume snapshot path");
+          running.agyRegistryPersisted = registerName(parentArtifactDir, running.name, {
+            harness: "agy",
+            stateFile: running.agyStateFile,
+          });
+        } else {
+          registerName(parentArtifactDir, running.name, {
+            sessionFile: running.sessionFile,
+            sessionId: getSessionId(running.sessionFile),
+          });
+        }
 
         // Create a separate AbortController for the watcher
         // (the tool's signal completes when we return)
@@ -2377,6 +2647,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   name: running.name,
                   task: running.task,
                   agent: running.agent,
+                  harness: running.cli ?? "pi",
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
                   sessionFile: result.sessionFile,
@@ -2384,6 +2655,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
                   ...(result.interrupted ? { interrupted: true } : {}),
                   ...(result.claudeSessionId ? { claudeSessionId: result.claudeSessionId } : {}),
+                  ...(result.agyConversationId ? { agyConversationId: result.agyConversationId } : {}),
+                  ...(result.agyUsage ? { agyUsage: result.agyUsage } : {}),
+                  ...(result.persistenceError ? { persistenceError: result.persistenceError } : {}),
                   ...(result.stats ? { stats: result.stats } : {}),
                 },
               },
@@ -2422,6 +2696,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             agent: params.agent,
             sessionFile: running.sessionFile,
             launchScriptFile: running.launchScriptFile,
+            harness: running.cli ?? "pi",
             status: "started",
           },
         };
@@ -2665,6 +2940,148 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               ? `Known subagents: ${known.join(", ")}.`
               : "No subagents have been spawned in this session yet.");
           return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+        }
+
+        if ("harness" in entry) {
+          const state = readAgyResumeState(entry.stateFile);
+          if (!state) {
+            const err = `Cannot safely resume "${requestedName}": its AGY snapshot is missing or malformed.`;
+            return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+          }
+          if (state.runtimeName !== requestedName) {
+            const err = `Cannot safely resume "${requestedName}": its AGY snapshot belongs to runtime name "${state.runtimeName}".`;
+            return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+          }
+          if (!state.conversationId) {
+            const err = `Cannot resume "${requestedName}": no successful AGY conversation ID was persisted.`;
+            return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+          }
+          const replayError = validateAgyReplayState(state);
+          if (replayError) {
+            const err = `Cannot safely resume "${requestedName}": ${replayError}.`;
+            return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+          }
+          if (!isCommandAvailable("agy")) {
+            const err = "Cannot resume AGY: the `agy` executable is not available on PATH.";
+            return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+          }
+          const resumeClaim = claimResumeSession(entry.stateFile);
+          if ("error" in resumeClaim) {
+            return { content: [{ type: "text" as const, text: resumeClaim.error }], details: { error: resumeClaim.error } };
+          }
+
+          const artifactDir = getArtifactDir(
+            ctx.sessionManager.getSessionDir(),
+            ctx.sessionManager.getSessionId(),
+          );
+          const taskFile = join(artifactDir, "agy", "resume", `${id}.txt`);
+          const stdoutFile = join(artifactDir, "agy", "results", `${id}.json`);
+          const stderrFile = join(artifactDir, "agy", "results", `${id}.stderr.txt`);
+          mkdirSync(dirname(taskFile), { recursive: true });
+          mkdirSync(dirname(stdoutFile), { recursive: true });
+          writeFileSync(taskFile, message, { encoding: "utf8", mode: 0o600 });
+          writeFileSync(stdoutFile, "", { encoding: "utf8", mode: 0o600 });
+          writeFileSync(stderrFile, "", { encoding: "utf8", mode: 0o600 });
+
+          let surface: string | null = null;
+          let running: RunningSubagent;
+          let launchScriptFile = "";
+          try {
+            surface = createSurface(name);
+            await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
+            const command = `cd ${shellEscape(state.cwd)} && ${buildAgyCommand({
+              agentRoot: state.agentRoot,
+              agentName: state.agentName,
+              taskFile,
+              stdoutFile,
+              stderrFile,
+              model: state.model,
+              effort: state.effort,
+              conversationId: state.conversationId,
+            })}`;
+            launchScriptFile = join(artifactDir, "subagent-scripts", `${state.agentName}-resume-${id}.sh`);
+            sendLongCommand(surface, command, {
+              scriptPath: launchScriptFile,
+              scriptPreamble: [
+                `# AGY subagent resume script for ${name}`,
+                `# Generated: ${new Date().toISOString()}`,
+                `# Conversation: ${state.conversationId}`,
+                `# Surface: ${surface}`,
+              ].join("\n"),
+            });
+            running = {
+              id,
+              name,
+              task: message,
+              agent: state.profileName,
+              surface,
+              startTime,
+              sessionFile: stdoutFile,
+              launchScriptFile,
+              cli: "agy",
+              agyStdoutFile: stdoutFile,
+              agyStderrFile: stderrFile,
+              agyStateFile: entry.stateFile,
+              interactive: false,
+              statusState: createStatusState({ source: "agy", startTimeMs: startTime }),
+            };
+            runningSubagents.set(id, running);
+          } catch (error) {
+            if (surface) {
+              try { closeSurface(surface); } catch {}
+            }
+            throw error;
+          } finally {
+            resumeClaim.release();
+          }
+
+          startWidgetRefresh();
+          startStatusRefresh(pi);
+          const watcherAbort = new AbortController();
+          running.abortController = watcherAbort;
+          watchSubagent(running, watcherAbort.signal)
+            .then((result) => {
+              updateWidget();
+              const presentation = resolveResultPresentation(result, name);
+              pi.sendMessage(
+                {
+                  customType: "subagent_result",
+                  content: presentation,
+                  display: true,
+                  details: {
+                    name,
+                    task: message,
+                    agent: state.profileName,
+                    harness: "agy",
+                    exitCode: result.exitCode,
+                    elapsed: result.elapsed,
+                    ...(result.agyConversationId ? { agyConversationId: result.agyConversationId } : {}),
+                    ...(result.agyUsage ? { agyUsage: result.agyUsage } : {}),
+                    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+                    ...(result.interrupted ? { interrupted: true } : {}),
+                    ...(result.persistenceError ? { persistenceError: result.persistenceError } : {}),
+                    ...(result.stats ? { stats: result.stats } : {}),
+                  },
+                },
+                { triggerTurn: true, deliverAs: "steer" },
+              );
+            })
+            .catch((error) => {
+              updateWidget();
+              pi.sendMessage(
+                {
+                  customType: "subagent_result",
+                  content: `AGY resume error: ${error instanceof Error ? error.message : String(error)}`,
+                  display: true,
+                  details: { name, error: error instanceof Error ? error.message : String(error) },
+                },
+                { triggerTurn: true, deliverAs: "steer" },
+              );
+            });
+          return {
+            content: [{ type: "text" as const, text: `AGY conversation "${name}" resumed.` }],
+            details: { id, name, launchScriptFile, harness: "agy", status: "started" },
+          };
         }
 
         const sessionPath = entry.sessionFile;
@@ -2945,8 +3362,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           ? theme.fg("error", "✗")
           : theme.fg("success", "✓");
         const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
+        const harnessTag = details.harness === "agy" ? theme.fg("dim", " [agy]") : "";
         const modelTag = stats?.model ? theme.fg("dim", ` (${stats.model})`) : "";
-        const titleSegment = `${icon} ${theme.fg("toolTitle", theme.bold(name))}${agentTag}${modelTag} ${theme.fg("dim", "—")} `;
+        const titleSegment = `${icon} ${theme.fg("toolTitle", theme.bold(name))}${agentTag}${harnessTag}${modelTag} ${theme.fg("dim", "—")} `;
 
         // Success: icon already conveys "completed", so show "N tools · duration"
         // like the in-process extension. Failure: surface the failure reason.

@@ -44,8 +44,8 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | --- | --- | --- |
 | `name` | String without commas, path separators, or control characters, and not `.` or `..` | Trimmed. When omitted, the trimmed filename without `.md` is used. The declared name may differ from the filename. |
 | `description` | Non-empty string | Optional text shown by `subagents_list`. |
-| `model` | Non-empty string | Optional child model. When omitted, the child Pi process uses its configured default. |
-| `builtin-tools` | Comma-delimited string or YAML string array containing only `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, or `ls` | Empty list, which grants no Pi built-ins. Pi children still receive `ask_question`. See [Tool isolation](#tool-isolation). |
+| `model` | Non-empty string | Optional child model. Pi uses its configured default when omitted; AGY uses its own default. |
+| `builtin-tools` | Comma-delimited string or YAML string array. Pi accepts `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, or `ls`; AGY accepts only `read`, `grep`, `find`, or `ls`. | Empty list. Pi children still receive `ask_question`; AGY receives no native tools. See [Tool isolation](#tool-isolation). |
 | `extensions` | YAML array of mappings containing exactly `package` and optional `paths` | Empty list. Selects installed, enabled extension resources from exact configured Pi package sources. See [Package extension selection](#package-extension-selection). |
 | `skill` | Comma-delimited string or YAML string array | Empty list of skill prompts. Alias of `skills`. |
 | `skills` | Comma-delimited string or YAML string array | Empty list. Do not use together with `skill`. |
@@ -56,7 +56,7 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `system-prompt` | `append` or `replace` | When omitted, the body is inserted into the task wrapper. Otherwise the body is passed through the corresponding Pi system-prompt flag. |
 | `session-mode` | `standalone`, `lineage-only`, or `fork` | `standalone`. See [Session modes](#session-modes). |
 | `cwd` | Non-empty string | Active context cwd. Absolute values are used directly. Relative profile values resolve from the global Pi agent directory; a runtime `cwd` override resolves from the active context cwd. |
-| `cli` | `pi` or `claude` | `pi`. See [Claude CLI limitations](#claude-cli-limitations). |
+| `cli` | `pi`, `claude`, or `agy` | `pi`. See [Antigravity CLI](#antigravity-cli) and [Claude CLI limitations](#claude-cli-limitations). |
 | `disable-model-invocation` | YAML boolean | `false`. When true, hides the profile from `subagents_list`; an exact permitted name remains directly spawnable. |
 
 Only actual YAML booleans are accepted. For example, `auto-exit: true` is valid and `auto-exit: "true"` is not.
@@ -100,8 +100,9 @@ Resolution is read-only. It does not install or update packages, access the netw
 
 - With `system-prompt: append`, the body is written to a private launch artifact and passed with `--append-system-prompt`.
 - With `system-prompt: replace`, it is passed with `--system-prompt`.
-- Without `system-prompt`, the body is prepended to the wrapped task for `standalone` and `lineage-only` modes, and to the direct task for `fork` mode.
-- In `fork` mode, inherited conversation context supplies the surrounding context and the body plus task are delivered directly.
+- Without `system-prompt`, the body is prepended to the wrapped task for Pi `standalone` and `lineage-only` modes, and to the direct task for Pi `fork` mode.
+- In Pi `fork` mode, inherited conversation context supplies the surrounding context and the body plus task are delivered directly.
+- For `cli: agy`, the body is always the generated primary agent's system prompt. `system-prompt` is unsupported.
 
 ## Session modes
 
@@ -111,7 +112,9 @@ Resolution is read-only. It does not install or update packages, access the netw
 
 ## Tool isolation
 
-Every new named Pi profile launches with `--no-extensions --no-builtin-tools` and no strict `--tools` argument. Missing or empty `builtin-tools` therefore means no Pi built-ins, not Pi's default set. The accepted built-in vocabulary is `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`.
+Every new named Pi profile launches with `--no-extensions --no-builtin-tools` and no strict `--tools` argument. Missing or empty `builtin-tools` therefore means no Pi built-ins, not Pi's default set. The accepted Pi vocabulary is `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`.
+
+AGY profiles use a separate native capability contract. Only `read`, `grep`, `find`, and `ls` are accepted, translated in selected order to `view_file`, `grep_search`, `find_by_name`, and `list_dir`. Missing or empty `builtin-tools` writes an empty native `tools` list. Mutation, shell, PowerShell, permission-request, web, MCP, browser, image, scheduler, and nested-agent tools are not exposed.
 
 The package loads its protected runtime control first, its spawning control second only when nesting is granted, selected profile extensions in their resolved order, and a tool-free capability activation control last. Before the first model request, activation enables the selected built-ins plus tools registered by the declared extensions. Later extension tools are activated at subsequent pre-model lifecycle checkpoints. Profile extensions may override built-in tool names, while first-loaded custom-tool registrations win duplicate custom names. The protected framework controls retain precedence over ordinary profile extensions.
 
@@ -145,6 +148,56 @@ Each new Pi launch stores a strict version 1 `extension-grants` snapshot beside 
 Resume does not reread the profile or package settings. It reconstructs the protected framework controls, preserves profile extension order, and uses the current installed contents at valid stored paths. Missing, malformed, relative, non-canonical, duplicate-canonical, reserved-framework, or nesting-inconsistent state fails closed rather than falling back to broader defaults.
 
 Existing valid strict snapshots remain a separate legacy shape with `toolAllowlist`. They continue to resume with `--no-extensions --tools` and their stored extension paths, and reading them does not rewrite them into the new format.
+
+A successful AGY result stores a separate strict tagged snapshot referenced from the same name registry. It contains the exact conversation ID, cwd, model, effort, identity, logical and native tools, and generated primary-agent contract. Resume never rereads the mutable source profile. It validates the stored state and generated agent, reserves the snapshot against concurrent launch, and invokes `agy --conversation <exact-id>`. A successful continuation atomically replaces the stored conversation ID. Missing, malformed, mismatched, unavailable, or unregistered state fails before pane creation.
+
+## Antigravity CLI
+
+`cli: agy` requires `agy` on `PATH` and launches exactly one direct primary process from the resolved profile or runtime cwd:
+
+```markdown
+---
+name: scout
+cli: agy
+model: gemini-3.8-flash
+thinking: medium
+builtin-tools: [read, grep, find, ls]
+---
+
+Inspect the codebase and report concise evidence without making changes.
+```
+
+The profile body becomes the system prompt of a collision-resistant generated custom agent with `mainAgent: true`, `subagent: false`, and exactly the translated native tool list. The generated definition, task, JSON result, stderr, resume messages, state, and launch scripts live under the parent Pi session artifact directory. Only the generated-agent workspace is passed through `--add-dir`; neither the target repository nor global AGY configuration is modified.
+
+AGY runs with `--output-format json`, the effective `--model`, and profile `thinking` mapped directly to `--effort`. AGY owns model/effort compatibility errors. The extension never passes `--dangerously-skip-permissions`. With no user permission override, AGY's workspace-read defaults allow the four granted reads without prompting; explicit user `ask` or `deny` rules can supersede that default and are not bypassed.
+
+AGY profiles accept only `name`, `description`, `model`, `thinking`, `cwd`, the Markdown body, `disable-model-invocation`, `cli`, and `builtin-tools`. Explicit `extensions`, `skill` or `skills`, `subagent_agents`, `system-prompt`, `session-mode`, `auto-exit`, and `interactive` fields are invalid, including empty values. `write`, `edit`, `bash`, and `powershell` are also invalid AGY built-ins.
+
+AGY is one-shot. `subagent_message` rejects active steering without pane input. After successful completion, the same runtime name starts a one-shot continuation from the exact persisted conversation. Terminal `ERROR`, `CANCELLED`, `INTERRUPTED`, waiting/unknown status, malformed JSON, empty response, missing conversation ID, non-zero exit, and bounded stderr diagnostics are surfaced as failures without Pi or Claude fallback. A missing pane advertises resume only when a valid prior conversation snapshot and its stored cwd and generated agent remain replayable.
+
+For existing profiles, replace the frontmatter as shown and keep the existing body after the closing delimiter unchanged:
+
+```yaml
+# scout
+name: scout
+description: Read-only codebase scout
+cli: agy
+model: gemini-3.8-flash
+thinking: medium
+builtin-tools: [read, grep, find, ls]
+```
+
+```yaml
+# flash-reviewer
+name: flash-reviewer
+description: Read-only focused reviewer
+cli: agy
+model: gemini-3.8-flash
+thinking: high
+builtin-tools: [read, grep, find, ls]
+```
+
+Remove the Pi provider extension and every unsupported lifecycle field listed above. The package does not edit or package external dotfiles.
 
 ## Claude CLI limitations
 

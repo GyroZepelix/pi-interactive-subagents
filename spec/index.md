@@ -26,6 +26,7 @@ Repository-local planning and execution artifacts.
 | [Fix frozen subagent reply delivery](./archive/260914-1641-fix-frozen-subagent-reply-delivery/plan.md) | work-item | completed | 2026-09-14 |
 | [Stop child generation after ask_question](./archive/260916-2339-stop-child-generation-after-ask-question/plan.md) | work-item | completed | 2026-09-17 |
 | [Finalize subagents only after agent settlement](./archive/260922-1641-finalize-subagents-only-after-agent-settlement/plan.md) | work-item | completed | 2026-09-22 |
+| [Add Antigravity harness support](./archive/260925-1525-add-antigravity-harness-support/plan.md) | work-item | completed | 2026-09-25 |
 <!-- spec-items:archive:end -->
 
 ## Templates

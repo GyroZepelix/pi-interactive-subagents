@@ -16,6 +16,8 @@ Resolved profile extension files are preflighted before pane creation. This pack
 
 Every spawn must name a valid discoverable agent selected from the active trusted context. Child commands always override `PI_SUBAGENT_ALLOWED` with the profile's exact nested targets; a present empty value means deny all, while an undefined value is reserved for an unrestricted top-level process (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`).
 
+AGY profiles use a separate native boundary: a dedicated parent-session artifact workspace contains one generated primary agent with exactly the translated read tools, `mainAgent: true`, and `subagent: false`. Launch exposes only that workspace through `--add-dir`, uses headless JSON artifacts, and never passes `--dangerously-skip-permissions`. Default prompt-free workspace reads remain subject to explicit user AGY permission overrides (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
+
 ## Name safety
 
 Omitted runtime names are auto-suffixed across running, in-flight, and registered sessions. Explicit names are trimmed and rejected on collisions before launch, so registry entries and name-only routing cannot become ambiguous. Registry reads validate names and entries, and writes use own data properties so special names such as `__proto__` remain persistent handles instead of mutating object prototypes (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`).
@@ -26,7 +28,7 @@ New Pi profile launches persist a strict version 1 `extension-grants` snapshot c
 
 Snapshot parsing is a strict union. Reject unknown, mixed, incomplete, malformed, duplicate, relative, non-canonical, or nesting-inconsistent new snapshots. Existing valid legacy snapshots remain a separate strict `toolAllowlist` shape, replay through `--no-extensions --tools` with their stored extension paths, and are read without automatic rewriting (`pi-extension/subagents/session.ts`).
 
-Resume never re-reads profiles or package settings. It intentionally executes current contents at valid stored paths, but preflights profile and required framework files before pane creation and refuses missing, non-file, non-canonical, duplicate-canonical, or reserved-framework paths. A finished Pi session must not resume without a valid snapshot, and canonical session paths are reserved while a resume is launching so concurrent calls cannot open the same JSONL twice. Finished Claude children are not resumable (`pi-extension/subagents/index.ts`).
+Pi resume never re-reads profiles or package settings and preflights exact stored paths. AGY likewise replays only a strict snapshot containing its exact conversation ID, cwd, model, effort, identity, logical/native tools, and generated-agent content; drift or missing state fails before pane creation, and successful continuation atomically updates the conversation ID. Canonical state or session paths are reserved while launching. Finished Claude children are not resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
 
 ## Shell and live-input boundaries
 
@@ -37,7 +39,8 @@ Resume never re-reads profiles or package settings. It intentionally executes cu
 - A transient capture failure does not establish pane loss. Confirm absence before releasing the running entry; preserve Pi resume registration and keep termination or replay operator-controlled (`pi-extension/subagents/tmux.ts`, `pi-extension/subagents/index.ts`).
 - Generated task, system-prompt, and resume-message artifacts include a per-launch UUID after the sanitized runtime-name slug so concurrent distinct names cannot overwrite one another's content (`pi-extension/subagents/index.ts`).
 - A `cli: claude` profile invokes `claude --dangerously-skip-permissions`. Only explicitly trusted profiles should enable this path (`pi-extension/subagents/index.ts`).
+- AGY tasks and resume messages are private files; the launch script uses escaped paths and a quoted command substitution, so prompt contents are data rather than executable shell syntax. Running AGY messages are rejected before tmux input (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
 
 ## Runtime files
 
-Name registries use temp-file rename for atomic updates. Activity snapshots also use temp-file rename and strict schema validation. Errors in best-effort metadata writes must not turn into an unrestricted resume (`pi-extension/subagents/session.ts`, `pi-extension/subagents/activity.ts`).
+Name registries, AGY resume snapshots, and activity snapshots use temp-file rename with strict schema validation. Errors in best-effort metadata writes must not turn into an unrestricted resume; an AGY result may remain delivered but explicitly non-resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/session.ts`, `pi-extension/subagents/activity.ts`).

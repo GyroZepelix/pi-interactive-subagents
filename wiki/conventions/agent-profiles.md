@@ -20,7 +20,7 @@ An omitted `name` falls back to the filename without `.md`. Explicit names may d
 
 Require opening and closing `---` delimiters, a mapping-valued YAML frontmatter root, and a non-empty Markdown body. Use Pi's exported YAML `parseFrontmatter`, not line-oriented regular expressions. Unknown keys, malformed YAML, invalid field types, invalid enums, non-string list members, pseudo-booleans, and simultaneous `skill` plus `skills` exclude the whole profile with a file-and-field diagnostic.
 
-Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`, `skill` or `skills`, and `subagent_agents`; YAML array entries may not contain commas, and nested target entries follow effective-name validation. `extensions` is a YAML array of exact configured package sources with optional exact package-relative `paths`; selectors must stay within enabled package resources. Reject duplicate package strings and selectors, absolute or drive-qualified selectors, `.` or `..` path segments, and explicitly empty `paths`. Legacy `tools` is rejected rather than reinterpreted. Declaring `builtin-tools` or `extensions` on `cli: claude`, even with an empty value, invalidates the profile. `docs/agent-definitions.md` is the complete user-facing field and default reference.
+Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`, `skill` or `skills`, and `subagent_agents`; YAML array entries may not contain commas, and nested target entries follow effective-name validation. `extensions` is a YAML array of exact configured package sources with optional exact package-relative `paths`; selectors must stay within enabled package resources. Reject duplicate package strings and selectors, absolute or drive-qualified selectors, `.` or `..` path segments, and explicitly empty `paths`. Legacy `tools` is rejected rather than reinterpreted. Declaring `builtin-tools` or `extensions` on `cli: claude`, even with an empty value, invalidates the profile. `cli: agy` accepts only generic identity/selection fields plus `builtin-tools`; explicit Pi extensions, skills, nesting, prompt/session modes, and lifecycle fields invalidate it even when empty. AGY allows only `read`, `grep`, `find`, and `ls`. `docs/agent-definitions.md` is the complete user-facing field and default reference.
 
 ## Built-ins, extensions, and nesting
 
@@ -29,6 +29,7 @@ Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`,
 - Extension packages resolve read-only without installation, network access, or settings writes. Global profiles use global package settings only; trusted project profiles prefer the nearest project's exact source and may fall back to global settings. Missing, disabled, escaping, nonexistent, or empty selections exclude the profile before pane creation.
 - Omitting `paths` selects all enabled extension resources in Pi's resolved order. Explicit selectors preserve their order, package declarations preserve package order, and canonical duplicate files keep their first occurrence.
 - Every named Pi child still receives `ask_question`.
+- AGY maps `read`, `grep`, `find`, and `ls` in declared order to `view_file`, `grep_search`, `find_by_name`, and `list_dir`; omitted or empty tools grant none. AGY receives no Pi extensions, mutation/shell tools, permission-request tool, or nested-agent capability.
 - A non-empty `subagent_agents` grants spawning tools and pins nested targets. Spawning tool names under `builtin-tools` invalidate the profile.
 
 ## Model provider selection
@@ -40,5 +41,7 @@ Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`,
 `session-mode` defaults to `standalone`; `lineage-only` and `fork` are profile-defined rather than public tool arguments. `system-prompt: append` or `replace` routes the body through the corresponding Pi flag; without the field, the body is part of the task wrapper.
 
 `disable-model-invocation: true` hides a definition from `subagents_list` while preserving exact direct selection when otherwise permitted.
+
+For `cli: agy`, `thinking` is passed unchanged as `--effort`; AGY reports unsupported effort or model-effort combinations. The profile body becomes the generated primary-agent system prompt.
 
 When changing profile semantics, update `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `docs/agent-definitions.md`, README setup guidance, and focused tests together.

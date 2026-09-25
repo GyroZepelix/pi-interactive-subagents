@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile);
 
 const commandAvailability = new Map<string, boolean>();
 
-function hasCommand(command: string): boolean {
+export function isCommandAvailable(command: string): boolean {
   if (commandAvailability.has(command)) {
     return commandAvailability.get(command)!;
   }
@@ -45,7 +45,7 @@ function hasCommand(command: string): boolean {
  * `TMUX` is set by tmux in every process it spawns (shell or pane).
  */
 export function isTmuxAvailable(): boolean {
-  return !!process.env.TMUX && hasCommand("tmux");
+  return !!process.env.TMUX && isCommandAvailable("tmux");
 }
 
 export function isMuxAvailable(): boolean {

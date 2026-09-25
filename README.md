@@ -6,7 +6,7 @@ This fork is tmux-only.
 
 ## How it works
 
-`subagent` returns immediately after launching a child Pi session in a tmux pane. A widget tracks running children, and completion wakes the parent with the result. Auto-exit Pi children finalize only after Pi settles automatic retries, recovery, and queued continuation. Independent tool calls can launch multiple children concurrently.
+`subagent` returns immediately after launching a configured Pi, Claude Code, or Antigravity CLI (`agy`) harness in a tmux pane. A widget tracks running children, and completion wakes the parent with the result. Auto-exit Pi children finalize only after Pi settles automatic retries, recovery, and queued continuation. Independent tool calls can launch multiple children concurrently.
 
 ```text
 + Subagents --------------------------- 2 running +
@@ -27,6 +27,7 @@ The default is 500 milliseconds.
 
 - Pi 0.87.0 (the verified target)
 - tmux
+- Antigravity CLI `agy` on `PATH` for profiles using `cli: agy` (verified with 1.2.11)
 
 ## Installation
 
@@ -68,7 +69,50 @@ auto-exit: true
 Inspect the requested area and report concise findings with file references.
 ```
 
-See [Agent definitions](docs/agent-definitions.md) for the complete contract, including every field, validation, precedence, trust behavior, tool isolation, nested spawning, resume snapshots, and Claude CLI limitations.
+See [Agent definitions](docs/agent-definitions.md) for the complete contract, including every field, validation, precedence, trust behavior, tool isolation, nested spawning, resume snapshots, and external-harness limitations.
+
+### Antigravity profiles
+
+`cli: agy` runs one direct primary AGY process in headless JSON mode. Its initial capability surface is deliberately limited to `read`, `grep`, `find`, and `ls`, translated respectively to `view_file`, `grep_search`, `find_by_name`, and `list_dir`. Omitted or empty `builtin-tools` grants no AGY native tools.
+
+```markdown
+---
+name: agy-scout
+description: Read-only Antigravity scout
+cli: agy
+model: gemini-3.8-flash
+thinking: medium
+builtin-tools: [read, grep, find, ls]
+---
+
+Inspect the requested code and report evidence without changing files.
+```
+
+The extension generates a collision-resistant primary-agent definition under the parent Pi session's artifact directory and exposes only that dedicated workspace through `--add-dir`. It does not write the target repository, `~/.gemini`, AGY settings, authentication, plugins, or external profile dotfiles. It never passes `--dangerously-skip-permissions`. Under AGY's default no-override policy, granted reads inside the active workspace are prompt-free; explicit user permission rules can still deny them.
+
+To migrate existing `scout` and `flash-reviewer` profiles, replace only their frontmatter with the corresponding form below and retain each existing Markdown body unchanged:
+
+```yaml
+# scout
+name: scout
+description: Read-only codebase scout
+cli: agy
+model: gemini-3.8-flash
+thinking: medium
+builtin-tools: [read, grep, find, ls]
+```
+
+```yaml
+# flash-reviewer
+name: flash-reviewer
+description: Read-only focused reviewer
+cli: agy
+model: gemini-3.8-flash
+thinking: high
+builtin-tools: [read, grep, find, ls]
+```
+
+Remove the Pi provider `extensions`, `skill`/`skills`, `subagent_agents`, `system-prompt`, `session-mode`, `auto-exit`, and `interactive` fields; AGY rejects them rather than ignoring them. These are migration examples only—the package does not edit user dotfiles.
 
 ## Tools
 
@@ -107,8 +151,10 @@ subagent_message({ name: "inspector", message: "Also check authorization middlew
 Names are unique within one parent session and remain registered after a child finishes.
 
 - A running Pi or Claude child receives the message through a temporary tmux buffer and application-negotiated bracketed paste; the normalized message is not placed in a shell command or tmux argument.
+- A running AGY child rejects active messages without writing to its pane. Wait for the one-shot run to finish.
 - When a Pi child has a pending `ask_question`, the answer is wrapped in a private correlated envelope and delivered through the same stdin-backed tmux path. Only the matching child acknowledgment reports delivery; a timeout remains unconfirmed and never resends. Other waiting Pi messages retain activity-based confirmation, while active Pi and Claude paths report submission.
 - A finished Pi child resumes asynchronously and later reports another result.
+- A successfully completed AGY child resumes asynchronously by its exact persisted conversation ID and immutable launch-time capability snapshot. Missing, malformed, mismatched, unavailable, or concurrently claimed state fails before pane creation.
 - Pi resume replays a strictly validated launch-time capability snapshot. It does not reread the profile or package settings.
 - New snapshots retain selected built-ins and ordered canonical profile extension paths. Resume uses the current contents at those paths and is refused before pane creation if required state or files are missing, malformed, non-canonical, duplicated, or reserved.
 - Existing valid strict `toolAllowlist` snapshots remain resumable through their legacy `--tools` path and are not rewritten automatically.
@@ -122,7 +168,7 @@ Every Pi child receives `ask_question`, even when its profile has no ordinary to
 
 An unconfirmed live message is ambiguous: the child may already have accepted it. The extension never kills the pane or replays the message automatically.
 
-If a child remains unresponsive, inspect its pane and session first. To recover explicitly, find the target child pane with `tmux list-panes -a -F '#{pane_id} #{pane_title} #{pane_current_command}'`, then terminate only that child process or pane (for example, `tmux kill-pane -t %42`). Do not terminate the parent Pi pane. The watcher reports the interruption, removes the stale running entry, and preserves the registered session. After that notification, `subagent_message` with the same runtime name resumes the Pi session. Review the preserved session before deciding whether to replay any work. Finished Claude sessions remain non-resumable.
+If a child remains unresponsive, inspect its pane and session first. To recover explicitly, find the target child pane with `tmux list-panes -a -F '#{pane_id} #{pane_title} #{pane_current_command}'`, then terminate only that child process or pane (for example, `tmux kill-pane -t %42`). Do not terminate the parent Pi pane. The watcher reports the interruption and removes the stale running entry. Pi preserves its registered session for explicit same-name recovery; review it before replaying work. AGY advertises same-name recovery only when a valid earlier conversation snapshot is still replayable, so an interrupted initial AGY run is not resumable. Finished Claude sessions remain non-resumable.
 
 ## Security model
 
@@ -138,7 +184,7 @@ A declared extension is a grant to execute the complete trusted extension with t
 
 Child extension order is protected runtime control first, optional spawning control second, selected profile extensions in resolved order, and tool-free capability activation last. This keeps framework tool names protected while activating selected built-ins and extension tools before model requests. Nested spawning is granted only by a non-empty `subagent_agents` field, and `PI_SUBAGENT_ALLOWED` pins the child to those effective names. Listing spawning controls under `builtin-tools` is invalid.
 
-Project-controlled prompts are read only when `ctx.isProjectTrusted()` is true. `builtin-tools` and `extensions` are Pi-only and make a `cli: claude` profile invalid, even when explicitly empty.
+Project-controlled prompts are read only when `ctx.isProjectTrusted()` is true. `builtin-tools` and `extensions` are Pi-only for `cli: claude` and make such a profile invalid, even when explicitly empty. For `cli: agy`, `builtin-tools` is the strict native-tool allowlist; Pi extensions and lifecycle fields are unsupported and explicitly rejected.
 
 ## Runtime names
 

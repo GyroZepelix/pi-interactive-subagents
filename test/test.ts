@@ -54,6 +54,20 @@ import {
 
 import { pollForExit, shellEscape, submitText } from "../pi-extension/subagents/tmux.ts";
 import {
+  agyAgentDefinitionPath,
+  buildAgyAgentName,
+  buildAgyCommand,
+  isAgyResumeState,
+  parseAgyResult,
+  readAgyResumeState,
+  serializeAgyAgent,
+  translateAgyTools,
+  validateAgyReplayState,
+  writeAgyAgent,
+  writeAgyResumeState,
+  type AgyResumeState,
+} from "../pi-extension/subagents/agy.ts";
+import {
   advanceStatusState,
   capStatusLines,
   classifyStatus,
@@ -563,6 +577,27 @@ describe("session.ts", () => {
     });
   });
 
+  describe("AGY registry entries", () => {
+    it("round-trips tagged AGY entries without changing legacy Pi entries", () => {
+      const adir = join(dir, "art-agy");
+      const piEntry = { sessionFile: "/sessions/pi.jsonl", sessionId: "pi-id" };
+      const agyEntry = { harness: "agy" as const, stateFile: "/artifacts/agy/state.json" };
+      registerName(adir, "pi-child", piEntry);
+      registerName(adir, "agy-child", agyEntry);
+      assert.deepEqual(resolveNameInRegistry(adir, "pi-child"), piEntry);
+      assert.deepEqual(resolveNameInRegistry(adir, "agy-child"), agyEntry);
+    });
+
+    it("rejects mixed or malformed registry entries fail-closed", () => {
+      const adir = join(dir, "art-agy-invalid");
+      mkdirSync(adir, { recursive: true });
+      writeFileSync(nameRegistryPath(adir), JSON.stringify({
+        child: { harness: "agy", stateFile: "relative.json", sessionFile: "/bad" },
+      }));
+      assert.deepEqual(readNameRegistry(adir), {});
+    });
+  });
+
   describe("findLastAssistantMessage", () => {
     it("finds last assistant text", () => {
       const entries = [USER_MSG, ASSISTANT_MSG, ASSISTANT_MSG_2] as any[];
@@ -983,12 +1018,14 @@ describe("status.ts", () => {
     assert.equal(snapshot.waitingDurationText, "3m");
   });
 
-  it("uses elapsed-only fallback for claude-backed subagents", () => {
-    const state = createStatusState({ source: "claude", startTimeMs: 0 });
-    const snapshot = classifyStatus(state, 125_000);
-
-    assert.equal(snapshot.kind, "running");
-    assert.equal(snapshot.elapsedText, "2m");
+  it("uses elapsed-only fallback for external Claude and AGY subagents", () => {
+    for (const source of ["claude", "agy"] as const) {
+      const state = createStatusState({ source, startTimeMs: 0 });
+      const snapshot = classifyStatus(state, 125_000);
+      assert.equal(snapshot.kind, "running");
+      assert.equal(snapshot.elapsedText, "2m");
+      assert.equal(observeStatus(state, { snapshot: "missing" }, 130_000), state);
+    }
   });
 
   it("detects stalled transitions and recovery", () => {
@@ -2249,6 +2286,74 @@ describe("subagent discovery", () => {
     );
   });
 
+  it("accepts the strict AGY profile contract and preserves read-tool order", () => {
+    const parsed = parseAgentDefinition(
+      [
+        "---",
+        "name: agy-scout",
+        "description: Read-only scout",
+        "cli: agy",
+        "model: gemini-3.8-flash",
+        "thinking: medium",
+        "builtin-tools: [read, grep, find, ls, read]",
+        "disable-model-invocation: true",
+        "---",
+        "Inspect without changing files.",
+      ].join("\n"),
+      "/tmp/agy-scout.md",
+      "global",
+    );
+    assert.deepEqual(parsed.diagnostics, []);
+    assert.equal(parsed.agent?.cli, "agy");
+    assert.deepEqual(parsed.agent?.builtinTools, ["read", "grep", "find", "ls"]);
+    assert.deepEqual(translateAgyTools(parsed.agent?.builtinTools ?? []), [
+      "view_file", "grep_search", "find_by_name", "list_dir",
+    ]);
+  });
+
+  it("rejects every incompatible AGY field even when explicitly empty", () => {
+    for (const line of [
+      "extensions: []",
+      "skill: ''",
+      "skills: []",
+      "subagent_agents: []",
+      "system-prompt: append",
+      "session-mode: standalone",
+      "auto-exit: false",
+      "interactive: false",
+    ]) {
+      const parsed = parseAgentDefinition(
+        `---\nname: agy-invalid\ncli: agy\n${line}\n---\nbody`,
+        "/tmp/agy-invalid.md",
+        "global",
+      );
+      assert.equal(parsed.agent, null, line);
+      assert.ok(parsed.diagnostics.some((entry) => entry.field === line.split(":", 1)[0]), line);
+    }
+  });
+
+  it("rejects AGY mutation and shell built-ins while defaulting to no tools", () => {
+    const empty = parseAgentDefinition(
+      "---\nname: agy-empty\ncli: agy\n---\nbody",
+      "/tmp/agy-empty.md",
+      "global",
+    );
+    assert.deepEqual(empty.agent?.builtinTools, []);
+    assert.deepEqual(translateAgyTools([]), []);
+
+    for (const tool of ["write", "edit", "bash", "powershell"]) {
+      const parsed = parseAgentDefinition(
+        `---\nname: agy-${tool}\ncli: agy\nbuiltin-tools: [${tool}]\n---\nbody`,
+        `/tmp/agy-${tool}.md`,
+        "global",
+      );
+      assert.equal(parsed.agent, null);
+      assert.ok(parsed.diagnostics.some((entry) =>
+        entry.field === "builtin-tools" && /supported tools: read, grep, find, ls/.test(entry.message)
+      ));
+    }
+  });
+
   it("rejects Pi capability fields on Claude profiles even when empty", () => {
     for (const capability of ["builtin-tools: []", "extensions: []"]) {
       const parsed = parseAgentDefinition(
@@ -2493,6 +2598,41 @@ describe("subagent discovery", () => {
         fileURLToPath(new URL("../pi-extension/subagents/subagent-capability-activation.ts", import.meta.url)),
       ]);
     });
+  });
+
+  it("prepares AGY as a separate external harness without a Pi loadout", () => {
+    const parsed = parseAgentDefinition(
+      [
+        "---",
+        "name: agy-reviewer",
+        "cli: agy",
+        "model: gemini-3.8-flash",
+        "thinking: high",
+        "builtin-tools: [read, grep, find, ls]",
+        "---",
+        "Review only.",
+      ].join("\n"),
+      "/tmp/agy-reviewer.md",
+      "global",
+    );
+    assert.ok(parsed.agent);
+    const agent = { ...parsed.agent, extensionPaths: [] };
+    const sandbox = testApi.prepareAgentSandbox(agent);
+    assert.ok("sandbox" in sandbox);
+    const prepared = testApi.prepareAgentLaunch(
+      { agent: "agy-reviewer", task: "Review", cwd: "/tmp" },
+      agent,
+      sandbox.sandbox,
+      "/project",
+    );
+    assert.ok("launch" in prepared);
+    assert.equal(prepared.launch.harness, "agy");
+    assert.equal(prepared.launch.loadout, null);
+    assert.deepEqual(prepared.launch.agyNativeTools, [
+      "view_file", "grep_search", "find_by_name", "list_dir",
+    ]);
+    assert.equal(prepared.launch.effectiveModel, "gemini-3.8-flash");
+    assert.equal(prepared.launch.effectiveThinking, "high");
   });
 
   it("fails launch preparation when a resolved profile extension disappears", () => {
@@ -3237,6 +3377,33 @@ describe("subagent discovery", () => {
     }
   });
 
+  it("refuses malformed AGY resume state through the public tool before pane creation", async () => {
+    const d = createTestDir();
+    try {
+      const stateFile = join(d, "agy-state.json");
+      writeFileSync(stateFile, JSON.stringify({ version: 1, harness: "agy", conversationId: "conv" }));
+      registerName(join(d, "artifacts", "test-session"), "agy-scout", {
+        harness: "agy",
+        stateFile,
+      });
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+      assert.ok(messageTool);
+      const result = await messageTool.execute(
+        "resume-malformed-agy",
+        { name: "agy-scout", message: "Continue" },
+        undefined,
+        undefined,
+        createMockContext(d, true),
+      );
+      assert.match(result.content[0].text, /AGY snapshot is missing or malformed/);
+      assert.equal(testApi.runningSubagents.size, 0);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
   it("requires the spawning extension path when a legacy snapshot grants nesting", () => {
     const error = testApi.validateLoadoutExtensionPaths({
       agent: "coordinator",
@@ -3397,6 +3564,125 @@ describe("subagent discovery", () => {
     });
   });
 });
+describe("AGY harness helpers", () => {
+  function makeState(dir: string, overrides: Partial<AgyResumeState> = {}): AgyResumeState {
+    const agentName = "pi-scout-abc123";
+    const agentRoot = join(dir, "workspace");
+    const identity = "Inspect the repository without changing it.";
+    const description = "Read-only scout";
+    const nativeTools = ["view_file", "grep_search", "find_by_name", "list_dir"];
+    const agentMarkdown = serializeAgyAgent({ name: agentName, description, nativeTools, identity });
+    return {
+      version: 1,
+      harness: "agy",
+      conversationId: "conversation-123",
+      profileName: "scout",
+      runtimeName: "scout-run",
+      description,
+      cwd: resolve(dir),
+      model: "gemini-3.8-flash",
+      effort: "medium",
+      identity,
+      logicalTools: ["read", "grep", "find", "ls"],
+      nativeTools,
+      agentRoot: resolve(agentRoot),
+      agentName,
+      agentMarkdown,
+      ...overrides,
+    };
+  }
+
+  it("serializes one primary non-subagent with exactly translated tools", () => {
+    const name = buildAgyAgentName("Scout Review", "unique_123");
+    const empty = serializeAgyAgent({
+      name: "pi-empty-tools",
+      description: "No tools",
+      nativeTools: [],
+      identity: "Answer without tools.",
+    });
+    assert.match(empty, /\ntools: \[\]\nmainAgent: true\n/);
+
+    const markdown = serializeAgyAgent({
+
+      name,
+      description: "Read-only scout",
+      nativeTools: translateAgyTools(["ls", "read", "grep"]),
+      identity: "Read only.",
+    });
+    assert.match(markdown, /^---\nname: pi-scout-review-unique_123\n/);
+    assert.match(markdown, /tools:\n  - list_dir\n  - view_file\n  - grep_search\n/);
+    assert.match(markdown, /mainAgent: true\nsubagent: false/);
+    for (const forbidden of ["write_file", "run_command", "ask_permission", "web", "mcp", "browser", "image", "scheduler"]) {
+      assert.doesNotMatch(markdown, new RegExp(forbidden));
+    }
+  });
+
+  it("builds an artifact-backed escaped AGY command without permission bypass", () => {
+    const command = buildAgyCommand({
+      agentRoot: "/tmp/agent root",
+      agentName: "pi-scout-123",
+      taskFile: "/tmp/task'file.txt",
+      stdoutFile: "/tmp/result.json",
+      stderrFile: "/tmp/result.stderr",
+      model: "gemini-3.8-flash",
+      effort: "high",
+      conversationId: "conversation-123",
+    });
+    assert.match(command, /^agy --output-format json /);
+    assert.match(command, /--add-dir '\/tmp\/agent root'/);
+    assert.match(command, /--agent 'pi-scout-123'/);
+    assert.match(command, /--model 'gemini-3\.8-flash' --effort 'high'/);
+    assert.match(command, /--conversation 'conversation-123'/);
+    assert.match(command, /\$\(cat -- '\/tmp\/task'\\''file\.txt'\)/);
+    assert.match(command, /> '\/tmp\/result\.json' 2> '\/tmp\/result\.stderr'/);
+    assert.doesNotMatch(command, /dangerously-skip-permissions/);
+  });
+
+  it("strictly parses success usage and all failure classes", () => {
+    assert.deepEqual(parseAgyResult(JSON.stringify({
+      conversation_id: "conv-1",
+      status: "SUCCESS",
+      response: "exact response\n",
+      usage: {
+        input_tokens: 12,
+        output_tokens: 7,
+        thinking_tokens: 3,
+        cache_read_tokens: 2,
+        total_tokens: 24,
+      },
+    })), {
+      ok: true,
+      response: "exact response\n",
+      conversationId: "conv-1",
+      usage: { inputTokens: 12, outputTokens: 7, thinkingTokens: 3, cacheReadTokens: 2, totalTokens: 24 },
+    });
+    assert.match((parseAgyResult("not-json", "diagnostic") as any).error, /invalid JSON.*diagnostic/);
+    assert.match((parseAgyResult(JSON.stringify({ status: "SUCCESS", response: "ok", conversation_id: "" })) as any).error, /conversation ID/);
+    assert.match((parseAgyResult(JSON.stringify({ status: "ERROR", error: "bad effort" })) as any).error, /bad effort/);
+    assert.match((parseAgyResult(JSON.stringify({ status: "WAITING" })) as any).error, /non-terminal/);
+    assert.match((parseAgyResult(JSON.stringify({ status: "CANCELLED", error: "cancelled" })) as any).error, /cancelled/);
+  });
+
+  it("round-trips strict resume state and detects state or generated-agent drift", () => {
+    withTempDir((dir) => {
+      const state = makeState(dir);
+      mkdirSync(state.cwd, { recursive: true });
+      writeAgyAgent(state.agentRoot, state.agentName, state.agentMarkdown);
+      assert.equal(agyAgentDefinitionPath(state.agentRoot, state.agentName).endsWith("agent.md"), true);
+      assert.equal(isAgyResumeState(state), true);
+      assert.equal(validateAgyReplayState(state), null);
+      const stateFile = join(dir, "state", "agy.json");
+      writeAgyResumeState(stateFile, state);
+      assert.deepEqual(readAgyResumeState(stateFile), state);
+
+      writeFileSync(agyAgentDefinitionPath(state.agentRoot, state.agentName), "broadened");
+      assert.match(validateAgyReplayState(state) ?? "", /no longer matches/);
+      assert.equal(isAgyResumeState({ ...state, nativeTools: [...state.nativeTools, "write_file"] }), false);
+      assert.equal(isAgyResumeState({ ...state, runtimeName: "other", extra: true }), false);
+    });
+  });
+});
+
 describe("question protocol", () => {
   it("strictly round-trips requests and private multiline answers", () => {
     withTempDir((dir) => {
@@ -4823,6 +5109,27 @@ describe("subagent interruption", () => {
     assert.equal(sentText, "do this then that");
   });
 
+  it("rejects active AGY steering before tmux transport or status mutation", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    let sends = 0;
+    const statusState = createStatusState({ source: "agy", startTimeMs: 0 });
+    runningMap.clear();
+    try {
+      runningMap.set("agy-1", makeRunning({ id: "agy-1", cli: "agy", statusState }));
+      const result = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "continue" },
+        { send() { sends += 1; } },
+      );
+      assert.equal(sends, 0);
+      assert.equal(result.details.status, "unsupported");
+      assert.match(result.content[0].text, /Active steering is unsupported for AGY/);
+      assert.equal(runningMap.get("agy-1").statusState, statusState);
+    } finally {
+      runningMap.clear();
+    }
+  });
+
   it("returns an explicit error when steering submission fails", () => {
     const testApi = (subagentsModule as any).__test__;
     const running = makeRunning();
@@ -5182,6 +5489,93 @@ describe("subagent interruption", () => {
     runningMap.clear();
   });
 
+  it("parses an AGY watcher result, persists its exact conversation, and exposes usage", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    runningMap.clear();
+    await withIsolatedAgentEnv(async ({ projectDir }) => {
+      const agentName = "pi-scout-result";
+      const agentRoot = join(projectDir, "agy-workspace");
+      const identity = "Inspect only.";
+      const description = "Scout";
+      const nativeTools = ["view_file"];
+      const agentMarkdown = serializeAgyAgent({ name: agentName, description, nativeTools, identity });
+      writeAgyAgent(agentRoot, agentName, agentMarkdown);
+      const stateFile = join(projectDir, "agy-state.json");
+      const state: AgyResumeState = {
+        version: 1,
+        harness: "agy",
+        conversationId: null,
+        profileName: "scout",
+        runtimeName: "Implementer",
+        description,
+        cwd: resolve(projectDir),
+        model: "gemini-3.8-flash",
+        effort: "medium",
+        identity,
+        logicalTools: ["read"],
+        nativeTools,
+        agentRoot: resolve(agentRoot),
+        agentName,
+        agentMarkdown,
+      };
+      writeAgyResumeState(stateFile, state);
+      const stdoutFile = join(projectDir, "result.json");
+      const stderrFile = join(projectDir, "result.stderr");
+      writeFileSync(stdoutFile, JSON.stringify({
+        conversation_id: "conv-new",
+        status: "SUCCESS",
+        response: "exact AGY answer",
+        usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+      }));
+      writeFileSync(stderrFile, "");
+      const running = makeRunning({
+        id: "agy-result",
+        cli: "agy",
+        sessionFile: stdoutFile,
+        agyStdoutFile: stdoutFile,
+        agyStderrFile: stderrFile,
+        agyStateFile: stateFile,
+        statusState: createStatusState({ source: "agy", startTimeMs: Date.now() }),
+        startTime: Date.now(),
+      });
+      runningMap.set(running.id, running);
+      const result = await testApi.watchSubagent(
+        running,
+        new AbortController().signal,
+        async () => ({ reason: "sentinel", exitCode: 0 }),
+        () => {},
+      );
+      assert.equal(result.summary, "exact AGY answer");
+      assert.equal(result.agyConversationId, "conv-new");
+      assert.equal(result.resumeSupported, true);
+      assert.equal(result.stats.inputTokens, 10);
+      assert.equal(readAgyResumeState(stateFile)?.conversationId, "conv-new");
+      assert.equal(runningMap.has(running.id), false);
+    });
+  });
+
+  it("does not promise AGY resume after interruption without a persisted conversation ID", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    runningMap.clear();
+    const running = makeRunning({
+      id: "agy-interrupted",
+      cli: "agy",
+      agyStateFile: "/missing/agy-state.json",
+      startTime: Date.now(),
+      statusState: createStatusState({ source: "agy", startTimeMs: Date.now() }),
+    });
+    runningMap.set(running.id, running);
+    const result = await testApi.watchSubagent(
+      running,
+      new AbortController().signal,
+      async () => ({ reason: "interrupted", exitCode: 1, errorMessage: "pane missing" }),
+    );
+    assert.equal(result.resumeSupported, false);
+    assert.match(testApi.resolveResultPresentation(result, running.name), /resume is unavailable/);
+  });
+
   it("does not offer same-name resume for an interrupted Claude child", () => {
     const testApi = (subagentsModule as any).__test__;
     const presentation = testApi.resolveResultPresentation(
@@ -5400,6 +5794,26 @@ describe("subagents widget rendering", () => {
     } finally {
       Date.now = originalNow;
     }
+  });
+
+  it("identifies AGY as an external running harness without Pi activity precision", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const startTime = Date.now() - 5_000;
+    const lines = testApi.renderSubagentWidgetLines([{
+      id: "agy-1",
+      name: "Scout",
+      agent: "scout",
+      cli: "agy",
+      task: "",
+      surface: "s1",
+      startTime,
+      sessionFile: "result.json",
+      interactive: false,
+      statusState: createStatusState({ source: "agy", startTimeMs: startTime }),
+    }], 80).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(lines, /Scout \(scout · agy\)/);
+    assert.match(lines, /running 5s/);
+    assert.doesNotMatch(lines, /active|waiting|stalled/);
   });
 
   it("truncates the right-hand status instead of overflowing when it alone is too wide", () => {

@@ -3,6 +3,7 @@
 ## Prerequisites and setup
 
 - Runtime use is verified against Pi 0.87.0 and requires tmux. Pi must run inside tmux, for example `tmux new -A -s pi 'pi'` (`README.md`, `package.json`, `package-lock.json`, `pi-extension/subagents/tmux.ts`).
+- `cli: agy` additionally requires an authenticated compatible Antigravity CLI on `PATH`; the verified local baseline is 1.2.11 (`README.md`, `pi-extension/subagents/agy.ts`).
 - The project is an ESM package and Pi loads `pi-extension/subagents/index.ts` through the `pi.extensions` manifest field (`package.json`).
 - Install locked development dependencies with `npm ci`. Dependency changes require lockfile regeneration and review (`README.md`, `package.json`, `package-lock.json`).
 
@@ -13,8 +14,9 @@
 | `npm test` | Unit and source-level regression suite in `test/test.ts`. | Safe local check using temporary directories. |
 | `npm pack --dry-run --json` | Published package contents. | Safe package inspection; no tarball is created. |
 | `git diff --check` | Whitespace and patch integrity. | Safe local check. |
+| Temporary `agy --add-dir <root> -p /agents --output-format text` probe | Generated custom-agent discovery only. | Safe non-model check; use an ephemeral root outside the repository and remove it afterward. |
 | `node --test test/integration/tmux-surface.test.ts` | Real tmux pane creation, delivery, focus, capture, and cleanup. | Requires tmux but does not invoke a model. Prefer a controlled detached tmux session when an active Pi TUI may compete for pane focus. |
-| `node --test --test-concurrency=1 test/integration/subagent-lifecycle.test.ts` | Real Pi child lifecycle, profiles, and model behavior. | Model-consuming, time- and cost-bearing; requires explicit approval. |
+| `node --test --test-concurrency=1 test/integration/subagent-lifecycle.test.ts` | Real Pi/AGY child lifecycle, profile tools, result delivery, and resume behavior when applicable. | Model-consuming, time- and cost-bearing; requires explicit approval. Do not infer prompt-free AGY tool execution or exact resume from unit/discovery checks alone. |
 
 No lint, formatter-check, non-emitting type-check, or CI command is defined.
 

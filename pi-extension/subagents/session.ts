@@ -301,16 +301,24 @@ export function readSubagentLoadout(sessionFile: string): SubagentLoadout | null
 // lives in the spawner's own artifact dir, which is directly addressable from
 // the spawner's session id (no sessions-tree scan, so resume stays fast).
 
-export interface NameRegistryEntry {
+export interface PiNameRegistryEntry {
   /** Absolute path to the subagent's session .jsonl file. */
   sessionFile: string;
   /** Canonical session header id (kept for display/lineage). */
   sessionId: string | null;
 }
 
+export interface AgyNameRegistryEntry {
+  harness: "agy";
+  /** Absolute path to the package-owned strict AGY resume snapshot. */
+  stateFile: string;
+}
+
+export type NameRegistryEntry = PiNameRegistryEntry | AgyNameRegistryEntry;
 export type NameRegistry = Record<string, NameRegistryEntry>;
 
-const NAME_REGISTRY_ENTRY_FIELDS = new Set(["sessionFile", "sessionId"]);
+const PI_NAME_REGISTRY_ENTRY_FIELDS = new Set(["sessionFile", "sessionId"]);
+const AGY_NAME_REGISTRY_ENTRY_FIELDS = new Set(["harness", "stateFile"]);
 
 function isPersistedRuntimeName(name: string): boolean {
   return !!name && name === name.trim() && !/[\x00-\x1f\x7f]/.test(name);
@@ -319,7 +327,20 @@ function isPersistedRuntimeName(name: string): boolean {
 function isNameRegistryEntry(value: unknown): value is NameRegistryEntry {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const entry = value as Record<string, unknown>;
-  if (Object.keys(entry).some((key) => !NAME_REGISTRY_ENTRY_FIELDS.has(key))) return false;
+  const keys = Object.keys(entry);
+  if (entry.harness === "agy") {
+    return (
+      keys.length === AGY_NAME_REGISTRY_ENTRY_FIELDS.size &&
+      keys.every((key) => AGY_NAME_REGISTRY_ENTRY_FIELDS.has(key)) &&
+      typeof entry.stateFile === "string" &&
+      !!entry.stateFile &&
+      isAbsolute(entry.stateFile)
+    );
+  }
+  if (
+    keys.length !== PI_NAME_REGISTRY_ENTRY_FIELDS.size ||
+    keys.some((key) => !PI_NAME_REGISTRY_ENTRY_FIELDS.has(key))
+  ) return false;
   return (
     typeof entry.sessionFile === "string" &&
     !!entry.sessionFile &&
@@ -364,10 +385,10 @@ export function registerName(
   artifactDir: string,
   name: string,
   entry: NameRegistryEntry,
-): void {
+): boolean {
   try {
     mkdirSync(artifactDir, { recursive: true });
-    if (!isPersistedRuntimeName(name) || !isNameRegistryEntry(entry)) return;
+    if (!isPersistedRuntimeName(name) || !isNameRegistryEntry(entry)) return false;
     const registry = readNameRegistry(artifactDir);
     Object.defineProperty(registry, name, {
       value: entry,
@@ -379,9 +400,11 @@ export function registerName(
     const tmp = `${p}.tmp-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
     writeFileSync(tmp, JSON.stringify(registry, null, 2), "utf8");
     renameSync(tmp, p);
+    return true;
   } catch {
     // Best-effort: a failed registration only means resume-by-name won't find
     // this subagent later; it never breaks the spawn itself.
+    return false;
   }
 }
 
