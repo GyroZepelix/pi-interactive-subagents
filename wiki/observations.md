@@ -17,3 +17,10 @@ Tentative repository-local findings retained for later comparison. This page is 
 ## Path fixtures
 
 - **macOS temporary paths can be absolute without being canonical** - May matter when tests construct versioned loadout fixtures because `/var` can resolve through `/private/var`; use `realpathSync` for fixtures intended to pass canonical replay, and preserve aliases only when testing refusal. Provenance: [02.02 completion evidence](../spec/archive/260909-1952-profile-extension-loading/implementation/02-02-versioned-resume.md#completion-and-handoff).
+
+## Workflow orchestration
+
+- **Target:** `gamemaster-implement/workflow/execution-cycle.md`
+  - **Smallest proposed change:** When terminal Implement output omits the required structured evidence report, send one bounded report-only correction to the same Twin before parent reconciliation.
+  - **Evidence:** [Antigravity lifecycle retrospective](./dreams/retrospectives/260925-1525-add-antigravity-harness-support.md) and the terminal Twin response `No further action needed`, which required parent reconstruction from archived evidence.
+  - **Expected benefit:** Preserve the lean-parent boundary while making phase handoff evidence consistent and reducing avoidable ambiguity before Dream.

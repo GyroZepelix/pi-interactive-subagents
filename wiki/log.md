@@ -131,3 +131,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/architecture.md`, `wiki/map.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
 - Verification: source claims were compared with the implementation and focused model-free tests; full safe verification and independent reviews are recorded in the work-item verification artifact.
 - Notes: no external dotfiles or AGY settings were changed. `wiki/state.md` was unchanged because no ingest, lint, dedupe, or Git checkpoint advanced. Real prompt-free reads and exact live-model resume remain explicitly unverified without separate approval.
+
+## [2026-09-25] retrospective | Antigravity lifecycle workflow
+
+- Trigger: whole-lifecycle Dream retrospective after the successful Gamemaster implementation, archive, Dream checkpoint, and local commit for `260925-1525-add-antigravity-harness-support`.
+- Inputs: the archived plan, verification, outcome, per-spec Dream ledger, checkpoint commit `92a772fe49ba84403fb32a7dc37c991549406635`, and current-session Gamemaster handoffs.
+- Wiki pages changed: `wiki/dreams/retrospectives/260925-1525-add-antigravity-harness-support.md`, `wiki/observations.md`, and `wiki/log.md`.
+- Verification: retrospective identity and lifecycle state matched; memory safety, relative links, append-only structure, catalog separation, wiki-only scope, and `git diff --check` passed.
+- Notes: one target-local workflow observation proposes a report-only correction when terminal Implement output omits its required structured handoff. No skill edit is authorized.
