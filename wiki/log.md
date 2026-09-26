@@ -139,3 +139,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/dreams/retrospectives/260925-1525-add-antigravity-harness-support.md`, `wiki/observations.md`, and `wiki/log.md`.
 - Verification: retrospective identity and lifecycle state matched; memory safety, relative links, append-only structure, catalog separation, wiki-only scope, and `git diff --check` passed.
 - Notes: one target-local workflow observation proposes a report-only correction when terminal Implement output omits its required structured handoff. No skill edit is authorized.
+
+## [2026-09-26] update | AGY parent workspace boundary
+
+- Trigger: implementation of `260926-1205-allow-agy-subagents-to-read-the-parent-workspace` added bounded parent-repository reads and actionable permission-denial reporting.
+- Inputs: `pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`, focused regressions in `test/test.ts`, user documentation, and the active work-item plan.
+- Wiki pages changed: `wiki/architecture.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
+- Verification: focused AGY tests, the full model-free unit suite, a temporary non-model repeatable-`--add-dir` discovery probe, documentation checks, package inspection, and patch/spec validation passed.
+- Notes: strict version 2 snapshots replay the exact additional workspace list, while valid version 1 snapshots retain their original boundary. Live model cross-workspace reads and exact continuation remain approval-gated and unverified.

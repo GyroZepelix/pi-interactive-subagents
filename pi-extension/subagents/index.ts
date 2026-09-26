@@ -81,9 +81,11 @@ import {
   removeMatchingQuestionRequest,
 } from "./question-protocol.ts";
 import {
+  agyAdditionalWorkspaceRoots,
   agyAgentDefinitionPath,
   buildAgyAgentName,
   buildAgyCommand,
+  deriveAgyAdditionalWorkspaceRoots,
   parseAgyResult,
   readAgyResumeState,
   serializeAgyAgent,
@@ -1795,14 +1797,15 @@ async function launchSubagent(
     writeFileSync(stdoutFile, "", { encoding: "utf8", mode: 0o600 });
     writeFileSync(stderrFile, "", { encoding: "utf8", mode: 0o600 });
     writeAgyAgent(agentRoot, agentName, agentMarkdown);
+    const resolvedChildCwd = resolve(targetCwdForSession);
     const agyState: AgyResumeState = {
-      version: 1,
+      version: 2,
       harness: "agy",
       conversationId: null,
       profileName: agentDefs.name,
       runtimeName: params.name,
       description,
-      cwd: resolve(targetCwdForSession),
+      cwd: resolvedChildCwd,
       model: effectiveModel ?? null,
       effort: prepared.effectiveThinking ?? null,
       identity,
@@ -1811,6 +1814,7 @@ async function launchSubagent(
       agentRoot: resolve(agentRoot),
       agentName,
       agentMarkdown,
+      additionalWorkspaceRoots: deriveAgyAdditionalWorkspaceRoots(ctx.cwd, resolvedChildCwd),
     };
     writeAgyResumeState(stateFile, agyState);
     const replayError = validateAgyReplayState(agyState);
@@ -1824,7 +1828,8 @@ async function launchSubagent(
       await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
     }
     const agyCommand = buildAgyCommand({
-      agentRoot,
+      agentRoot: agyState.agentRoot,
+      additionalWorkspaceRoots: agyAdditionalWorkspaceRoots(agyState),
       agentName,
       taskFile,
       stdoutFile,
@@ -2991,6 +2996,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
             const command = `cd ${shellEscape(state.cwd)} && ${buildAgyCommand({
               agentRoot: state.agentRoot,
+              additionalWorkspaceRoots: agyAdditionalWorkspaceRoots(state),
               agentName: state.agentName,
               taskFile,
               stdoutFile,

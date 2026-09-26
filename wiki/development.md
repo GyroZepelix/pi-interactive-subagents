@@ -14,7 +14,7 @@
 | `npm test` | Unit and source-level regression suite in `test/test.ts`. | Safe local check using temporary directories. |
 | `npm pack --dry-run --json` | Published package contents. | Safe package inspection; no tarball is created. |
 | `git diff --check` | Whitespace and patch integrity. | Safe local check. |
-| Temporary `agy --add-dir <root> -p /agents --output-format text` probe | Generated custom-agent discovery only. | Safe non-model check; use an ephemeral root outside the repository and remove it afterward. |
+| Temporary `agy --add-dir <agent-root> --add-dir <second-workspace> --agent <generated-name> -p /agents --output-format text` probe | Repeatable added-workspace parsing and generated custom-agent selection/discovery only. | Safe non-model check; use ephemeral roots outside the repository and remove them afterward. It does not prove model tool execution or cross-workspace reads. |
 | `node --test test/integration/tmux-surface.test.ts` | Real tmux pane creation, delivery, focus, capture, and cleanup. | Requires tmux but does not invoke a model. Prefer a controlled detached tmux session when an active Pi TUI may compete for pane focus. |
 | `node --test --test-concurrency=1 test/integration/subagent-lifecycle.test.ts` | Real Pi/AGY child lifecycle, profile tools, result delivery, and resume behavior when applicable. | Model-consuming, time- and cost-bearing; requires explicit approval. Do not infer prompt-free AGY tool execution or exact resume from unit/discovery checks alone. |
 

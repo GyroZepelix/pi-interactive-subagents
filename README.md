@@ -88,7 +88,7 @@ builtin-tools: [read, grep, find, ls]
 Inspect the requested code and report evidence without changing files.
 ```
 
-The extension generates a collision-resistant primary-agent definition under the parent Pi session's artifact directory and exposes only that dedicated workspace through `--add-dir`. It does not write the target repository, `~/.gemini`, AGY settings, authentication, plugins, or external profile dotfiles. It never passes `--dangerously-skip-permissions`. Under AGY's default no-override policy, granted reads inside the active workspace are prompt-free; explicit user permission rules can still deny them.
+The extension keeps the resolved child cwd as AGY's process workspace and generates a collision-resistant primary-agent definition under the parent Pi session's artifact directory. It passes that generated-agent root through `--add-dir` and, when the parent Pi cwd differs from the child cwd, passes the resolved parent cwd once as a second added workspace. No task text or referenced path can add another root. It does not write either repository, `~/.gemini`, AGY settings, authentication, plugins, or external profile dotfiles, and it never passes `--dangerously-skip-permissions`. Under AGY's default no-override policy, granted reads in these workspaces are prompt-free; explicit user permission rules can still deny them, and reported denials fail with bounded action and stderr diagnostics.
 
 To migrate existing `scout` and `flash-reviewer` profiles, replace only their frontmatter with the corresponding form below and retain each existing Markdown body unchanged:
 
@@ -154,7 +154,7 @@ Names are unique within one parent session and remain registered after a child f
 - A running AGY child rejects active messages without writing to its pane. Wait for the one-shot run to finish.
 - When a Pi child has a pending `ask_question`, the answer is wrapped in a private correlated envelope and delivered through the same stdin-backed tmux path. Only the matching child acknowledgment reports delivery; a timeout remains unconfirmed and never resends. Other waiting Pi messages retain activity-based confirmation, while active Pi and Claude paths report submission.
 - A finished Pi child resumes asynchronously and later reports another result.
-- A successfully completed AGY child resumes asynchronously by its exact persisted conversation ID and immutable launch-time capability snapshot. Missing, malformed, mismatched, unavailable, or concurrently claimed state fails before pane creation.
+- A successfully completed AGY child resumes asynchronously by its exact persisted conversation ID and immutable launch-time capability snapshot, including the exact additional workspace list. Existing version 1 snapshots replay their original boundary without acquiring the current parent cwd. Missing, malformed, mismatched, unavailable, or concurrently claimed state fails before pane creation.
 - Pi resume replays a strictly validated launch-time capability snapshot. It does not reread the profile or package settings.
 - New snapshots retain selected built-ins and ordered canonical profile extension paths. Resume uses the current contents at those paths and is refused before pane creation if required state or files are missing, malformed, non-canonical, duplicated, or reserved.
 - Existing valid strict `toolAllowlist` snapshots remain resumable through their legacy `--tools` path and are not rewritten automatically.

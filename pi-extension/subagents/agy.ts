@@ -117,6 +117,15 @@ export function parseAgyResult(raw: string, stderr = ""): ParsedAgyResult {
   if (!status) return { ok: false, error: "AGY result is missing a valid terminal status" };
 
   if (status === "SUCCESS") {
+    if (Array.isArray(result.denied_actions) && result.denied_actions.length > 0) {
+      const denied = boundedDiagnostic(JSON.stringify(result.denied_actions));
+      const stderrDetail = boundedDiagnostic(stderr);
+      return {
+        ok: false,
+        status,
+        error: `AGY denied one or more actions: ${denied}${stderrDetail ? `; stderr: ${stderrDetail}` : ""}`,
+      };
+    }
     if (typeof result.response !== "string" || !result.response.trim()) {
       return { ok: false, status, error: "AGY reported success without a non-empty response" };
     }
@@ -157,8 +166,7 @@ export function parseAgyResult(raw: string, stderr = ""): ParsedAgyResult {
   };
 }
 
-export interface AgyResumeState {
-  version: 1;
+interface AgyResumeStateBase {
   harness: "agy";
   conversationId: string | null;
   profileName: string;
@@ -175,25 +183,57 @@ export interface AgyResumeState {
   agentMarkdown: string;
 }
 
-const STATE_FIELDS = new Set([
+export interface AgyResumeStateV1 extends AgyResumeStateBase {
+  version: 1;
+}
+
+export interface AgyResumeStateV2 extends AgyResumeStateBase {
+  version: 2;
+  additionalWorkspaceRoots: string[];
+}
+
+export type AgyResumeState = AgyResumeStateV1 | AgyResumeStateV2;
+
+const STATE_FIELDS_V1 = new Set([
   "version", "harness", "conversationId", "profileName", "runtimeName", "description", "cwd",
   "model", "effort", "identity", "logicalTools", "nativeTools", "agentRoot",
   "agentName", "agentMarkdown",
 ]);
+const STATE_FIELDS_V2 = new Set([...STATE_FIELDS_V1, "additionalWorkspaceRoots"]);
 const AGY_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 function validCleanString(value: unknown): value is string {
   return typeof value === "string" && !!value.trim() && value === value.trim() && !/[\x00-\x1f\x7f]/.test(value);
 }
 
+export function deriveAgyAdditionalWorkspaceRoots(parentCwd: string, childCwd: string): string[] {
+  const resolvedParent = resolve(parentCwd);
+  return resolvedParent === resolve(childCwd) ? [] : [resolvedParent];
+}
+
+export function agyAdditionalWorkspaceRoots(state: AgyResumeState): readonly string[] {
+  return state.version === 2 ? state.additionalWorkspaceRoots : [];
+}
+
+function isResolvedAbsolutePath(value: unknown): value is string {
+  return typeof value === "string" && isAbsolute(value) && resolve(value) === value;
+}
+
 export function isAgyResumeState(value: unknown): value is AgyResumeState {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const state = value as Record<string, unknown>;
-  if (Object.keys(state).length !== STATE_FIELDS.size || Object.keys(state).some((key) => !STATE_FIELDS.has(key))) return false;
-  if (state.version !== 1 || state.harness !== "agy") return false;
+  const fields = state.version === 1 ? STATE_FIELDS_V1 : state.version === 2 ? STATE_FIELDS_V2 : null;
+  if (!fields || Object.keys(state).length !== fields.size || Object.keys(state).some((key) => !fields.has(key))) return false;
+  if (state.harness !== "agy") return false;
+  if (state.version === 2) {
+    if (!Array.isArray(state.additionalWorkspaceRoots)) return false;
+    if (!state.additionalWorkspaceRoots.every(isResolvedAbsolutePath)) return false;
+    if (new Set(state.additionalWorkspaceRoots).size !== state.additionalWorkspaceRoots.length) return false;
+    if (state.additionalWorkspaceRoots.includes(state.cwd as string) || state.additionalWorkspaceRoots.includes(state.agentRoot as string)) return false;
+  }
   if (state.conversationId !== null && !validCleanString(state.conversationId)) return false;
   if (!validCleanString(state.profileName) || !validCleanString(state.runtimeName) || !validCleanString(state.description)) return false;
-  if (typeof state.cwd !== "string" || !isAbsolute(state.cwd) || resolve(state.cwd) !== state.cwd) return false;
+  if (!isResolvedAbsolutePath(state.cwd)) return false;
   if (state.model !== null && !validCleanString(state.model)) return false;
   if (state.effort !== null && (typeof state.effort !== "string" || !AGY_EFFORTS.has(state.effort))) return false;
   if (typeof state.identity !== "string" || !state.identity.trim()) return false;
@@ -203,7 +243,7 @@ export function isAgyResumeState(value: unknown): value is AgyResumeState {
   let translated: string[];
   try { translated = translateAgyTools(state.logicalTools); } catch { return false; }
   if (JSON.stringify(translated) !== JSON.stringify(state.nativeTools)) return false;
-  if (typeof state.agentRoot !== "string" || !isAbsolute(state.agentRoot) || resolve(state.agentRoot) !== state.agentRoot) return false;
+  if (!isResolvedAbsolutePath(state.agentRoot)) return false;
   if (typeof state.agentName !== "string" || !/^[a-zA-Z0-9_-]+$/.test(state.agentName)) return false;
   if (typeof state.agentMarkdown !== "string" || !state.agentMarkdown) return false;
   if (state.agentMarkdown !== serializeAgyAgent({
@@ -238,6 +278,9 @@ export function validateAgyReplayState(state: AgyResumeState): string | null {
   try {
     if (!statSync(state.cwd).isDirectory()) return `stored cwd is not a directory: ${state.cwd}`;
     if (!statSync(state.agentRoot).isDirectory()) return `generated agent workspace is unavailable: ${state.agentRoot}`;
+    for (const root of agyAdditionalWorkspaceRoots(state)) {
+      if (!statSync(root).isDirectory()) return `additional workspace is not a directory: ${root}`;
+    }
     if (!statSync(expected).isFile()) return `generated agent definition is unavailable: ${expected}`;
     if (readFileSync(expected, "utf8") !== state.agentMarkdown) return `generated agent definition no longer matches the stored capability contract: ${expected}`;
   } catch (error) {
@@ -248,6 +291,7 @@ export function validateAgyReplayState(state: AgyResumeState): string | null {
 
 export function buildAgyCommand(params: {
   agentRoot: string;
+  additionalWorkspaceRoots: readonly string[];
   agentName: string;
   taskFile: string;
   stdoutFile: string;
@@ -256,10 +300,22 @@ export function buildAgyCommand(params: {
   effort: string | null;
   conversationId?: string | null;
 }): string {
+  const seenWorkspaceRoots = new Set([params.agentRoot]);
+  const additionalWorkspaceRoots: string[] = [];
+  for (const root of params.additionalWorkspaceRoots) {
+    if (!isResolvedAbsolutePath(root)) {
+      throw new Error(`AGY additional workspace must be an absolute resolved path: ${root}`);
+    }
+    if (!seenWorkspaceRoots.has(root)) {
+      seenWorkspaceRoots.add(root);
+      additionalWorkspaceRoots.push(root);
+    }
+  }
   const parts = [
     "agy",
     "--output-format", "json",
     "--add-dir", shellEscape(params.agentRoot),
+    ...additionalWorkspaceRoots.flatMap((root) => ["--add-dir", shellEscape(root)]),
     "--agent", shellEscape(params.agentName),
   ];
   if (params.model) parts.push("--model", shellEscape(params.model));

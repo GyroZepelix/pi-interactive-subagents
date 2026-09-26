@@ -16,7 +16,7 @@ Resolved profile extension files are preflighted before pane creation. This pack
 
 Every spawn must name a valid discoverable agent selected from the active trusted context. Child commands always override `PI_SUBAGENT_ALLOWED` with the profile's exact nested targets; a present empty value means deny all, while an undefined value is reserved for an unrestricted top-level process (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`).
 
-AGY profiles use a separate native boundary: a dedicated parent-session artifact workspace contains one generated primary agent with exactly the translated read tools, `mainAgent: true`, and `subagent: false`. Launch exposes only that workspace through `--add-dir`, uses headless JSON artifacts, and never passes `--dangerously-skip-permissions`. Default prompt-free workspace reads remain subject to explicit user AGY permission overrides (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
+AGY profiles use a separate native boundary: a dedicated parent-session artifact workspace contains one generated primary agent with exactly the translated read tools, `mainAgent: true`, and `subagent: false`. Launch keeps the child cwd as the process workspace and adds the generated-agent root plus the distinct resolved parent Pi cwd. It never derives roots from task text, profile prose, referenced paths, or model output, and never passes `--dangerously-skip-permissions`. Default prompt-free workspace reads remain subject to explicit user AGY permission overrides; reported denied actions fail with bounded action and stderr evidence (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
 
 ## Name safety
 
@@ -28,7 +28,7 @@ New Pi profile launches persist a strict version 1 `extension-grants` snapshot c
 
 Snapshot parsing is a strict union. Reject unknown, mixed, incomplete, malformed, duplicate, relative, non-canonical, or nesting-inconsistent new snapshots. Existing valid legacy snapshots remain a separate strict `toolAllowlist` shape, replay through `--no-extensions --tools` with their stored extension paths, and are read without automatic rewriting (`pi-extension/subagents/session.ts`).
 
-Pi resume never re-reads profiles or package settings and preflights exact stored paths. AGY likewise replays only a strict snapshot containing its exact conversation ID, cwd, model, effort, identity, logical/native tools, and generated-agent content; drift or missing state fails before pane creation, and successful continuation atomically updates the conversation ID. Canonical state or session paths are reserved while launching. Finished Claude children are not resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
+Pi resume never re-reads profiles or package settings and preflights exact stored paths. AGY likewise replays only a strict snapshot containing its exact conversation ID, cwd, model, effort, identity, logical/native tools, generated-agent content, and in version 2 its ordered additional workspace roots; drift or missing state fails before pane creation, and successful continuation atomically updates only the conversation ID. Existing valid version 1 AGY snapshots remain an exact legacy shape and resume without gaining the current parent cwd. Canonical state or session paths are reserved while launching. Finished Claude children are not resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
 
 ## Shell and live-input boundaries
 

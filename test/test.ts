@@ -54,9 +54,11 @@ import {
 
 import { pollForExit, shellEscape, submitText } from "../pi-extension/subagents/tmux.ts";
 import {
+  agyAdditionalWorkspaceRoots,
   agyAgentDefinitionPath,
   buildAgyAgentName,
   buildAgyCommand,
+  deriveAgyAdditionalWorkspaceRoots,
   isAgyResumeState,
   parseAgyResult,
   readAgyResumeState,
@@ -66,6 +68,8 @@ import {
   writeAgyAgent,
   writeAgyResumeState,
   type AgyResumeState,
+  type AgyResumeStateV1,
+  type AgyResumeStateV2,
 } from "../pi-extension/subagents/agy.ts";
 import {
   advanceStatusState,
@@ -3404,6 +3408,57 @@ describe("subagent discovery", () => {
     }
   });
 
+  it("refuses an unavailable version 2 AGY workspace through the public tool before pane creation", async () => {
+    const d = createTestDir();
+    try {
+      const agentName = "pi-agy-scout-workspace";
+      const agentRoot = join(d, "agent-workspace");
+      const identity = "Inspect only.";
+      const description = "Scout";
+      const nativeTools = ["view_file"];
+      const agentMarkdown = serializeAgyAgent({ name: agentName, description, nativeTools, identity });
+      writeAgyAgent(agentRoot, agentName, agentMarkdown);
+      const stateFile = join(d, "agy-state-v2.json");
+      writeAgyResumeState(stateFile, {
+        version: 2,
+        harness: "agy",
+        conversationId: "conv-123",
+        profileName: "agy-scout",
+        runtimeName: "agy-scout",
+        description,
+        cwd: resolve(d),
+        model: null,
+        effort: null,
+        identity,
+        logicalTools: ["read"],
+        nativeTools,
+        agentRoot: resolve(agentRoot),
+        agentName,
+        agentMarkdown,
+        additionalWorkspaceRoots: [resolve(join(d, "removed-parent-workspace"))],
+      });
+      registerName(join(d, "artifacts", "test-session"), "agy-scout", {
+        harness: "agy",
+        stateFile,
+      });
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+      assert.ok(messageTool);
+      const result = await messageTool.execute(
+        "resume-missing-agy-workspace",
+        { name: "agy-scout", message: "Continue" },
+        undefined,
+        undefined,
+        createMockContext(d, true),
+      );
+      assert.match(result.content[0].text, /stored AGY replay state is unavailable.*removed-parent-workspace/);
+      assert.equal(testApi.runningSubagents.size, 0);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
   it("requires the spawning extension path when a legacy snapshot grants nesting", () => {
     const error = testApi.validateLoadoutExtensionPaths({
       agent: "coordinator",
@@ -3565,7 +3620,7 @@ describe("subagent discovery", () => {
   });
 });
 describe("AGY harness helpers", () => {
-  function makeState(dir: string, overrides: Partial<AgyResumeState> = {}): AgyResumeState {
+  function makeState(dir: string, overrides: Partial<AgyResumeStateV1> = {}): AgyResumeStateV1 {
     const agentName = "pi-scout-abc123";
     const agentRoot = join(dir, "workspace");
     const identity = "Inspect the repository without changing it.";
@@ -3617,9 +3672,15 @@ describe("AGY harness helpers", () => {
     }
   });
 
-  it("builds an artifact-backed escaped AGY command without permission bypass", () => {
+  it("derives only a distinct resolved parent workspace", () => {
+    assert.deepEqual(deriveAgyAdditionalWorkspaceRoots("/control/./", "/target"), ["/control"]);
+    assert.deepEqual(deriveAgyAdditionalWorkspaceRoots("/target/./", "/target"), []);
+  });
+
+  it("builds a stable deduplicated escaped AGY workspace command without permission bypass", () => {
     const command = buildAgyCommand({
       agentRoot: "/tmp/agent root",
+      additionalWorkspaceRoots: ["/tmp/control root", "/tmp/control root", "/tmp/agent root"],
       agentName: "pi-scout-123",
       taskFile: "/tmp/task'file.txt",
       stdoutFile: "/tmp/result.json",
@@ -3629,16 +3690,27 @@ describe("AGY harness helpers", () => {
       conversationId: "conversation-123",
     });
     assert.match(command, /^agy --output-format json /);
-    assert.match(command, /--add-dir '\/tmp\/agent root'/);
+    assert.match(command, /--add-dir '\/tmp\/agent root' --add-dir '\/tmp\/control root' --agent 'pi-scout-123'/);
+    assert.equal([...command.matchAll(/--add-dir/g)].length, 2);
     assert.match(command, /--agent 'pi-scout-123'/);
     assert.match(command, /--model 'gemini-3\.8-flash' --effort 'high'/);
     assert.match(command, /--conversation 'conversation-123'/);
     assert.match(command, /\$\(cat -- '\/tmp\/task'\\''file\.txt'\)/);
     assert.match(command, /> '\/tmp\/result\.json' 2> '\/tmp\/result\.stderr'/);
     assert.doesNotMatch(command, /dangerously-skip-permissions/);
+    assert.throws(() => buildAgyCommand({
+      agentRoot: "/tmp/agent",
+      additionalWorkspaceRoots: ["relative/workspace"],
+      agentName: "pi-scout-123",
+      taskFile: "/tmp/task.txt",
+      stdoutFile: "/tmp/result.json",
+      stderrFile: "/tmp/result.stderr",
+      model: null,
+      effort: null,
+    }), /absolute resolved path/);
   });
 
-  it("strictly parses success usage and all failure classes", () => {
+  it("strictly parses success usage, denied actions, and all failure classes", () => {
     assert.deepEqual(parseAgyResult(JSON.stringify({
       conversation_id: "conv-1",
       status: "SUCCESS",
@@ -3656,6 +3728,21 @@ describe("AGY harness helpers", () => {
       conversationId: "conv-1",
       usage: { inputTokens: 12, outputTokens: 7, thinkingTokens: 3, cacheReadTokens: 2, totalTokens: 24 },
     });
+    const denied = parseAgyResult(JSON.stringify({
+      conversation_id: "conv-denied",
+      status: "SUCCESS",
+      response: "",
+      denied_actions: [{ tool: "read_file", path: "/outside/plan.md" }],
+    }), "approval unavailable in headless mode");
+    assert.equal(denied.ok, false);
+    assert.match((denied as any).error, /denied one or more actions.*read_file.*outside\/plan\.md.*stderr: approval unavailable/);
+    assert.doesNotMatch((denied as any).error, /success without a non-empty response/);
+    const boundedDenied = parseAgyResult(JSON.stringify({
+      status: "SUCCESS",
+      denied_actions: ["x".repeat(5000)],
+    }), "y".repeat(5000));
+    assert.ok((boundedDenied as any).error.length < 8100);
+
     assert.match((parseAgyResult("not-json", "diagnostic") as any).error, /invalid JSON.*diagnostic/);
     assert.match((parseAgyResult(JSON.stringify({ status: "SUCCESS", response: "ok", conversation_id: "" })) as any).error, /conversation ID/);
     assert.match((parseAgyResult(JSON.stringify({ status: "ERROR", error: "bad effort" })) as any).error, /bad effort/);
@@ -3663,22 +3750,48 @@ describe("AGY harness helpers", () => {
     assert.match((parseAgyResult(JSON.stringify({ status: "CANCELLED", error: "cancelled" })) as any).error, /cancelled/);
   });
 
-  it("round-trips strict resume state and detects state or generated-agent drift", () => {
+  it("round-trips strict version 1 and version 2 resume state and detects workspace drift", () => {
     withTempDir((dir) => {
-      const state = makeState(dir);
-      mkdirSync(state.cwd, { recursive: true });
-      writeAgyAgent(state.agentRoot, state.agentName, state.agentMarkdown);
-      assert.equal(agyAgentDefinitionPath(state.agentRoot, state.agentName).endsWith("agent.md"), true);
-      assert.equal(isAgyResumeState(state), true);
-      assert.equal(validateAgyReplayState(state), null);
-      const stateFile = join(dir, "state", "agy.json");
-      writeAgyResumeState(stateFile, state);
-      assert.deepEqual(readAgyResumeState(stateFile), state);
+      const stateV1 = makeState(dir);
+      mkdirSync(stateV1.cwd, { recursive: true });
+      writeAgyAgent(stateV1.agentRoot, stateV1.agentName, stateV1.agentMarkdown);
+      assert.equal(agyAgentDefinitionPath(stateV1.agentRoot, stateV1.agentName).endsWith("agent.md"), true);
+      assert.equal(isAgyResumeState(stateV1), true);
+      assert.deepEqual(agyAdditionalWorkspaceRoots(stateV1), []);
+      assert.equal(validateAgyReplayState(stateV1), null);
+      const stateV1File = join(dir, "state", "agy-v1.json");
+      writeAgyResumeState(stateV1File, stateV1);
+      assert.deepEqual(readAgyResumeState(stateV1File), stateV1);
 
-      writeFileSync(agyAgentDefinitionPath(state.agentRoot, state.agentName), "broadened");
-      assert.match(validateAgyReplayState(state) ?? "", /no longer matches/);
-      assert.equal(isAgyResumeState({ ...state, nativeTools: [...state.nativeTools, "write_file"] }), false);
-      assert.equal(isAgyResumeState({ ...state, runtimeName: "other", extra: true }), false);
+      const parentWorkspace = resolve(join(dir, "parent-workspace"));
+      mkdirSync(parentWorkspace);
+      const stateV2: AgyResumeStateV2 = {
+        ...stateV1,
+        version: 2,
+        additionalWorkspaceRoots: [parentWorkspace],
+      };
+      assert.equal(isAgyResumeState(stateV2), true);
+      assert.deepEqual(agyAdditionalWorkspaceRoots(stateV2), [parentWorkspace]);
+      assert.equal(validateAgyReplayState(stateV2), null);
+      const stateV2File = join(dir, "state", "agy-v2.json");
+      writeAgyResumeState(stateV2File, stateV2);
+      assert.deepEqual(readAgyResumeState(stateV2File), stateV2);
+
+      const { additionalWorkspaceRoots: _missing, ...missingRoots } = stateV2;
+      assert.equal(isAgyResumeState(missingRoots), false);
+      assert.equal(isAgyResumeState({ ...stateV2, additionalWorkspaceRoots: [parentWorkspace, parentWorkspace] }), false);
+      assert.equal(isAgyResumeState({ ...stateV2, additionalWorkspaceRoots: [stateV2.cwd] }), false);
+      assert.equal(isAgyResumeState({ ...stateV2, additionalWorkspaceRoots: [stateV2.agentRoot] }), false);
+      assert.equal(isAgyResumeState({ ...stateV2, additionalWorkspaceRoots: ["relative"] }), false);
+      assert.equal(isAgyResumeState({ ...stateV2, additionalWorkspaceRoots: [`${parentWorkspace}/../parent-workspace`] }), false);
+      const unavailable = { ...stateV2, additionalWorkspaceRoots: [resolve(join(dir, "missing-workspace"))] };
+      assert.equal(isAgyResumeState(unavailable), true);
+      assert.match(validateAgyReplayState(unavailable) ?? "", /stored AGY replay state is unavailable.*missing-workspace/);
+
+      writeFileSync(agyAgentDefinitionPath(stateV1.agentRoot, stateV1.agentName), "broadened");
+      assert.match(validateAgyReplayState(stateV1) ?? "", /no longer matches/);
+      assert.equal(isAgyResumeState({ ...stateV1, nativeTools: [...stateV1.nativeTools, "write_file"] }), false);
+      assert.equal(isAgyResumeState({ ...stateV1, runtimeName: "other", extra: true }), false);
     });
   });
 });
@@ -5502,8 +5615,10 @@ describe("subagent interruption", () => {
       const agentMarkdown = serializeAgyAgent({ name: agentName, description, nativeTools, identity });
       writeAgyAgent(agentRoot, agentName, agentMarkdown);
       const stateFile = join(projectDir, "agy-state.json");
+      const parentWorkspace = join(projectDir, "parent-workspace");
+      mkdirSync(parentWorkspace);
       const state: AgyResumeState = {
-        version: 1,
+        version: 2,
         harness: "agy",
         conversationId: null,
         profileName: "scout",
@@ -5518,6 +5633,7 @@ describe("subagent interruption", () => {
         agentRoot: resolve(agentRoot),
         agentName,
         agentMarkdown,
+        additionalWorkspaceRoots: [resolve(parentWorkspace)],
       };
       writeAgyResumeState(stateFile, state);
       const stdoutFile = join(projectDir, "result.json");
@@ -5550,7 +5666,10 @@ describe("subagent interruption", () => {
       assert.equal(result.agyConversationId, "conv-new");
       assert.equal(result.resumeSupported, true);
       assert.equal(result.stats.inputTokens, 10);
-      assert.equal(readAgyResumeState(stateFile)?.conversationId, "conv-new");
+      const persistedState = readAgyResumeState(stateFile);
+      assert.equal(persistedState?.conversationId, "conv-new");
+      assert.equal(persistedState?.version, 2);
+      assert.deepEqual(persistedState && agyAdditionalWorkspaceRoots(persistedState), [resolve(parentWorkspace)]);
       assert.equal(runningMap.has(running.id), false);
     });
   });
