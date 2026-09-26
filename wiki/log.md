@@ -147,3 +147,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/architecture.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
 - Verification: focused AGY tests, the full model-free unit suite, a temporary non-model repeatable-`--add-dir` discovery probe, documentation checks, package inspection, and patch/spec validation passed.
 - Notes: strict version 2 snapshots replay the exact additional workspace list, while valid version 1 snapshots retain their original boundary. Live model cross-workspace reads and exact continuation remain approval-gated and unverified.
+
+## [2026-09-26] update | configurable model fallback
+
+- Trigger: implementation of `260926-1248-configurable-model-fallback` added ordered AGY/Pi fallback for read-oriented profiles.
+- Inputs: `pi-extension/subagents/model-chain.ts`, parser/orchestration/registry changes, focused regressions in `test/test.ts`, user documentation, repository scout example, and the active work-item plan.
+- Wiki pages changed: `wiki/map.md`, `wiki/architecture.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
+- Verification: source claims were compared with the implementation; deterministic model-free tests cover strict parsing, target extension resolution, preparation, terminal evidence, classifier boundaries, sequential outcomes, registry state, and widget metadata. Full safe verification and independent reviews are recorded in the work-item verification artifact.
+- Notes: bare 429 and resource exhaustion intentionally accept temporary-throttling ambiguity. Target extensions remain full trusted grants. Live model exhaustion, switching, and winner continuation remain separately approval-gated and unverified.

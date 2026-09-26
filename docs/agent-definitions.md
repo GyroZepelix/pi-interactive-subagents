@@ -44,8 +44,8 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | --- | --- | --- |
 | `name` | String without commas, path separators, or control characters, and not `.` or `..` | Trimmed. When omitted, the trimmed filename without `.md` is used. The declared name may differ from the filename. |
 | `description` | Non-empty string | Optional text shown by `subagents_list`. |
-| `model` | Non-empty string | Optional child model. Pi uses its configured default when omitted; AGY uses its own default. |
-| `builtin-tools` | Comma-delimited string or YAML string array. Pi accepts `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, or `ls`; AGY accepts only `read`, `grep`, `find`, or `ls`. | Empty list. Pi children still receive `ask_question`; AGY receives no native tools. See [Tool isolation](#tool-isolation). |
+| `model` | Non-empty string | Optional child model for a flat profile. Forbidden with `model-chain`. Pi uses its configured default when omitted; AGY uses its own default. |
+| `builtin-tools` | Comma-delimited string or YAML string array. Pi accepts `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, or `ls`; AGY accepts only `read`, `grep`, `find`, or `ls`. | Empty list. Flat and native-resumed Pi children still receive `ask_question`; chain attempts omit it to preserve one final delivery. AGY receives no native tools. See [Tool isolation](#tool-isolation). |
 | `extensions` | YAML array of mappings containing exactly `package` and optional `paths` | Empty list. Selects installed, enabled extension resources from exact configured Pi package sources. See [Package extension selection](#package-extension-selection). |
 | `skill` | Comma-delimited string or YAML string array | Empty list of skill prompts. Alias of `skills`. |
 | `skills` | Comma-delimited string or YAML string array | Empty list. Do not use together with `skill`. |
@@ -58,6 +58,7 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `cwd` | Non-empty string | Active context cwd. Absolute values are used directly. Relative profile values resolve from the global Pi agent directory; a runtime `cwd` override resolves from the active context cwd. |
 | `cli` | `pi`, `claude`, or `agy` | `pi`. See [Antigravity CLI](#antigravity-cli) and [Claude CLI limitations](#claude-cli-limitations). |
 | `disable-model-invocation` | YAML boolean | `false`. When true, hides the profile from `subagents_list`; an exact permitted name remains directly spawnable. |
+| `model-chain` | YAML array of at least two target mappings | Optional ordered AGY/Pi fallback targets. When present, all flat target/lifecycle fields are forbidden. See [Model chains](#model-chains). |
 
 Only actual YAML booleans are accepted. For example, `auto-exit: true` is valid and `auto-exit: "true"` is not.
 
@@ -74,6 +75,77 @@ subagent_agents:
 ```
 
 Every array member must be a string and must not contain commas. Each `subagent_agents` entry must also satisfy the effective `name` restrictions. Empty strings are removed and duplicate entries are collapsed.
+
+## Model chains
+
+`model-chain` defines one logical read-oriented role with ordered provider/model targets:
+
+```yaml
+name: scout
+description: Fast read-only codebase reconnaissance with exact paths and evidence
+builtin-tools: [read, grep, find, ls]
+model-chain:
+  - cli: agy
+    model: gemini-3.8-flash
+    thinking: medium
+  - cli: pi
+    model: cursor/gemini-3.8-flash
+    thinking: medium
+    extensions:
+      - package: git:github.com/GyroZepelix/pi-cursor-provider
+        paths: [index.ts]
+    session-mode: standalone
+    system-prompt: append
+  - cli: pi
+    model: openai-codex/gpt-5.6-luna
+    thinking: medium
+    session-mode: standalone
+    system-prompt: append
+```
+
+The exact `flash-reviewer` frontmatter is:
+
+```yaml
+name: flash-reviewer
+description: Fast read-only review with evidence-backed findings
+builtin-tools: [read, grep, find, ls]
+model-chain:
+  - cli: agy
+    model: gemini-3.8-flash
+    thinking: high
+  - cli: pi
+    model: cursor/gemini-3.8-flash
+    thinking: high
+    extensions:
+      - package: git:github.com/GyroZepelix/pi-cursor-provider
+        paths: [index.ts]
+    session-mode: standalone
+    system-prompt: append
+  - cli: pi
+    model: openai-codex/gpt-5.6-luna
+    thinking: high
+    session-mode: standalone
+    system-prompt: append
+```
+
+Retain its existing Markdown body. The package does not edit global profiles or provider configuration.
+
+The top-level `name`, `description`, `builtin-tools`, `cwd`, Markdown body, and `disable-model-invocation` are shared. Shared built-ins may contain only `read`, `grep`, `find`, and `ls`. Top-level `cli`, `model`, `thinking`, `extensions`, `skill`/`skills`, `subagent_agents`, `session-mode`, `system-prompt`, `auto-exit`, and `interactive` are invalid even when empty. Runtime `model` overrides are also rejected; runtime `cwd` overrides remain available.
+
+Every target must contain exactly a supported `cli` and non-empty `model`, with these optional fields:
+
+- `cli: agy`: `thinking` only.
+- `cli: pi`: `thinking`, `extensions`, `session-mode`, and `system-prompt`.
+
+Claude targets, unknown target keys, nulls, empty values, skills, nesting, lifecycle controls, and mutation/shell built-ins exclude the complete profile with target-indexed diagnostics. Pi target extensions use the exact package resolution rules below. They remain complete trusted extension grants and can register tools, hooks, commands, or providers; the chain's shared built-in restriction is not an extension sandbox.
+
+All targets and statically knowable executable/framework prerequisites are prepared before the first pane. One target runs at a time and auto-exits after its native harness settles. A fallback starts a fresh process and receives only the original task plus the shared role body; partial output, reasoning, tool transcripts, and provider conversation state are not transferred. A fresh `subagent` invocation starts at target one.
+
+Fallback occurs only from validated terminal provider evidence matching durable quota, usage-limit, subscription, billing, budget, or exhausted-credit wording, bare HTTP 429, or case/separator variants of `RESOURCE_EXHAUSTED`. Pi classification uses only the final settled assistant provider error after Pi-owned retries and recovery. AGY classification uses only the structured provider error in a valid terminal `ERROR` envelope. Stderr-only text, malformed JSON, denied actions, unknown/waiting status, non-zero success contradictions, authentication, invalid models, permission failures, cancellation, interruption, and pane loss do not trigger fallback. Bare 429 and resource exhaustion can be temporary throttles; the contract intentionally accepts that ambiguity.
+
+The widget keeps one logical row and shows the active target index/count, harness, and model. The parent receives one final result: a winner plus prior bounded exhaustion provenance, the original unrelated failure, or all bounded exhaustion reasons. Provenance contains only index/count, harness, model, elapsed time, outcome, and a fixed bounded reason—never task text, credentials, stderr, or raw provider payloads.
+
+Before a winner exists, the logical name points to strict package-owned chain state and cannot resume a failed attempt. Success atomically replaces it with the existing native Pi session or AGY snapshot. `subagent_message` then uses only that native winner's normal resume behavior; automatic fallback does not apply to later continuation. Failed and all-exhausted chains are non-resumable, and a new self-contained spawn is required.
 
 ## Package extension selection
 
@@ -118,7 +190,7 @@ AGY profiles use a separate native capability contract. Only `read`, `grep`, `fi
 
 The package loads its protected runtime control first, its spawning control second only when nesting is granted, selected profile extensions in their resolved order, and a tool-free capability activation control last. Before the first model request, activation enables the selected built-ins plus tools registered by the declared extensions. Later extension tools are activated at subsequent pre-model lifecycle checkpoints. Profile extensions may override built-in tool names, while first-loaded custom-tool registrations win duplicate custom names. The protected framework controls retain precedence over ordinary profile extensions.
 
-Every Pi child still receives `ask_question`. A non-empty `subagent_agents` grants `subagent`, `subagent_message`, and `subagents_list` and restricts them to the declared effective profile names. Listing those spawning controls under `builtin-tools` is invalid; `subagent_agents` is the only nested-spawn grant.
+Every flat and native-resumed Pi child still receives `ask_question`. Autonomous chain attempts omit it so they cannot pause for or emit an intermediate parent question. A non-empty `subagent_agents` grants `subagent`, `subagent_message`, and `subagents_list` and restricts them to the declared effective profile names. Listing those spawning controls under `builtin-tools` is invalid; `subagent_agents` is the only nested-spawn grant.
 
 A declared extension runs as trusted arbitrary code with the user's permissions. Selecting it grants its complete behavior, including startup and dynamic tools, hooks, commands, providers, and active-tool changes. This mechanism does not sandbox an extension or filter its individual tools. Review extension packages before granting them.
 
@@ -175,29 +247,7 @@ AGY profiles accept only `name`, `description`, `model`, `thinking`, `cwd`, the 
 
 AGY is one-shot. `subagent_message` rejects active steering without pane input. After successful completion, the same runtime name starts a one-shot continuation from the exact persisted conversation and workspace boundary. Terminal `ERROR`, `CANCELLED`, `INTERRUPTED`, waiting/unknown status, malformed JSON, denied actions, empty response, missing conversation ID, non-zero exit, and bounded stderr diagnostics are surfaced as failures without Pi or Claude fallback. A missing pane advertises resume only when a valid prior conversation snapshot, stored cwd, additional workspaces, and generated agent remain replayable.
 
-For existing profiles, replace the frontmatter as shown and keep the existing body after the closing delimiter unchanged:
-
-```yaml
-# scout
-name: scout
-description: Read-only codebase scout
-cli: agy
-model: gemini-3.8-flash
-thinking: medium
-builtin-tools: [read, grep, find, ls]
-```
-
-```yaml
-# flash-reviewer
-name: flash-reviewer
-description: Read-only focused reviewer
-cli: agy
-model: gemini-3.8-flash
-thinking: high
-builtin-tools: [read, grep, find, ls]
-```
-
-Remove the Pi provider extension and every unsupported lifecycle field listed above. The package does not edit or package external dotfiles.
+Use this flat form when AGY must be the only target. For ordered AGY-to-Pi fallback, use the exact `scout` or `flash-reviewer` contract in [Model chains](#model-chains) and retain the profile's existing body. The package does not edit or package external dotfiles.
 
 ## Claude CLI limitations
 

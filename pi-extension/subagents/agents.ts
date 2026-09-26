@@ -37,6 +37,19 @@ export interface AgentExtensionSelector {
   paths?: string[];
 }
 
+export interface ParsedAgentModelChainTarget {
+  cli: "agy" | "pi";
+  model: string;
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  extensions: AgentExtensionSelector[];
+  sessionMode?: SubagentSessionMode;
+  systemPromptMode?: SystemPromptMode;
+}
+
+export interface AgentModelChainTarget extends ParsedAgentModelChainTarget {
+  extensionPaths: string[];
+}
+
 export interface ParsedAgentDefinition {
   name: string;
   description?: string;
@@ -54,12 +67,14 @@ export interface ParsedAgentDefinition {
   cli?: AgentCli;
   body?: string;
   disableModelInvocation: boolean;
+  modelChain?: ParsedAgentModelChainTarget[];
   source: AgentSource;
   filePath: string;
 }
 
-export interface AgentDefinition extends ParsedAgentDefinition {
+export interface AgentDefinition extends Omit<ParsedAgentDefinition, "modelChain"> {
   extensionPaths: string[];
+  modelChain?: AgentModelChainTarget[];
 }
 
 export interface AgentDiagnostic {
@@ -107,6 +122,7 @@ const SUPPORTED_FIELDS = new Set([
   "cwd",
   "cli",
   "disable-model-invocation",
+  "model-chain",
 ]);
 
 const THINKING_VALUES = new Set([
@@ -332,22 +348,22 @@ function builtinToolList(
   return tools;
 }
 
-function extensionSelectors(
-  frontmatter: AgentFrontmatter,
+function extensionSelectorsValue(
+  value: unknown,
+  fieldName: string,
   filePath: string,
   diagnostics: AgentDiagnostic[],
 ): AgentExtensionSelector[] {
-  const value = frontmatter.extensions;
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
-    diagnostics.push(diagnostic(filePath, "extensions", "must be a YAML array of mappings"));
+    diagnostics.push(diagnostic(filePath, fieldName, "must be a YAML array of mappings"));
     return [];
   }
 
   const selectors: AgentExtensionSelector[] = [];
   const seenPackages = new Set<string>();
   for (const [index, entry] of value.entries()) {
-    const field = `extensions[${index}]`;
+    const field = `${fieldName}[${index}]`;
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       diagnostics.push(diagnostic(filePath, field, "must be a mapping"));
       continue;
@@ -371,9 +387,7 @@ function extensionSelectors(
         diagnostics.push(diagnostic(filePath, `${field}.package`, "must be a non-empty string"));
         valid = false;
       } else if (seenPackages.has(packageSource)) {
-        diagnostics.push(
-          diagnostic(filePath, `${field}.package`, `duplicates package "${packageSource}"`),
-        );
+        diagnostics.push(diagnostic(filePath, `${field}.package`, `duplicates package "${packageSource}"`));
         valid = false;
       } else {
         seenPackages.add(packageSource);
@@ -383,50 +397,35 @@ function extensionSelectors(
     let paths: string[] | undefined;
     if (hasOwn(record, "paths")) {
       if (!Array.isArray(record.paths)) {
-        diagnostics.push(
-          diagnostic(filePath, `${field}.paths`, "must be a non-empty YAML array of strings"),
-        );
+        diagnostics.push(diagnostic(filePath, `${field}.paths`, "must be a non-empty YAML array of strings"));
         valid = false;
       } else if (record.paths.length === 0) {
-        diagnostics.push(
-          diagnostic(filePath, `${field}.paths`, "must not be empty when provided"),
-        );
+        diagnostics.push(diagnostic(filePath, `${field}.paths`, "must not be empty when provided"));
         valid = false;
       } else {
         paths = [];
         const seenPaths = new Set<string>();
         for (const [pathIndex, rawPath] of record.paths.entries()) {
           const pathField = `${field}.paths[${pathIndex}]`;
-          if (typeof rawPath !== "string") {
+          if (typeof rawPath !== "string" || !rawPath.trim()) {
             diagnostics.push(diagnostic(filePath, pathField, "must be a non-empty string"));
             valid = false;
             continue;
           }
           const selector = rawPath;
-          if (!selector.trim()) {
-            diagnostics.push(diagnostic(filePath, pathField, "must be a non-empty string"));
-            valid = false;
-            continue;
-          }
           if (seenPaths.has(selector)) {
             diagnostics.push(diagnostic(filePath, pathField, `duplicates selector "${selector}"`));
             valid = false;
             continue;
           }
           seenPaths.add(selector);
-          if (
-            isAbsolute(selector) ||
-            win32.isAbsolute(selector) ||
-            /^[A-Za-z]:/.test(selector)
-          ) {
+          if (isAbsolute(selector) || win32.isAbsolute(selector) || /^[A-Za-z]:/.test(selector)) {
             diagnostics.push(diagnostic(filePath, pathField, "must be package-relative"));
             valid = false;
             continue;
           }
           if (selector.split(/[\\/]+/).some((segment) => segment === "." || segment === "..")) {
-            diagnostics.push(
-              diagnostic(filePath, pathField, "must not contain '.' or '..' path segments"),
-            );
+            diagnostics.push(diagnostic(filePath, pathField, "must not contain '.' or '..' path segments"));
             valid = false;
             continue;
           }
@@ -435,11 +434,98 @@ function extensionSelectors(
       }
     }
 
-    if (valid && packageSource) {
-      selectors.push({ package: packageSource, ...(paths ? { paths } : {}) });
-    }
+    if (valid && packageSource) selectors.push({ package: packageSource, ...(paths ? { paths } : {}) });
   }
   return selectors;
+}
+
+function extensionSelectors(
+  frontmatter: AgentFrontmatter,
+  filePath: string,
+  diagnostics: AgentDiagnostic[],
+): AgentExtensionSelector[] {
+  return extensionSelectorsValue(frontmatter.extensions, "extensions", filePath, diagnostics);
+}
+
+function modelChainTargets(
+  frontmatter: AgentFrontmatter,
+  filePath: string,
+  diagnostics: AgentDiagnostic[],
+): ParsedAgentModelChainTarget[] | undefined {
+  if (!hasOwn(frontmatter, "model-chain")) return undefined;
+  const value = frontmatter["model-chain"];
+  if (!Array.isArray(value)) {
+    diagnostics.push(diagnostic(filePath, "model-chain", "must be a YAML array containing at least two target mappings"));
+    return [];
+  }
+  if (value.length < 2) {
+    diagnostics.push(diagnostic(filePath, "model-chain", "must contain at least two targets"));
+  }
+
+  const targets: ParsedAgentModelChainTarget[] = [];
+  for (const [index, entry] of value.entries()) {
+    const field = `model-chain[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      diagnostics.push(diagnostic(filePath, field, "must be a mapping"));
+      continue;
+    }
+    const record = entry as AgentFrontmatter;
+    const cli = record.cli;
+    if (cli !== "agy" && cli !== "pi") {
+      diagnostics.push(diagnostic(
+        filePath,
+        `${field}.cli`,
+        cli === "claude" ? "does not support Claude targets; must be one of: agy, pi" : "must be one of: agy, pi",
+      ));
+    }
+    const allowed = cli === "pi"
+      ? new Set(["cli", "model", "thinking", "extensions", "session-mode", "system-prompt"])
+      : new Set(["cli", "model", "thinking"]);
+    for (const key of Object.keys(record)) {
+      if (!allowed.has(key)) {
+        diagnostics.push(diagnostic(filePath, `${field}.${key}`, `cannot be used with cli: ${cli === "pi" ? "pi" : "agy"}`));
+      }
+    }
+    const model = optionalString(record, "model", filePath, diagnostics);
+    if (!hasOwn(record, "model")) diagnostics.push(diagnostic(filePath, `${field}.model`, "is required and must be a non-empty string"));
+    // Re-home generic helper diagnostics under the indexed target field.
+    for (let i = diagnostics.length - 1; i >= 0; i--) {
+      const entryDiagnostic = diagnostics[i];
+      if (entryDiagnostic.filePath === filePath && entryDiagnostic.field === "model") {
+        entryDiagnostic.field = `${field}.model`;
+        break;
+      }
+    }
+    const beforeThinking = diagnostics.length;
+    const thinking = optionalEnum<ParsedAgentModelChainTarget["thinking"]>(record, "thinking", THINKING_VALUES, filePath, diagnostics);
+    if (diagnostics.length > beforeThinking && diagnostics[diagnostics.length - 1].field === "thinking") {
+      diagnostics[diagnostics.length - 1].field = `${field}.thinking`;
+    }
+    const extensions = cli === "pi"
+      ? extensionSelectorsValue(record.extensions, `${field}.extensions`, filePath, diagnostics)
+      : [];
+    if (cli === "pi" && Array.isArray(record.extensions) && record.extensions.length === 0) {
+      diagnostics.push(diagnostic(filePath, `${field}.extensions`, "must not be empty when provided"));
+    }
+    let sessionMode: SubagentSessionMode | undefined;
+    let systemPromptMode: SystemPromptMode | undefined;
+    if (cli === "pi") {
+      const beforeSession = diagnostics.length;
+      sessionMode = optionalEnum(record, "session-mode", SESSION_MODE_VALUES, filePath, diagnostics);
+      if (diagnostics.length > beforeSession && diagnostics[diagnostics.length - 1].field === "session-mode") {
+        diagnostics[diagnostics.length - 1].field = `${field}.session-mode`;
+      }
+      const beforePrompt = diagnostics.length;
+      systemPromptMode = optionalEnum(record, "system-prompt", SYSTEM_PROMPT_VALUES, filePath, diagnostics);
+      if (diagnostics.length > beforePrompt && diagnostics[diagnostics.length - 1].field === "system-prompt") {
+        diagnostics[diagnostics.length - 1].field = `${field}.system-prompt`;
+      }
+    }
+    if ((cli === "agy" || cli === "pi") && model) {
+      targets.push({ cli, model, extensions, ...(thinking ? { thinking } : {}), ...(sessionMode ? { sessionMode } : {}), ...(systemPromptMode ? { systemPromptMode } : {}) });
+    }
+  }
+  return targets;
 }
 
 export function parseAgentDefinition(
@@ -534,6 +620,7 @@ export function parseAgentDefinition(
   const skillsField = hasOwn(frontmatter, "skill") ? "skill" : "skills";
   const builtinTools = builtinToolList(frontmatter, filePath, diagnostics);
   const extensions = extensionSelectors(frontmatter, filePath, diagnostics);
+  const modelChain = modelChainTargets(frontmatter, filePath, diagnostics);
   const skills = stringList(frontmatter, skillsField, filePath, diagnostics);
   const subagentAgents = stringList(frontmatter, "subagent_agents", filePath, diagnostics);
   for (const target of subagentAgents) {
@@ -545,6 +632,26 @@ export function parseAgentDefinition(
     }
   }
   const cli = optionalEnum<AgentCli>(frontmatter, "cli", CLI_VALUES, filePath, diagnostics);
+  if (modelChain !== undefined) {
+    for (const field of [
+      "cli", "model", "thinking", "extensions", "skill", "skills", "subagent_agents",
+      "session-mode", "system-prompt", "auto-exit", "interactive",
+    ] as const) {
+      if (hasOwn(frontmatter, field)) {
+        diagnostics.push(diagnostic(filePath, field, `cannot be used with model-chain; move target-local settings into each target`));
+      }
+    }
+    const chainBuiltins = new Set(["read", "grep", "find", "ls"]);
+    for (const tool of builtinTools) {
+      if (!chainBuiltins.has(tool)) {
+        diagnostics.push(diagnostic(
+          filePath,
+          "builtin-tools",
+          `entry "${tool}" cannot be used with model-chain; supported shared tools: read, grep, find, ls`,
+        ));
+      }
+    }
+  }
   if (cli === "claude") {
     for (const field of ["builtin-tools", "extensions"] as const) {
       if (hasOwn(frontmatter, field)) {
@@ -616,6 +723,7 @@ export function parseAgentDefinition(
     body: normalizedBody || undefined,
     disableModelInvocation:
       optionalBoolean(frontmatter, "disable-model-invocation", filePath, diagnostics) ?? false,
+    ...(modelChain !== undefined ? { modelChain } : {}),
     source,
     filePath,
   };
@@ -1276,6 +1384,40 @@ async function resolveAgentExtensions(
   };
 }
 
+async function resolveCompleteAgentExtensions(
+  agent: ParsedAgentDefinition,
+  catalog: PackageCatalog,
+): Promise<{ agent: AgentDefinition | null; diagnostics: AgentDiagnostic[] }> {
+  if (!agent.modelChain) return resolveAgentExtensions(agent, catalog);
+
+  const diagnostics: AgentDiagnostic[] = [];
+  const resolvedTargets: AgentModelChainTarget[] = [];
+  for (const [index, target] of agent.modelChain.entries()) {
+    const synthetic: ParsedAgentDefinition = {
+      ...agent,
+      extensions: target.extensions,
+      modelChain: undefined,
+    };
+    const resolved = await resolveAgentExtensions(synthetic, catalog);
+    diagnostics.push(...resolved.diagnostics.map((entry) => ({
+      ...entry,
+      ...(entry.field
+        ? { field: entry.field.replace(/^extensions/, `model-chain[${index}].extensions`) }
+        : {}),
+    })));
+    if (resolved.agent) {
+      resolvedTargets.push({ ...target, extensionPaths: resolved.agent.extensionPaths });
+    }
+  }
+
+  return {
+    agent: diagnostics.length === 0 && resolvedTargets.length === agent.modelChain.length
+      ? { ...agent, extensionPaths: [], modelChain: resolvedTargets }
+      : null,
+    diagnostics,
+  };
+}
+
 export async function discoverAgentDefinitions(
   options: DiscoverAgentDefinitionsOptions,
 ): Promise<AgentDiscoveryResult> {
@@ -1309,10 +1451,12 @@ export async function discoverAgentDefinitions(
 
   const parsedAgents = [...agents.values()];
   let discovered: AgentDefinition[];
-  if (parsedAgents.some((agent) => agent.extensions.length > 0)) {
+  if (parsedAgents.some((agent) =>
+    agent.extensions.length > 0 || agent.modelChain?.some((target) => target.extensions.length > 0)
+  )) {
     const catalog = loadPackageCatalog(options, projectAgentsDir);
     const resolved = await Promise.all(
-      parsedAgents.map((agent) => resolveAgentExtensions(agent, catalog)),
+      parsedAgents.map((agent) => resolveCompleteAgentExtensions(agent, catalog)),
     );
     discovered = [];
     for (const result of resolved) {
@@ -1320,7 +1464,13 @@ export async function discoverAgentDefinitions(
       if (result.agent) discovered.push(result.agent);
     }
   } else {
-    discovered = parsedAgents.map((agent) => ({ ...agent, extensionPaths: [] }));
+    discovered = parsedAgents.map((agent) => ({
+      ...agent,
+      extensionPaths: [],
+      ...(agent.modelChain
+        ? { modelChain: agent.modelChain.map((target) => ({ ...target, extensionPaths: [] })) }
+        : {}),
+    }));
   }
 
   const allowed = options.allowedNames;

@@ -28,6 +28,7 @@ Repository-local planning and execution artifacts.
 | [Finalize subagents only after agent settlement](./archive/260922-1641-finalize-subagents-only-after-agent-settlement/plan.md) | work-item | completed | 2026-09-22 |
 | [Add Antigravity harness support](./archive/260925-1525-add-antigravity-harness-support/plan.md) | work-item | completed | 2026-09-25 |
 | [Allow AGY subagents to read the parent workspace](./archive/260926-1205-allow-agy-subagents-to-read-the-parent-workspace/plan.md) | work-item | completed | 2026-09-26 |
+| [Configurable model fallback](./archive/260926-1248-configurable-model-fallback/plan.md) | work-item | completed | 2026-09-26 |
 <!-- spec-items:archive:end -->
 
 ## Templates

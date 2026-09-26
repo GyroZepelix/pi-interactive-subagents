@@ -1,7 +1,7 @@
 /**
  * Runtime control extension loaded into subagents.
  * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+Alt+O)
- * - Provides an `ask_question` tool for asking the parent orchestrator a question
+ * - Provides `ask_question` for flat/native Pi runs; chain attempts omit it to preserve one final delivery
  *
  * Subagents do NOT self-terminate via a tool. Auto-exit agents shut down
  * automatically after Pi reports that the agent is settled; interactive agents
@@ -17,6 +17,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import { SUBAGENT_MODEL_CHAIN_ENV } from "./subagent-protocol.ts";
 import {
   QUESTION_PROTOCOL_VERSION,
   createQuestionId,
@@ -131,6 +132,7 @@ export default function (pi: ExtensionAPI) {
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1";
+  const modelChainAttempt = process.env[SUBAGENT_MODEL_CHAIN_ENV] === "1";
   const recorder = createSubagentActivityRecorder({
     runningChildId: process.env.PI_SUBAGENT_ID,
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
@@ -383,7 +385,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  if (!modelChainAttempt) pi.registerTool({
     name: "ask_question",
     label: "ask_question",
     description:

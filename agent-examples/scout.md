@@ -1,20 +1,24 @@
 ---
 name: scout
 description: Fast read-only codebase reconnaissance with exact paths and evidence
-model: cursor/gemini-3.8-flash
-thinking: medium
-builtin-tools:
-  - read
-  - grep
-  - find
-  - ls
-extensions:
-  - package: "npm:@offbynan/pi-cursor-provider"
-    paths:
-      - index.ts
-session-mode: standalone
-system-prompt: append
-auto-exit: true
+builtin-tools: [read, grep, find, ls]
+model-chain:
+  - cli: agy
+    model: gemini-3.8-flash
+    thinking: medium
+  - cli: pi
+    model: cursor/gemini-3.8-flash
+    thinking: medium
+    extensions:
+      - package: git:github.com/GyroZepelix/pi-cursor-provider
+        paths: [index.ts]
+    session-mode: standalone
+    system-prompt: append
+  - cli: pi
+    model: openai-codex/gpt-5.6-luna
+    thinking: medium
+    session-mode: standalone
+    system-prompt: append
 ---
 
 You are a read-only codebase scout. Investigate the requested area quickly and return a standalone, evidence-based report.

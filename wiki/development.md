@@ -24,7 +24,7 @@ When running the top-level unit suite from inside a spawned subagent, unset `PI_
 
 ## Test organization
 
-- `test/test.ts` directly imports production modules and exercises session persistence, validated profile discovery, trust, precedence, canonical identity, fail-closed tools, activity/status transitions, tool registration, runtime names, steering acknowledgment and timeout, settled auto-exit event sequences (including retry recovery, final error, abort, and outstanding-work guards), missing-pane recovery, rendering, and tmux helpers.
+- `test/test.ts` directly imports production modules and exercises session persistence, validated profile discovery, trust, precedence, canonical identity, fail-closed tools, model-chain parsing/extension resolution/preparation/classification/sequencing/registry ownership, activity/status transitions, tool registration, runtime names, steering acknowledgment and timeout, settled auto-exit event sequences (including retry recovery, final error, abort, and outstanding-work guards), missing-pane recovery, rendering, and tmux helpers.
 - `test/integration/tmux-surface.test.ts` performs real pane operations without model calls. Its bracketed-paste fixture records framing, byte length, hash, and submission count for a 4,283-byte UTF-8 payload, accepts a short follow-up, and verifies buffer cleanup; the suite also removes a disposable pane to exercise interruption detection (`test/integration/fixtures/bracketed-paste-recorder.mjs`).
 - `test/integration/subagent-lifecycle.test.ts` performs real Pi and model interactions and writes markers under `/tmp`.
 - Integration fixtures define `session-mode`, body and `system-prompt` behavior, and `ask_question`; they do not use removed public spawn overrides.
@@ -46,4 +46,4 @@ When running the top-level unit suite from inside a spawned subagent, unset `PI_
 ## Current limitations
 
 - There is no tracked CI, release automation, formatter, linter, or non-emitting type-check configuration.
-- General stop/interrupt controls, correlation-safe acknowledgment for active Pi or Claude input, automatic replay, shell-readiness redesign, broader configuration, orchestration modularization, and unrelated dead-code cleanup remain deferred. Waiting Pi input has bounded activity-based confirmation, while ambiguous timeout recovery remains explicit and operator-controlled.
+- General stop/interrupt controls, correlation-safe acknowledgment for active Pi or Claude input, cross-provider conversation transfer, chain crash recovery, shell-readiness redesign, broader configuration, further orchestration modularization, and unrelated dead-code cleanup remain deferred. Waiting Pi input has bounded activity-based confirmation, while ambiguous timeout recovery remains explicit and operator-controlled.

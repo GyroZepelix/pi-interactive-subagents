@@ -86,7 +86,7 @@ export interface AgyUsage {
 
 export type ParsedAgyResult =
   | { ok: true; response: string; conversationId: string; usage: AgyUsage | null }
-  | { ok: false; error: string; status?: string };
+  | { ok: false; error: string; status?: string; providerError?: string };
 
 function finiteNonnegative(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -116,16 +116,17 @@ export function parseAgyResult(raw: string, stderr = ""): ParsedAgyResult {
   const status = typeof result.status === "string" ? result.status.trim().toUpperCase() : "";
   if (!status) return { ok: false, error: "AGY result is missing a valid terminal status" };
 
+  if (Array.isArray(result.denied_actions) && result.denied_actions.length > 0) {
+    const denied = boundedDiagnostic(JSON.stringify(result.denied_actions));
+    const stderrDetail = boundedDiagnostic(stderr);
+    return {
+      ok: false,
+      status,
+      error: `AGY denied one or more actions: ${denied}${stderrDetail ? `; stderr: ${stderrDetail}` : ""}`,
+    };
+  }
+
   if (status === "SUCCESS") {
-    if (Array.isArray(result.denied_actions) && result.denied_actions.length > 0) {
-      const denied = boundedDiagnostic(JSON.stringify(result.denied_actions));
-      const stderrDetail = boundedDiagnostic(stderr);
-      return {
-        ok: false,
-        status,
-        error: `AGY denied one or more actions: ${denied}${stderrDetail ? `; stderr: ${stderrDetail}` : ""}`,
-      };
-    }
     if (typeof result.response !== "string" || !result.response.trim()) {
       return { ok: false, status, error: "AGY reported success without a non-empty response" };
     }
@@ -163,6 +164,7 @@ export function parseAgyResult(raw: string, stderr = ""): ParsedAgyResult {
     ok: false,
     status,
     error: `${state}${structured ? `: ${structured}` : ""}${stderrDetail ? `; stderr: ${stderrDetail}` : ""}`,
+    ...(status === "ERROR" && structured ? { providerError: structured } : {}),
   };
 }
 

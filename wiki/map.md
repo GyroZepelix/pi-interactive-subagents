@@ -6,7 +6,8 @@
 | --- | --- |
 | `pi-extension/subagents/index.ts` | Main Pi extension entry point, tool schemas, canonical profile selection, launch/resume orchestration, watchers, widgets, and message renderers. |
 | `pi-extension/subagents/agents.ts` | YAML profile parsing, harness-specific validation, diagnostics, trusted nearest-project discovery, package extension resolution, global/project precedence, and canonical definitions. |
-| `pi-extension/subagents/agy.ts` | Pure AGY read-tool translation, generated primary-agent serialization, command construction, strict JSON result parsing, and exact resume-state persistence/validation. |
+| `pi-extension/subagents/agy.ts` | Pure AGY read-tool translation, generated primary-agent serialization, command construction, strict JSON result parsing, structured terminal provider evidence, and exact resume-state persistence/validation. |
+| `pi-extension/subagents/model-chain.ts` | Pure exhaustion classification, bounded attempt provenance, sequential injected controller, and strict atomic chain-sidecar persistence/validation. |
 | `pi-extension/subagents/tmux.ts` | tmux availability, pane lifecycle, command delivery, screen capture, layout balancing, and completion polling. |
 | `pi-extension/subagents/session.ts` | Session JSONL helpers, session seeding, persistent name registry, sandbox loadout sidecars, result extraction, and usage summaries. |
 | `pi-extension/subagents/activity.ts` | Versioned activity snapshot schema, validation, and atomic recorder. |
@@ -41,5 +42,6 @@ The runtime control registers protected `ask_question` and `Ctrl+Alt+O` for the 
 - Pane behavior or shell delivery: `pi-extension/subagents/tmux.ts` and `test/integration/tmux-surface.test.ts`.
 - Persistence or session compatibility: `pi-extension/subagents/session.ts` and its unit-test sections in `test/test.ts`.
 - AGY capability, command, result, or snapshot behavior: `pi-extension/subagents/agy.ts`, routing in `index.ts`, and focused AGY tests in `test/test.ts`.
+- Model-chain classification, sequencing, or chain state: `pi-extension/subagents/model-chain.ts`, profile contracts in `agents.ts`, orchestration/rendering in `index.ts`, registry ownership in `session.ts`, and focused tests in `test/test.ts`.
 - Activity/status behavior: `activity.ts`, `status.ts`, `subagent-runtime-control.ts`, and corresponding unit tests.
 - Status configuration: `config.json.example` and `pi-extension/subagents/status.ts`.

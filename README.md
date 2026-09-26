@@ -90,29 +90,38 @@ Inspect the requested code and report evidence without changing files.
 
 The extension keeps the resolved child cwd as AGY's process workspace and generates a collision-resistant primary-agent definition under the parent Pi session's artifact directory. It passes that generated-agent root through `--add-dir` and, when the parent Pi cwd differs from the child cwd, passes the resolved parent cwd once as a second added workspace. No task text or referenced path can add another root. It does not write either repository, `~/.gemini`, AGY settings, authentication, plugins, or external profile dotfiles, and it never passes `--dangerously-skip-permissions`. Under AGY's default no-override policy, granted reads in these workspaces are prompt-free; explicit user permission rules can still deny them, and reported denials fail with bounded action and stderr diagnostics.
 
-To migrate existing `scout` and `flash-reviewer` profiles, replace only their frontmatter with the corresponding form below and retain each existing Markdown body unchanged:
+### Model fallback chains
+
+A read-oriented profile may declare an ordered `model-chain` instead of one top-level harness/model. The extension validates every target and package extension before creating the first pane, then runs one fresh autonomous attempt at a time. Only a terminal provider exhaustion signal advances the chain; success or any authentication, configuration, permission, tool, malformed-output, cancellation, interruption, pane-loss, or unknown failure stops it.
+
+Use this exact shape for `scout`, retaining its existing Markdown body:
 
 ```yaml
-# scout
 name: scout
-description: Read-only codebase scout
-cli: agy
-model: gemini-3.8-flash
-thinking: medium
+description: Fast read-only codebase reconnaissance with exact paths and evidence
 builtin-tools: [read, grep, find, ls]
+model-chain:
+  - cli: agy
+    model: gemini-3.8-flash
+    thinking: medium
+  - cli: pi
+    model: cursor/gemini-3.8-flash
+    thinking: medium
+    extensions:
+      - package: git:github.com/GyroZepelix/pi-cursor-provider
+        paths: [index.ts]
+    session-mode: standalone
+    system-prompt: append
+  - cli: pi
+    model: openai-codex/gpt-5.6-luna
+    thinking: medium
+    session-mode: standalone
+    system-prompt: append
 ```
 
-```yaml
-# flash-reviewer
-name: flash-reviewer
-description: Read-only focused reviewer
-cli: agy
-model: gemini-3.8-flash
-thinking: high
-builtin-tools: [read, grep, find, ls]
-```
+`flash-reviewer` uses the same three targets with `thinking: high`, its own description, and its existing Markdown body. These are migration examples only—the package does not edit user profiles, settings, credentials, or provider packages.
 
-Remove the Pi provider `extensions`, `skill`/`skills`, `subagent_agents`, `system-prompt`, `session-mode`, `auto-exit`, and `interactive` fields; AGY rejects them rather than ignoring them. These are migration examples only—the package does not edit user dotfiles.
+Chain targets support only `cli: agy` and `cli: pi`. Shared built-ins are limited to `read`, `grep`, `find`, and `ls`; skills and nested spawning are forbidden. AGY targets own `model` and optional `thinking`. Pi targets may also own `extensions`, `session-mode`, and `system-prompt`. A target extension remains a complete trusted executable grant, not a provider-only sandbox.
 
 ## Tools
 
@@ -137,7 +146,7 @@ subagent({ agent: "implementer", name: "dark-mode", task: "Implement the toggle"
 | `agent` | Yes | Effective name of a valid permitted profile |
 | `task` | Yes | Task sent to the child |
 | `name` | No | Runtime display and addressing name. Omitted names are suffixed when needed; colliding explicit names are rejected |
-| `model` | No | Non-empty model override for this launch; surrounding whitespace is trimmed |
+| `model` | No | Non-empty model override for a flat profile; rejected when the profile declares `model-chain` |
 | `cwd` | No | Non-empty working-directory override, trimmed and resolved from the active context when relative |
 
 Spawn errors identify invalid profile files and explain where to create global or project profiles when none are available.
@@ -159,10 +168,11 @@ Names are unique within one parent session and remain registered after a child f
 - New snapshots retain selected built-ins and ordered canonical profile extension paths. Resume uses the current contents at those paths and is refused before pane creation if required state or files are missing, malformed, non-canonical, duplicated, or reserved.
 - Existing valid strict `toolAllowlist` snapshots remain resumable through their legacy `--tools` path and are not rewritten automatically.
 - A finished `cli: claude` child cannot be resumed through `subagent_message`.
+- During a model chain, the logical name points to strict non-resumable controller state. On success it is atomically replaced by the winning Pi session or AGY snapshot, and later `subagent_message` uses only that native resume path. Failed and all-exhausted chains cannot resume a failed attempt; start a new self-contained `subagent` invocation, which begins again at target one. A later native continuation never triggers automatic fallback.
 
 ### Ask the parent
 
-Every Pi child receives `ask_question`, even when its profile has no ordinary tools. Calling it atomically publishes a correlated question and keeps the tool pending, so no follow-up model request can occur while the answer is missing. The parent replies through `subagent_message`; the protected child input handler consumes that private answer without queueing a second user turn, returns it as the tool result, and the same agent run continues.
+Every flat or native-resumed Pi child receives `ask_question`, even when its profile has no ordinary tools. Chain attempts omit it so a fallback operation cannot emit an intermediate question instead of its single final result. In supported children, calling it atomically publishes a correlated question and keeps the tool pending, so no follow-up model request can occur while the answer is missing. The parent replies through `subagent_message`; the protected child input handler consumes that private answer without queueing a second user turn, returns it as the tool result, and the same agent run continues.
 
 ### Recover an unresponsive child
 
@@ -185,6 +195,8 @@ A declared extension is a grant to execute the complete trusted extension with t
 Child extension order is protected runtime control first, optional spawning control second, selected profile extensions in resolved order, and tool-free capability activation last. This keeps framework tool names protected while activating selected built-ins and extension tools before model requests. Nested spawning is granted only by a non-empty `subagent_agents` field, and `PI_SUBAGENT_ALLOWED` pins the child to those effective names. Listing spawning controls under `builtin-tools` is invalid.
 
 Project-controlled prompts are read only when `ctx.isProjectTrusted()` is true. `builtin-tools` and `extensions` are Pi-only for `cli: claude` and make such a profile invalid, even when explicitly empty. For `cli: agy`, `builtin-tools` is the strict native-tool allowlist; Pi extensions and lifecycle fields are unsupported and explicitly rejected.
+
+For `model-chain`, all flat target and lifecycle fields are rejected at the top level. The profile body, identity, cwd, and read built-ins are shared. Each target owns only its documented harness fields, and Pi extension selectors use the same exact read-only package resolution as flat profiles. Exhaustion matching accepts durable quota, usage-limit, subscription, billing, budget, and depleted-credit wording plus bare terminal 429 and `resource_exhausted` separator/case variants. Bare 429 and resource exhaustion may represent temporary throttling; choosing fallback on those signals intentionally accepts that ambiguity. Attempt provenance stores only target index/count, harness, model, elapsed time, outcome, and a fixed bounded reason—never task text or raw provider payloads.
 
 ## Runtime names
 

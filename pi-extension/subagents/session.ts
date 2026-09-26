@@ -314,11 +314,17 @@ export interface AgyNameRegistryEntry {
   stateFile: string;
 }
 
-export type NameRegistryEntry = PiNameRegistryEntry | AgyNameRegistryEntry;
+export interface ChainNameRegistryEntry {
+  harness: "chain";
+  /** Absolute path to the package-owned strict non-resumable chain state. */
+  stateFile: string;
+}
+
+export type NameRegistryEntry = PiNameRegistryEntry | AgyNameRegistryEntry | ChainNameRegistryEntry;
 export type NameRegistry = Record<string, NameRegistryEntry>;
 
 const PI_NAME_REGISTRY_ENTRY_FIELDS = new Set(["sessionFile", "sessionId"]);
-const AGY_NAME_REGISTRY_ENTRY_FIELDS = new Set(["harness", "stateFile"]);
+const EXTERNAL_NAME_REGISTRY_ENTRY_FIELDS = new Set(["harness", "stateFile"]);
 
 function isPersistedRuntimeName(name: string): boolean {
   return !!name && name === name.trim() && !/[\x00-\x1f\x7f]/.test(name);
@@ -328,10 +334,10 @@ function isNameRegistryEntry(value: unknown): value is NameRegistryEntry {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const entry = value as Record<string, unknown>;
   const keys = Object.keys(entry);
-  if (entry.harness === "agy") {
+  if (entry.harness === "agy" || entry.harness === "chain") {
     return (
-      keys.length === AGY_NAME_REGISTRY_ENTRY_FIELDS.size &&
-      keys.every((key) => AGY_NAME_REGISTRY_ENTRY_FIELDS.has(key)) &&
+      keys.length === EXTERNAL_NAME_REGISTRY_ENTRY_FIELDS.size &&
+      keys.every((key) => EXTERNAL_NAME_REGISTRY_ENTRY_FIELDS.has(key)) &&
       typeof entry.stateFile === "string" &&
       !!entry.stateFile &&
       isAbsolute(entry.stateFile)
@@ -676,6 +682,21 @@ export function getNewEntries(sessionFile: string, afterLine: number): SessionEn
  * auto-retry exhausts on a provider overload / rate limit / server error, and
  * without this fallback the parent would silently see a stale earlier message.
  */
+export function findLastAssistantProviderError(entries: SessionEntry[]): string | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type !== "message") continue;
+    const message = (entry as MessageEntry).message;
+    if (message.role !== "assistant") continue;
+    const stopReason = (message as { stopReason?: unknown }).stopReason;
+    const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
+    return stopReason === "error" && typeof errorMessage === "string" && errorMessage.trim()
+      ? errorMessage.trim()
+      : null;
+  }
+  return null;
+}
+
 export function findLastAssistantMessage(entries: SessionEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];

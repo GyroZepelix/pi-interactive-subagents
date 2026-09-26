@@ -32,6 +32,7 @@ import {
 import {
   countSessionEntryLines,
   findLastAssistantMessage,
+  findLastAssistantProviderError,
   getNewEntries,
   getSessionId,
   readNameRegistry,
@@ -68,9 +69,13 @@ import {
   discoverAgentDefinitions,
   formatAgentDiagnostic,
   type AgentDefinition,
+  type AgentModelChainTarget,
   type SubagentSessionMode,
 } from "./agents.ts";
-import { SUBAGENT_BUILTIN_TOOLS_ENV } from "./subagent-protocol.ts";
+import {
+  SUBAGENT_BUILTIN_TOOLS_ENV,
+  SUBAGENT_MODEL_CHAIN_ENV,
+} from "./subagent-protocol.ts";
 import {
   encodeQuestionAnswer,
   questionAcknowledgmentPath,
@@ -96,6 +101,13 @@ import {
   type AgyResumeState,
   type AgyUsage,
 } from "./agy.ts";
+import {
+  readModelChainState,
+  runModelChain,
+  writeModelChainState,
+  type ChainAttemptProvenance,
+  type ModelChainState,
+} from "./model-chain.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -552,12 +564,18 @@ interface SubagentResult {
   sessionId?: string;
   claudeSessionId?: string;
   agyConversationId?: string;
+  /** Internal native resume snapshot path; never included in public result details. */
+  agyStateFile?: string;
   agyUsage?: AgyUsage | null;
   exitCode: number;
   elapsed: number;
   error?: string;
   /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
   errorMessage?: string;
+  /** Validated terminal provider evidence used only by model-chain classification. */
+  providerError?: string;
+  chainAttempts?: ChainAttemptProvenance[];
+  chainWinnerIndex?: number;
   /** True when the externally owned tmux pane disappeared before completion. */
   interrupted?: boolean;
   /** Whether this child can resume through subagent_message. */
@@ -594,7 +612,17 @@ interface RunningSubagent {
   agyStderrFile?: string;
   agyStateFile?: string;
   agyRegistryPersisted?: boolean;
+  chainTarget?: {
+    controllerId: string;
+    startedAt: number;
+    index: number;
+    count: number;
+    harness: "agy" | "pi";
+    model: string;
+  };
   statusState: SubagentStatusState;
+  /** Keep chain attempts visible in the widget without intermediate parent status steers. */
+  suppressStatusMessages?: boolean;
   /** Serializes acknowledgment for an idle waiting child so one activity
    * advance cannot confirm two concurrently submitted generic replies. */
   pendingWaitingReply?: boolean;
@@ -714,9 +742,12 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
   const lines: string[] = [borderTop(title, info, width)];
 
   for (const agent of agents) {
-    const elapsed = formatElapsedMMSS(agent.startTime);
+    const elapsed = formatElapsedMMSS(agent.chainTarget?.startedAt ?? agent.startTime);
     const harnessTag = agent.cli === "agy" ? "agy" : null;
-    const tags = [agent.agent, harnessTag].filter((tag): tag is string => !!tag);
+    const chainTag = agent.chainTarget
+      ? `target ${agent.chainTarget.index}/${agent.chainTarget.count} · ${agent.chainTarget.harness} · ${agent.chainTarget.model}`
+      : null;
+    const tags = [agent.agent, chainTag ?? harnessTag].filter((tag): tag is string => !!tag);
     const agentTag = tags.length > 0 ? ` (${tags.join(" · ")})` : "";
     const snapshot = classifyStatus(agent.statusState, Date.now());
     const icon = widgetIcon(snapshot.kind);
@@ -809,7 +840,7 @@ interface PreparedAgentSandbox {
   grantSpawning: boolean;
 }
 
-interface PreparedAgentLaunch {
+interface PreparedSingleAgentLaunch {
   harness: "pi" | "claude" | "agy";
   effectiveModel?: string;
   effectiveSkills: readonly string[];
@@ -828,6 +859,18 @@ interface PreparedAgentLaunch {
   capabilityEnvironment: string[];
   agyNativeTools: string[];
 }
+
+interface PreparedChainTarget {
+  definition: AgentDefinition;
+  target: AgentModelChainTarget;
+  launch: PreparedSingleAgentLaunch;
+}
+
+interface PreparedModelChainLaunch {
+  chainTargets: PreparedChainTarget[];
+}
+
+type PreparedAgentLaunch = PreparedSingleAgentLaunch | PreparedModelChainLaunch;
 
 function prepareAgentSandbox(
   agent: AgentDefinition,
@@ -871,6 +914,13 @@ function prepareAgentLaunch(
   sandbox: PreparedAgentSandbox,
   activeCwd: string,
 ): { launch: PreparedAgentLaunch } | { error: string } {
+  if (agent.modelChain && params.model !== undefined) {
+    return {
+      error:
+        `Agent "${agent.name}" declares model-chain, so the runtime model override is not allowed. ` +
+        `Change the ordered targets in ${agent.filePath} or omit model.`,
+    };
+  }
   const modelOverride = params.model?.trim();
   if (params.model !== undefined && !modelOverride) {
     return { error: "The runtime model override must not be empty." };
@@ -885,6 +935,42 @@ function prepareAgentLaunch(
     ...(params.model !== undefined ? { model: modelOverride } : {}),
     ...(params.cwd !== undefined ? { cwd: cwdOverride } : {}),
   };
+
+  if (agent.modelChain) {
+    const chainTargets: PreparedChainTarget[] = [];
+    for (const target of agent.modelChain) {
+      const definition: AgentDefinition = {
+        ...agent,
+        modelChain: undefined,
+        cli: target.cli,
+        model: target.model,
+        thinking: target.thinking,
+        extensions: target.extensions,
+        extensionPaths: target.extensionPaths,
+        skills: [],
+        subagentAgents: [],
+        autoExit: true,
+        interactive: false,
+        systemPromptMode: target.systemPromptMode,
+        sessionMode: target.sessionMode,
+      };
+      const targetSandbox = prepareAgentSandbox(definition);
+      if ("error" in targetSandbox) return targetSandbox;
+      const preparedTarget = prepareAgentLaunch(
+        normalizedParams,
+        definition,
+        targetSandbox.sandbox,
+        activeCwd,
+      );
+      if ("error" in preparedTarget) return preparedTarget;
+      if ("chainTargets" in preparedTarget.launch) {
+        return { error: `Agent "${agent.name}" produced a nested model-chain launch` };
+      }
+      chainTargets.push({ definition, target, launch: preparedTarget.launch });
+    }
+    return { launch: { chainTargets } };
+  }
+
   const effectiveModel = normalizedParams.model ?? agent.model;
   const effectiveSkills = agent.skills;
   const effectiveThinking = agent.thinking;
@@ -1452,6 +1538,15 @@ async function handleSubagentSteer(
   }
 
   const running = resolved.running;
+  if (running.chainTarget) {
+    const err =
+      `Active steering is unsupported while model-chain subagent "${running.name}" is running ` +
+      `target ${running.chainTarget.index}/${running.chainTarget.count}. Wait for its single final result.`;
+    return {
+      content: [{ type: "text" as const, text: err }],
+      details: { error: err, id: running.id, name: running.name, status: "unsupported", harness: "chain" },
+    };
+  }
   if (running.cli === "agy") {
     const err =
       `Active steering is unsupported for AGY subagent "${running.name}". ` +
@@ -1648,7 +1743,7 @@ function startStatusRefresh(pi: ExtensionAPI) {
       // wake the parent session on stalled/recovered transitions — the user is
       // working in the subagent's pane, and a steer message here would burn an
       // orchestrator turn on a no-op "still waiting" ping. Widget still updates.
-      if (transition && !running.interactive) {
+      if (transition && !running.interactive && !running.suppressStatusMessages) {
         transitionLines.push(formatTransitionLine(running.name, snapshot, transition));
       }
     }
@@ -1716,6 +1811,7 @@ export const __test__ = {
   steerSubagent,
   handleSubagentSteer,
   resolveResultPresentation,
+  resolveChainResultPresentation,
   resolveResumeLaunchBehavior,
   watchSubagent,
   runningSubagents,
@@ -1746,7 +1842,7 @@ async function launchSubagent(
   params: typeof SubagentParams.static,
   ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
   agentDefs: AgentDefinition,
-  prepared: PreparedAgentLaunch,
+  prepared: PreparedSingleAgentLaunch,
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
@@ -2255,6 +2351,7 @@ async function watchSubagent(
           exitCode: result.exitCode === 0 ? 1 : result.exitCode,
           elapsed,
           errorMessage: failure,
+          ...(!parsed.ok && parsed.providerError ? { providerError: parsed.providerError } : {}),
           resumeSupported: false,
         };
       }
@@ -2301,6 +2398,7 @@ async function watchSubagent(
         summary: persistenceError ? `${parsed.response}\n\n${persistenceError}.` : parsed.response,
         sessionFile,
         agyConversationId: parsed.conversationId,
+        ...(running.agyStateFile ? { agyStateFile: running.agyStateFile } : {}),
         agyUsage: parsed.usage,
         exitCode: 0,
         elapsed,
@@ -2349,8 +2447,10 @@ async function watchSubagent(
 
     // Pi subagent result extraction
     let summary: string;
+    let providerError: string | null = null;
     if (existsSync(sessionFile)) {
       const allEntries = getNewEntries(sessionFile, 0);
+      providerError = findLastAssistantProviderError(allEntries);
       summary =
         findLastAssistantMessage(allEntries) ??
         (result.errorMessage
@@ -2382,6 +2482,7 @@ async function watchSubagent(
       exitCode: result.exitCode,
       elapsed,
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+      ...(providerError ? { providerError } : {}),
       ...(stats ? { stats } : {}),
     };
   } catch (err: any) {
@@ -2419,6 +2520,219 @@ async function watchSubagent(
         : running.cli !== "claude",
     };
   }
+}
+
+function chainAttemptLine(attempt: ChainAttemptProvenance): string {
+  const target = `${attempt.targetIndex}/${attempt.targetCount} ${attempt.harness} ${attempt.model}`;
+  return attempt.outcome === "exhausted"
+    ? `${target}: exhausted (${attempt.exhaustionReason})`
+    : `${target}: ${attempt.outcome}`;
+}
+
+function resolveChainResultPresentation(result: SubagentResult, name: string): string {
+  const attempts = result.chainAttempts ?? [];
+  const provenance = attempts.map(chainAttemptLine).join("\n");
+  if (result.chainWinnerIndex !== undefined) {
+    const winner = attempts[result.chainWinnerIndex];
+    const resume = result.resumeSupported === false
+      ? `\n\n${result.persistenceError ?? "Winner state could not be persisted"}. The result is valid, but this runtime name is not resumable.`
+      : `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
+    return (
+      `Sub-agent "${name}" completed via model-chain target ${winner.targetIndex}/${winner.targetCount} ` +
+      `(${winner.harness} ${winner.model}) after ${formatElapsed(result.elapsed)}.\n\n` +
+      `${result.summary}${provenance ? `\n\nAttempts:\n${provenance}` : ""}${resume}`
+    );
+  }
+  if (attempts.length > 0 && attempts.every((attempt) => attempt.outcome === "exhausted")) {
+    return `Sub-agent "${name}" failed because every model-chain target was exhausted.\n\n${provenance}\n\nThis chain result is not resumable.`;
+  }
+  return (
+    `Sub-agent "${name}" stopped at model-chain target ${attempts.length || 1}.\n\n` +
+    `${result.errorMessage ? `Error: ${result.errorMessage}` : result.summary}` +
+    `${provenance ? `\n\nAttempts:\n${provenance}` : ""}\n\nThis chain result is not resumable.`
+  );
+}
+
+async function startPreparedModelChain(params: {
+  toolParams: typeof SubagentParams.static;
+  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string };
+  agent: AgentDefinition;
+  prepared: PreparedModelChainLaunch;
+  parentArtifactDir: string;
+  abortController: AbortController;
+}): Promise<{ first: RunningSubagent; completion: Promise<SubagentResult>; stateFile: string }> {
+  const controllerId = randomUUID();
+  const controllerStartedAt = Date.now();
+  const { toolParams, ctx, agent, prepared, parentArtifactDir, abortController } = params;
+  const signal = abortController.signal;
+  const stateFile = resolve(join(parentArtifactDir, "model-chain", "state", `${controllerId}.json`));
+  const targetCount = prepared.chainTargets.length;
+  let state: ModelChainState = {
+    version: 1,
+    harness: "chain",
+    profileName: agent.name,
+    runtimeName: toolParams.name,
+    currentTargetIndex: 1,
+    targetCount,
+    status: "running",
+    attempts: [],
+  };
+  writeModelChainState(stateFile, state);
+  if (!registerName(parentArtifactDir, toolParams.name, { harness: "chain", stateFile })) {
+    throw new Error(`Could not persist strict model-chain ownership for runtime name "${toolParams.name}"`);
+  }
+
+  let first: RunningSubagent | null = null;
+  const launchAttempt = async (index: number): Promise<RunningSubagent> => {
+    const preparedTarget = prepared.chainTargets[index];
+    state = { ...state, currentTargetIndex: index + 1, status: "running" };
+    writeModelChainState(stateFile, state);
+    const chainLaunch: PreparedSingleAgentLaunch = preparedTarget.target.cli === "pi"
+      ? {
+          ...preparedTarget.launch,
+          capabilityEnvironment: [
+            ...preparedTarget.launch.capabilityEnvironment,
+            `${SUBAGENT_MODEL_CHAIN_ENV}=1`,
+          ],
+        }
+      : preparedTarget.launch;
+    const running = await launchSubagent(
+      toolParams,
+      ctx,
+      preparedTarget.definition,
+      chainLaunch,
+    );
+    running.abortController = abortController;
+    running.suppressStatusMessages = true;
+    running.chainTarget = {
+      controllerId,
+      startedAt: controllerStartedAt,
+      index: index + 1,
+      count: targetCount,
+      harness: preparedTarget.target.cli,
+      model: preparedTarget.target.model,
+    };
+    if (!first) first = running;
+    return running;
+  };
+
+  let initial: RunningSubagent;
+  try {
+    initial = await launchAttempt(0);
+  } catch (error) {
+    state = { ...state, status: "failed" };
+    writeModelChainState(stateFile, state);
+    throw error;
+  }
+  const completion = runModelChain<SubagentResult>({
+    targets: prepared.chainTargets.map(({ target }) => ({ harness: target.cli, model: target.model })),
+    async attempt(index) {
+      const attemptStartedAt = Date.now();
+      let running: RunningSubagent;
+      try {
+        running = index === 0 ? initial : await launchAttempt(index);
+      } catch (error) {
+        const target = prepared.chainTargets[index].target;
+        const message = error instanceof Error ? error.message : String(error);
+        const elapsed = Math.floor((Date.now() - attemptStartedAt) / 1000);
+        return {
+          ok: false,
+          value: {
+            name: toolParams.name,
+            task: toolParams.task,
+            cli: target.cli,
+            summary: `Model-chain target ${index + 1} could not launch: ${message}`,
+            exitCode: 1,
+            elapsed,
+            error: message,
+            errorMessage: message,
+            resumeSupported: false,
+          },
+          elapsed,
+          outcome: "failed",
+        };
+      }
+      const result = await watchSubagent(running, signal);
+      const ok = result.exitCode === 0 && !result.errorMessage && !result.providerError && !result.error && !result.interrupted;
+      if (ok) return { ok: true, value: result, elapsed: result.elapsed };
+      const interrupted = result.interrupted || result.error === "cancelled";
+      return {
+        ok: false,
+        value: result,
+        elapsed: result.elapsed,
+        ...(!interrupted && result.providerError ? { providerError: result.providerError } : {}),
+        ...(result.interrupted
+          ? { outcome: "interrupted" as const }
+          : result.error === "cancelled"
+            ? { outcome: "cancelled" as const }
+            : {}),
+      };
+    },
+    onAttempt(attempt) {
+      state = {
+        ...state,
+        currentTargetIndex: attempt.targetIndex,
+        status: attempt.outcome === "exhausted"
+          ? "exhausted"
+          : attempt.outcome === "succeeded"
+            ? "running"
+            : "failed",
+        attempts: [...state.attempts, attempt],
+      };
+      writeModelChainState(stateFile, state);
+    },
+  }).then((outcome): SubagentResult => {
+    const result = outcome.value;
+    result.elapsed = Math.floor((Date.now() - controllerStartedAt) / 1000);
+    result.chainAttempts = outcome.attempts;
+    if (!outcome.ok) {
+      state = { ...state, status: outcome.allExhausted ? "exhausted" : "failed", attempts: outcome.attempts };
+      writeModelChainState(stateFile, state);
+      if (outcome.allExhausted) {
+        result.exitCode = result.exitCode || 1;
+        result.errorMessage = "Every model-chain target reported terminal resource exhaustion";
+        result.resumeSupported = false;
+      }
+      return result;
+    }
+
+    result.chainWinnerIndex = outcome.winnerIndex;
+    const winner = prepared.chainTargets[outcome.winnerIndex];
+    let persisted = false;
+    if (winner.target.cli === "agy") {
+      if (result.agyStateFile && result.resumeSupported !== false) {
+        persisted = registerName(parentArtifactDir, toolParams.name, {
+          harness: "agy",
+          stateFile: result.agyStateFile,
+        });
+      }
+    } else if (result.sessionFile) {
+      persisted = registerName(parentArtifactDir, toolParams.name, {
+        sessionFile: result.sessionFile,
+        sessionId: result.sessionId ?? getSessionId(result.sessionFile),
+      });
+    }
+    if (!persisted) {
+      state = { ...state, status: "failed", attempts: outcome.attempts };
+      writeModelChainState(stateFile, state);
+      result.resumeSupported = false;
+      result.persistenceError =
+        `Model-chain target ${outcome.winnerIndex + 1} completed, but native winner ownership could not be persisted`;
+    } else {
+      result.resumeSupported = true;
+    }
+    return result;
+  }).catch((error) => {
+    try {
+      state = { ...state, status: "failed" };
+      writeModelChainState(stateFile, state);
+    } catch {
+      // The original controller failure remains the actionable error.
+    }
+    throw error;
+  });
+
+  return { first: first ?? initial, completion, stateFile };
 }
 
 export default function subagentsExtension(pi: ExtensionAPI) {
@@ -2556,14 +2870,30 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
-        // Validate external executable availability before any pane is created.
-        if (preparedLaunch.launch.harness === "agy" && !isCommandAvailable("agy")) {
+        // Validate every statically knowable target prerequisite before any pane is created.
+        const preparedTargets = "chainTargets" in preparedLaunch.launch
+          ? preparedLaunch.launch.chainTargets.map((target) => target.launch)
+          : [preparedLaunch.launch];
+        if (preparedTargets.some((target) => target.harness === "agy") && !isCommandAvailable("agy")) {
           const err =
             `Agent "${agentDefs.name}" requires the Antigravity CLI executable \`agy\`, ` +
             `but it is not available on PATH. Install or expose agy and retry; no fallback was launched.`;
           return {
             content: [{ type: "text", text: err }],
             details: { error: "agy not available", agent: agentDefs.name },
+          };
+        }
+        if (
+          "chainTargets" in preparedLaunch.launch &&
+          preparedTargets.some((target) => target.harness === "pi") &&
+          !isCommandAvailable("pi")
+        ) {
+          const err =
+            `Agent "${agentDefs.name}" has a Pi model-chain target, but the \`pi\` executable ` +
+            `is not available on PATH. Expose pi and retry; no fallback was launched.`;
+          return {
+            content: [{ type: "text", text: err }],
+            details: { error: "pi not available", agent: agentDefs.name },
           };
         }
 
@@ -2603,6 +2933,103 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
         params.name = claim.name;
+
+        if ("chainTargets" in preparedLaunch.launch) {
+          const watcherAbort = new AbortController();
+          let chain;
+          try {
+            chain = await startPreparedModelChain({
+              toolParams: params,
+              ctx,
+              agent: agentDefs,
+              prepared: preparedLaunch.launch,
+              parentArtifactDir,
+              abortController: watcherAbort,
+            });
+          } finally {
+            reservedNames.delete(claim.name);
+          }
+          startWidgetRefresh();
+          startStatusRefresh(pi);
+          chain.completion
+            .then((result) => {
+              updateWidget();
+              const attempts = result.chainAttempts ?? [];
+              const winner = result.chainWinnerIndex !== undefined
+                ? attempts[result.chainWinnerIndex]
+                : undefined;
+              pi.sendMessage(
+                {
+                  customType: "subagent_result",
+                  content: resolveChainResultPresentation(result, params.name),
+                  display: true,
+                  details: {
+                    name: params.name,
+                    task: params.task,
+                    agent: params.agent,
+                    harness: "chain",
+                    exitCode: result.exitCode,
+                    elapsed: result.elapsed,
+                    attempts,
+                    ...(winner ? { winner } : {}),
+                    ...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
+                    ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+                    ...(result.agyConversationId ? { agyConversationId: result.agyConversationId } : {}),
+                    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+                    ...(result.interrupted ? { interrupted: true } : {}),
+                    ...(result.persistenceError ? { persistenceError: result.persistenceError } : {}),
+                    ...(result.resumeSupported !== undefined ? { resumeSupported: result.resumeSupported } : {}),
+                    ...(result.stats ? { stats: result.stats } : {}),
+                  },
+                },
+                { triggerTurn: true, deliverAs: "steer" },
+              );
+            })
+            .catch((error) => {
+              updateWidget();
+              const message = error instanceof Error ? error.message : String(error);
+              pi.sendMessage(
+                {
+                  customType: "subagent_result",
+                  content:
+                    `Sub-agent "${params.name}" model-chain error: ${message}\n\n` +
+                    `This chain result is not resumable.`,
+                  display: true,
+                  details: {
+                    name: params.name,
+                    task: params.task,
+                    harness: "chain",
+                    exitCode: 1,
+                    error: message,
+                    errorMessage: message,
+                    resumeSupported: false,
+                  },
+                },
+                { triggerTurn: true, deliverAs: "steer" },
+              );
+            });
+
+          return {
+            content: [{
+              type: "text",
+              text:
+                `Sub-agent "${params.name}" launched model-chain target 1/${preparedLaunch.launch.chainTargets.length} ` +
+                `and is now running in the background. Results will be delivered automatically after the chain stops.`,
+            }],
+            details: {
+              id: chain.first.id,
+              name: params.name,
+              task: params.task,
+              agent: params.agent,
+              sessionFile: chain.first.sessionFile,
+              launchScriptFile: chain.first.launchScriptFile,
+              harness: "chain",
+              targetIndex: 1,
+              targetCount: preparedLaunch.launch.chainTargets.length,
+              status: "started",
+            },
+          };
+        }
 
         let running;
         try {
@@ -2802,7 +3229,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const lines = list.map((a) => {
           const badge = a.source === "project" ? " (project)" : "";
           const desc = a.description ? ` — ${a.description}` : "";
-          const model = a.model ? ` [${a.model}]` : "";
+          const model = a.modelChain
+            ? ` [${a.modelChain.map((target) => `${target.cli}:${target.model}`).join(" → ")}]`
+            : a.model
+              ? ` [${a.model}]`
+              : "";
           return `• ${a.name}${badge}${model}${desc}`;
         });
 
@@ -2824,7 +3255,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const lines = agents.map((a: any) => {
           const badge = a.source === "project" ? theme.fg("accent", " (project)") : "";
           const desc = a.description ? theme.fg("dim", ` — ${a.description}`) : "";
-          const model = a.model ? theme.fg("dim", ` [${a.model}]`) : "";
+          const modelText = a.modelChain
+            ? a.modelChain.map((target: AgentModelChainTarget) => `${target.cli}:${target.model}`).join(" → ")
+            : a.model;
+          const model = modelText ? theme.fg("dim", ` [${modelText}]`) : "";
           return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
         });
         return new Text(lines.join("\n"), 0, 0);
@@ -2945,6 +3379,22 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               ? `Known subagents: ${known.join(", ")}.`
               : "No subagents have been spawned in this session yet.");
           return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+        }
+
+        if ("harness" in entry && entry.harness === "chain") {
+          const state = readModelChainState(entry.stateFile);
+          const status = state
+            ? state.status === "running"
+              ? `is still owned by model-chain target ${state.currentTargetIndex}/${state.targetCount}`
+              : `ended with model-chain status ${state.status}`
+            : "has an invalid model-chain ownership snapshot";
+          const err =
+            `Cannot resume "${requestedName}": it ${status} and no native target won. ` +
+            `Spawn a new self-contained subagent task to restart the chain at target 1.`;
+          return {
+            content: [{ type: "text" as const, text: err }],
+            details: { error: err, harness: "chain", status: state?.status ?? "invalid" },
+          };
         }
 
         if ("harness" in entry) {
@@ -3368,7 +3818,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           ? theme.fg("error", "✗")
           : theme.fg("success", "✓");
         const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
-        const harnessTag = details.harness === "agy" ? theme.fg("dim", " [agy]") : "";
+        const harnessTag = details.harness === "agy"
+          ? theme.fg("dim", " [agy]")
+          : details.harness === "chain"
+            ? theme.fg("dim", details.winner
+                ? ` [chain ${details.winner.targetIndex}/${details.winner.targetCount} · ${details.winner.harness}]`
+                : " [chain]")
+            : "";
         const modelTag = stats?.model ? theme.fg("dim", ` (${stats.model})`) : "";
         const titleSegment = `${icon} ${theme.fg("toolTitle", theme.bold(name))}${agentTag}${harnessTag}${modelTag} ${theme.fg("dim", "—")} `;
 
@@ -3399,9 +3855,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
 
         const rawContent = typeof message.content === "string" ? message.content : "";
+        const presentationBody = details.harness === "chain" && rawContent.includes("\n\n")
+          ? rawContent.split("\n\n").slice(1).join("\n\n")
+          : rawContent;
 
         // Clean summary (remove follow-up ref and leading label for display)
-        const summary = rawContent
+        const summary = presentationBody
           .replace(/\n\nFollow up with subagent_message[\s\S]+$/, "")
           .replace(`Sub-agent "${name}" completed (${elapsed}).\n\n`, "")
           .replace(`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`, "")
@@ -3425,7 +3884,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           }
           if (details.name || details.sessionFile) {
             contentLines.push("");
-            if (details.name) {
+            if (details.name && !(details.harness === "chain" && details.resumeSupported !== true)) {
               contentLines.push(
                 theme.fg(
                   "dim",

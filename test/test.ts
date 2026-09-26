@@ -45,6 +45,7 @@ import {
   resetSessionIndexCache,
   resolveSessionFileById,
   findLastAssistantMessage,
+  findLastAssistantProviderError,
   appendBranchSummary,
   copySessionFile,
   mergeNewEntries,
@@ -115,6 +116,13 @@ import {
   writeQuestionAcknowledgment,
   writeQuestionRequest,
 } from "../pi-extension/subagents/question-protocol.ts";
+import {
+  classifyExhaustion,
+  isModelChainState,
+  readModelChainState,
+  runModelChain,
+  writeModelChainState,
+} from "../pi-extension/subagents/model-chain.ts";
 
 // --- Helpers ---
 
@@ -702,6 +710,19 @@ describe("session.ts", () => {
         },
       };
       assert.equal(findLastAssistantMessage([msg] as any[]), null);
+    });
+
+    it("extracts provider evidence only from the final assistant error", () => {
+      const oldError = {
+        type: "message",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage: "429 quota" },
+      };
+      const success = {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "stop" },
+      };
+      assert.equal(findLastAssistantProviderError([oldError, success] as any[]), null);
+      assert.equal(findLastAssistantProviderError([success, oldError] as any[]), "429 quota");
     });
   });
 
@@ -1627,6 +1648,49 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("resolves target-local Pi chain extensions in order and excludes the whole chain on failure", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir, globalAgentsDir }) => {
+      const source = "./packages/chain-provider";
+      const packageRoot = join(globalDir, "packages", "chain-provider");
+      writePackageFixture(packageRoot, ["one.ts", "two.ts"]);
+      writeFileSync(join(globalDir, "settings.json"), JSON.stringify({ packages: [source] }));
+      writeAgentFile(globalAgentsDir, "chain-ok", [
+        "name: chain-ok",
+        "builtin-tools: [read]",
+        "model-chain:",
+        "  - { cli: agy, model: gemini }",
+        "  - cli: pi",
+        "    model: cursor/gemini",
+        "    extensions:",
+        `      - package: ${source}`,
+        "        paths: [two.ts, one.ts]",
+      ].join("\n"));
+      writeAgentFile(globalAgentsDir, "chain-bad", [
+        "name: chain-bad",
+        "builtin-tools: [read]",
+        "model-chain:",
+        "  - { cli: agy, model: gemini }",
+        "  - cli: pi",
+        "    model: cursor/gemini",
+        "    extensions:",
+        "      - package: ./packages/missing",
+      ].join("\n"));
+
+      const discovery = await discoverAgentDefinitions({ cwd: globalDir, projectTrusted: false });
+      const chain = discovery.agents.find((agent) => agent.name === "chain-ok");
+      assert.deepEqual(chain?.modelChain?.[1].extensionPaths, [
+        realpathSync(join(packageRoot, "two.ts")),
+        realpathSync(join(packageRoot, "one.ts")),
+      ]);
+      assert.equal(discovery.agents.some((agent) => agent.name === "chain-bad"), false);
+      assert.ok(discovery.diagnostics.some((entry) =>
+        entry.filePath.endsWith("chain-bad.md") &&
+        entry.field === "model-chain[1].extensions[0].package" &&
+        /not configured/.test(entry.message)
+      ));
+    });
+  });
+
   it("contains global and trusted project package scope with project-first fallback", async () => {
     await withIsolatedAgentEnv(async ({
       projectDir,
@@ -2312,6 +2376,108 @@ describe("subagent discovery", () => {
     assert.deepEqual(parsed.agent?.builtinTools, ["read", "grep", "find", "ls"]);
     assert.deepEqual(translateAgyTools(parsed.agent?.builtinTools ?? []), [
       "view_file", "grep_search", "find_by_name", "list_dir",
+    ]);
+  });
+
+  it("parses an ordered AGY and Pi model-chain as one canonical profile", () => {
+    const parsed = parseAgentDefinition(
+      [
+        "---",
+        "name: scout",
+        "description: Read-only scout",
+        "builtin-tools: [read, grep, find, ls]",
+        "model-chain:",
+        "  - cli: agy",
+        "    model: gemini-3.8-flash",
+        "    thinking: medium",
+        "  - cli: pi",
+        "    model: cursor/gemini-3.8-flash",
+        "    thinking: high",
+        "    session-mode: standalone",
+        "    system-prompt: append",
+        "  - cli: pi",
+        "    model: openai-codex/gpt-5.6-luna",
+        "---",
+        "Inspect without changing files.",
+      ].join("\n"),
+      "/tmp/scout-chain.md",
+      "global",
+    );
+    assert.deepEqual(parsed.diagnostics, []);
+    assert.equal(parsed.agent?.model, undefined);
+    assert.deepEqual(parsed.agent?.modelChain?.map((target) => ({
+      cli: target.cli,
+      model: target.model,
+      thinking: target.thinking,
+      sessionMode: target.sessionMode,
+      systemPromptMode: target.systemPromptMode,
+    })), [
+      { cli: "agy", model: "gemini-3.8-flash", thinking: "medium", sessionMode: undefined, systemPromptMode: undefined },
+      { cli: "pi", model: "cursor/gemini-3.8-flash", thinking: "high", sessionMode: "standalone", systemPromptMode: "append" },
+      { cli: "pi", model: "openai-codex/gpt-5.6-luna", thinking: undefined, sessionMode: undefined, systemPromptMode: undefined },
+    ]);
+  });
+
+  it("rejects malformed chains, mixed ownership, Claude, mutation, nesting, and indexed target fields", () => {
+    const cases = [
+      { yaml: "model-chain: []", field: "model-chain" },
+      { yaml: "model-chain:\n  - { cli: pi, model: one }", field: "model-chain" },
+      { yaml: "model: flat\nmodel-chain:\n  - { cli: pi, model: one }\n  - { cli: pi, model: two }", field: "model" },
+      { yaml: "builtin-tools: [write]\nmodel-chain:\n  - { cli: pi, model: one }\n  - { cli: pi, model: two }", field: "builtin-tools" },
+      { yaml: "subagent_agents: []\nmodel-chain:\n  - { cli: pi, model: one }\n  - { cli: pi, model: two }", field: "subagent_agents" },
+      { yaml: "model-chain:\n  - { cli: claude, model: one }\n  - { cli: pi, model: two }", field: "model-chain[0].cli" },
+      { yaml: "model-chain:\n  - { cli: agy, model: one, extensions: [] }\n  - { cli: pi, model: two }", field: "model-chain[0].extensions" },
+      { yaml: "model-chain:\n  - { cli: pi, model: one, auto-exit: true }\n  - { cli: pi, model: two }", field: "model-chain[0].auto-exit" },
+      { yaml: "model-chain:\n  - { cli: pi, model: one, extensions: [] }\n  - { cli: pi, model: two }", field: "model-chain[0].extensions" },
+      { yaml: "model-chain:\n  - { cli: pi }\n  - { cli: pi, model: two }", field: "model-chain[0].model" },
+    ];
+    for (const [index, fixture] of cases.entries()) {
+      const parsed = parseAgentDefinition(
+        `---\nname: invalid-chain-${index}\n${fixture.yaml}\n---\nbody`,
+        `/tmp/invalid-chain-${index}.md`,
+        "global",
+      );
+      assert.equal(parsed.agent, null, fixture.yaml);
+      assert.ok(parsed.diagnostics.some((entry) => entry.field === fixture.field), fixture.yaml);
+    }
+  });
+
+  it("prepares every chain target up front and rejects runtime model overrides", () => {
+    const parsed = parseAgentDefinition(
+      "---\nname: chain\nbuiltin-tools: [read]\nmodel-chain:\n  - { cli: agy, model: gemini, thinking: medium }\n  - { cli: pi, model: openai/test, session-mode: lineage-only }\n---\nShared role",
+      "/tmp/chain.md",
+      "global",
+    );
+    assert.ok(parsed.agent);
+    const agent = {
+      ...parsed.agent!,
+      extensionPaths: [],
+      modelChain: parsed.agent!.modelChain!.map((target) => ({ ...target, extensionPaths: [] })),
+    } as any;
+    const sandbox = testApi.prepareAgentSandbox(agent);
+    assert.ok("sandbox" in sandbox);
+    const rejected = testApi.prepareAgentLaunch(
+      { agent: "chain", task: "Inspect", model: "override" },
+      agent,
+      sandbox.sandbox,
+      "/tmp",
+    );
+    assert.match(rejected.error, /model-chain.*override/i);
+    const prepared = testApi.prepareAgentLaunch(
+      { agent: "chain", task: "Inspect" },
+      agent,
+      sandbox.sandbox,
+      "/tmp",
+    );
+    assert.ok("launch" in prepared && "chainTargets" in prepared.launch);
+    assert.deepEqual(prepared.launch.chainTargets.map((entry: any) => ({
+      harness: entry.launch.harness,
+      model: entry.launch.effectiveModel,
+      autoExit: entry.launch.loadout?.autoExit ?? null,
+      sessionMode: entry.launch.launchBehavior.sessionMode,
+    })), [
+      { harness: "agy", model: "gemini", autoExit: null, sessionMode: "standalone" },
+      { harness: "pi", model: "openai/test", autoExit: true, sessionMode: "lineage-only" },
     ]);
   });
 
@@ -3408,6 +3574,55 @@ describe("subagent discovery", () => {
     }
   });
 
+  it("keeps failed chain ownership explicitly non-resumable", async () => {
+    const d = createTestDir();
+    try {
+      const stateFile = resolve(join(d, "chain-state.json"));
+      writeModelChainState(stateFile, {
+        version: 1,
+        harness: "chain",
+        profileName: "scout",
+        runtimeName: "scout-run",
+        currentTargetIndex: 2,
+        targetCount: 2,
+        status: "exhausted",
+        attempts: [{
+          targetIndex: 1,
+          targetCount: 2,
+          harness: "agy",
+          model: "gemini",
+          elapsed: 1,
+          outcome: "exhausted",
+          exhaustionReason: "terminal HTTP 429",
+        }, {
+          targetIndex: 2,
+          targetCount: 2,
+          harness: "pi",
+          model: "openai/luna",
+          elapsed: 1,
+          outcome: "exhausted",
+          exhaustionReason: "quota exhausted",
+        }],
+      });
+      registerName(join(d, "artifacts", "test-session"), "scout-run", { harness: "chain", stateFile });
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+      const result = await messageTool.execute(
+        "resume-failed-chain",
+        { name: "scout-run", message: "Continue" },
+        undefined,
+        undefined,
+        createMockContext(d, true),
+      );
+      assert.match(result.content[0].text, /ended with model-chain status exhausted/);
+      assert.match(result.content[0].text, /restart the chain at target 1/);
+      assert.equal(testApi.runningSubagents.size, 0);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
   it("refuses an unavailable version 2 AGY workspace through the public tool before pane creation", async () => {
     const d = createTestDir();
     try {
@@ -3743,9 +3958,20 @@ describe("AGY harness helpers", () => {
     }), "y".repeat(5000));
     assert.ok((boundedDenied as any).error.length < 8100);
 
-    assert.match((parseAgyResult("not-json", "diagnostic") as any).error, /invalid JSON.*diagnostic/);
+    const malformed = parseAgyResult("not-json", "RESOURCE_EXHAUSTED diagnostic") as any;
+    assert.match(malformed.error, /invalid JSON.*RESOURCE_EXHAUSTED diagnostic/);
+    assert.equal(malformed.providerError, undefined);
     assert.match((parseAgyResult(JSON.stringify({ status: "SUCCESS", response: "ok", conversation_id: "" })) as any).error, /conversation ID/);
-    assert.match((parseAgyResult(JSON.stringify({ status: "ERROR", error: "bad effort" })) as any).error, /bad effort/);
+    const terminalError = parseAgyResult(JSON.stringify({ status: "ERROR", error: "RESOURCE_EXHAUSTED" })) as any;
+    assert.match(terminalError.error, /RESOURCE_EXHAUSTED/);
+    assert.equal(terminalError.providerError, "RESOURCE_EXHAUSTED");
+    const deniedError = parseAgyResult(JSON.stringify({
+      status: "ERROR",
+      error: "RESOURCE_EXHAUSTED",
+      denied_actions: [{ tool: "view_file" }],
+    })) as any;
+    assert.match(deniedError.error, /denied one or more actions/);
+    assert.equal(deniedError.providerError, undefined);
     assert.match((parseAgyResult(JSON.stringify({ status: "WAITING" })) as any).error, /non-terminal/);
     assert.match((parseAgyResult(JSON.stringify({ status: "CANCELLED", error: "cancelled" })) as any).error, /cancelled/);
   });
@@ -3796,6 +4022,126 @@ describe("AGY harness helpers", () => {
   });
 });
 
+describe("model-chain", () => {
+  it("classifies only selected terminal exhaustion wording and bounded bare 429", () => {
+    for (const [message, reason] of [
+      ["HTTP 429", "terminal HTTP 429"],
+      ["RESOURCE_EXHAUSTED", "resource exhausted"],
+      ["resource-exhausted", "resource exhausted"],
+      ["Resource exhausted", "resource exhausted"],
+      ["monthly quota exceeded", "quota exhausted"],
+      ["usage limit reached", "usage limit reached"],
+      ["subscription quota exhausted", "subscription limit reached"],
+      ["billing limit reached", "billing limit reached"],
+      ["project budget depleted", "budget exhausted"],
+      ["insufficient credits", "credits exhausted"],
+    ] as const) {
+      assert.equal(classifyExhaustion(message), reason, message);
+    }
+    for (const message of [
+      "order 1429 failed", "HTTP 4290", "temporary overload", "rate limited",
+      "authentication failed", "AUTHENTICATION_ERROR after HTTP 429", "UNAUTHENTICATED: 429", "auth-error: RESOURCE_EXHAUSTED", "invalid_model: RESOURCE_EXHAUSTED", "permission-denied: 429", "cancelled",
+      "quota information is available", "resource unavailable",
+    ]) {
+      assert.equal(classifyExhaustion(message), null, message);
+    }
+  });
+
+  it("runs one injected attempt at a time, advances on exhaustion, and stops on success", async () => {
+    const events: string[] = [];
+    let active = 0;
+    const result = await runModelChain({
+      targets: [
+        { harness: "agy", model: "gemini" },
+        { harness: "pi", model: "cursor/gemini" },
+        { harness: "pi", model: "openai/luna" },
+      ],
+      async attempt(index) {
+        active++;
+        assert.equal(active, 1);
+        events.push(`start-${index}`);
+        await Promise.resolve();
+        active--;
+        events.push(`end-${index}`);
+        return index === 0
+          ? { ok: false as const, value: `failure-${index}`, elapsed: 2, providerError: "RESOURCE_EXHAUSTED" }
+          : { ok: true as const, value: `winner-${index}`, elapsed: 3 };
+      },
+    });
+    assert.deepEqual(events, ["start-0", "end-0", "start-1", "end-1"]);
+    assert.equal(result.ok, true);
+    assert.equal(result.value, "winner-1");
+    assert.deepEqual(result.attempts.map((attempt) => attempt.outcome), ["exhausted", "succeeded"]);
+  });
+
+  it("stops on unrelated failure and aggregates an all-exhausted chain", async () => {
+    let calls = 0;
+    const stopped = await runModelChain({
+      targets: [{ harness: "agy", model: "one" }, { harness: "pi", model: "two" }],
+      async attempt() {
+        calls++;
+        return { ok: false as const, value: "auth", elapsed: 1, providerError: "authentication failed" };
+      },
+    });
+    assert.equal(calls, 1);
+    assert.equal(stopped.ok, false);
+    assert.equal(stopped.allExhausted, false);
+
+    const exhausted = await runModelChain({
+      targets: [{ harness: "agy", model: "one" }, { harness: "pi", model: "two" }],
+      async attempt(index) {
+        return {
+          ok: false as const,
+          value: index,
+          elapsed: index + 1,
+          providerError: index === 0 ? "HTTP 429" : "credit balance exhausted",
+        };
+      },
+    });
+    assert.equal(exhausted.ok, false);
+    assert.equal(exhausted.allExhausted, true);
+    assert.deepEqual(exhausted.attempts.map((attempt) => attempt.exhaustionReason), [
+      "terminal HTTP 429", "credits exhausted",
+    ]);
+  });
+
+  it("persists strict chain ownership without weakening native registry entries", () => {
+    withTempDir((dir) => {
+      const stateFile = resolve(join(dir, "chain.json"));
+      const state = {
+        version: 1 as const,
+        harness: "chain" as const,
+        profileName: "scout",
+        runtimeName: "scout-run",
+        currentTargetIndex: 2,
+        targetCount: 3,
+        status: "exhausted" as const,
+        attempts: [{
+          targetIndex: 1,
+          targetCount: 3,
+          harness: "agy" as const,
+          model: "gemini",
+          elapsed: 5,
+          outcome: "exhausted" as const,
+          exhaustionReason: "terminal HTTP 429",
+        }],
+      };
+      assert.equal(isModelChainState(state), true);
+      writeModelChainState(stateFile, state);
+      assert.deepEqual(readModelChainState(stateFile), state);
+      assert.equal(registerName(dir, "scout-run", { harness: "chain", stateFile }), true);
+      assert.deepEqual(resolveNameInRegistry(dir, "scout-run"), { harness: "chain", stateFile });
+      assert.equal(registerName(dir, "winner", { sessionFile: "/tmp/winner.jsonl", sessionId: "winner-id" }), true);
+      assert.deepEqual(resolveNameInRegistry(dir, "winner"), { sessionFile: "/tmp/winner.jsonl", sessionId: "winner-id" });
+      rmSync(stateFile);
+      assert.deepEqual(resolveNameInRegistry(dir, "scout-run"), { harness: "chain", stateFile });
+      assert.deepEqual(resolveNameInRegistry(dir, "winner"), { sessionFile: "/tmp/winner.jsonl", sessionId: "winner-id" });
+      assert.equal(isModelChainState({ ...state, attempts: [{ ...state.attempts[0], exhaustionReason: "x".repeat(241) }] }), false);
+      assert.equal(isModelChainState({ ...state, attempts: [{ ...state.attempts[0], model: "x".repeat(201) }] }), false);
+    });
+  });
+});
+
 describe("question protocol", () => {
   it("strictly round-trips requests and private multiline answers", () => {
     withTempDir((dir) => {
@@ -3841,7 +4187,7 @@ describe("question protocol", () => {
 describe("subagent runtime control", () => {
   function setupCapturingExtension(
     sessionFile: string,
-    options: { autoExit?: boolean; activityFile?: string; runningChildId?: string } = {},
+    options: { autoExit?: boolean; activityFile?: string; runningChildId?: string; modelChain?: boolean } = {},
   ) {
     const handlers = new Map<string, Array<(...args: any[]) => any>>();
     const tools: any[] = [];
@@ -3861,6 +4207,7 @@ describe("subagent runtime control", () => {
       autoExit: process.env.PI_SUBAGENT_AUTO_EXIT,
       activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
       runningChildId: process.env.PI_SUBAGENT_ID,
+      modelChain: process.env.PI_SUBAGENT_MODEL_CHAIN,
     };
     process.env.PI_SUBAGENT_SESSION = sessionFile;
     process.env.PI_SUBAGENT_NAME = "inspector-2";
@@ -3870,6 +4217,8 @@ describe("subagent runtime control", () => {
     else delete process.env.PI_SUBAGENT_ACTIVITY_FILE;
     if (options.runningChildId) process.env.PI_SUBAGENT_ID = options.runningChildId;
     else delete process.env.PI_SUBAGENT_ID;
+    if (options.modelChain) process.env.PI_SUBAGENT_MODEL_CHAIN = "1";
+    else delete process.env.PI_SUBAGENT_MODEL_CHAIN;
     subagentRuntimeControlExtension(api);
     const emit = async (event: string, ...args: any[]) => {
       for (const handler of handlers.get(event) ?? []) {
@@ -3885,6 +4234,7 @@ describe("subagent runtime control", () => {
       restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", saved.autoExit);
       restoreEnvVar("PI_SUBAGENT_ACTIVITY_FILE", saved.activityFile);
       restoreEnvVar("PI_SUBAGENT_ID", saved.runningChildId);
+      restoreEnvVar("PI_SUBAGENT_MODEL_CHAIN", saved.modelChain);
     };
     const tool = tools.find((candidate) => candidate.name === "ask_question");
     return { emit, handlers, tool, tools, restore };
@@ -4422,6 +4772,18 @@ describe("subagent runtime control", () => {
         assert.ok(!names.includes(["caller", "ping"].join("_")));
         assert.deepEqual(Object.keys(tool.parameters.properties), ["question"]);
         assert.match(tool.description, /orchestrator/i);
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not register ask_question for autonomous model-chain attempts", () => {
+      const dir = createTestDir();
+      const { tool, tools, restore } = setupCapturingExtension(join(dir, "s.jsonl"), { modelChain: true });
+      try {
+        assert.equal(tool, undefined);
+        assert.equal(tools.some((candidate) => candidate.name === "ask_question"), false);
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
@@ -5935,6 +6297,25 @@ describe("subagents widget rendering", () => {
     assert.doesNotMatch(lines, /active|waiting|stalled/);
   });
 
+  it("shows one logical chain row with active target index, harness, and model", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const startTime = Date.now() - 5_000;
+    const lines = testApi.renderSubagentWidgetLines([{
+      id: "attempt-2",
+      name: "Scout",
+      agent: "scout",
+      cli: "pi",
+      chainTarget: { controllerId: "chain-1", index: 2, count: 3, harness: "pi", model: "cursor/gemini" },
+      task: "",
+      surface: "s1",
+      startTime,
+      sessionFile: "session.jsonl",
+      interactive: false,
+      statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+    }], 120).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(lines, /Scout \(scout · target 2\/3 · pi · cursor\/gemini\)/);
+  });
+
   it("truncates the right-hand status instead of overflowing when it alone is too wide", () => {
     const testApi = (subagentsModule as any).__test__;
     assert.ok(testApi, "expected subagents test helpers to be exported");
@@ -6034,6 +6415,42 @@ describe("subagent display helpers", () => {
         }),
         [],
       );
+    });
+  });
+
+  describe("model-chain result presentation", () => {
+    it("names the winner and bounded prior exhaustion without exposing failed resume", () => {
+      const attempts = [
+        { targetIndex: 1, targetCount: 2, harness: "agy", model: "gemini", elapsed: 2, outcome: "exhausted", exhaustionReason: "terminal HTTP 429" },
+        { targetIndex: 2, targetCount: 2, harness: "pi", model: "openai/luna", elapsed: 3, outcome: "succeeded" },
+      ];
+      const success = testApi.resolveChainResultPresentation({
+        name: "scout",
+        task: "inspect",
+        summary: "winner output",
+        exitCode: 0,
+        elapsed: 5,
+        chainAttempts: attempts,
+        chainWinnerIndex: 1,
+        resumeSupported: true,
+      }, "scout");
+      assert.match(success, /target 2\/2 \(pi openai\/luna\)/);
+      assert.match(success, /1\/2 agy gemini: exhausted \(terminal HTTP 429\)/);
+      assert.match(success, /Follow up with subagent_message/);
+
+      const exhausted = testApi.resolveChainResultPresentation({
+        name: "scout",
+        task: "inspect",
+        summary: "failed",
+        errorMessage: "all exhausted",
+        exitCode: 1,
+        elapsed: 5,
+        chainAttempts: attempts.map((attempt: any) => ({ ...attempt, outcome: "exhausted", exhaustionReason: "resource exhausted" })),
+        resumeSupported: false,
+      }, "scout");
+      assert.match(exhausted, /every model-chain target was exhausted/);
+      assert.match(exhausted, /not resumable/);
+      assert.doesNotMatch(exhausted, /Follow up/);
     });
   });
 

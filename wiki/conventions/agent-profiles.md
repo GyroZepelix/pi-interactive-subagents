@@ -22,19 +22,25 @@ Require opening and closing `---` delimiters, a mapping-valued YAML frontmatter 
 
 Comma-delimited strings and YAML string arrays are accepted for `builtin-tools`, `skill` or `skills`, and `subagent_agents`; YAML array entries may not contain commas, and nested target entries follow effective-name validation. `extensions` is a YAML array of exact configured package sources with optional exact package-relative `paths`; selectors must stay within enabled package resources. Reject duplicate package strings and selectors, absolute or drive-qualified selectors, `.` or `..` path segments, and explicitly empty `paths`. Legacy `tools` is rejected rather than reinterpreted. Declaring `builtin-tools` or `extensions` on `cli: claude`, even with an empty value, invalidates the profile. `cli: agy` accepts only generic identity/selection fields plus `builtin-tools`; explicit Pi extensions, skills, nesting, prompt/session modes, and lifecycle fields invalidate it even when empty. AGY allows only `read`, `grep`, `find`, and `ls`. `docs/agent-definitions.md` is the complete user-facing field and default reference.
 
+## Ordered model chains
+
+`model-chain` is an additive profile form for one read-oriented role with at least two ordered `agy` or `pi` targets. The body, identity, cwd, description, visibility, and read built-ins are shared. Flat target/lifecycle fields are forbidden at the top level; shared built-ins are limited to `read`, `grep`, `find`, and `ls`; skills and nested spawning are invalid. AGY targets own `model` and optional `thinking`; Pi targets may additionally own `extensions`, `session-mode`, and `system-prompt`. Every target field and extension path is validated with an indexed diagnostic before launch (`pi-extension/subagents/agents.ts`, `docs/agent-definitions.md`).
+
+A chain rejects runtime model overrides but preserves runtime cwd overrides. One fresh target runs at a time, and only selected terminal exhaustion evidence advances. Pi target extensions keep their complete trusted-grant semantics; read-oriented shared built-ins do not sandbox extension code. Exact scout and flash-reviewer forms live in `docs/agent-definitions.md`.
+
 ## Built-ins, extensions, and nesting
 
 - Missing or empty `builtin-tools` grants no Pi built-ins. Only the validated built-in vocabulary can appear there.
 - Declaring `extensions` grants each selected extension's complete executable behavior and all tools it registers at startup or later. Extensions are trusted code, not per-tool grants.
 - Extension packages resolve read-only without installation, network access, or settings writes. Global profiles use global package settings only; trusted project profiles prefer the nearest project's exact source and may fall back to global settings. Missing, disabled, escaping, nonexistent, or empty selections exclude the profile before pane creation.
 - Omitting `paths` selects all enabled extension resources in Pi's resolved order. Explicit selectors preserve their order, package declarations preserve package order, and canonical duplicate files keep their first occurrence.
-- Every named Pi child still receives `ask_question`.
+- Every flat or native-resumed Pi child receives `ask_question`; autonomous model-chain attempts omit it to preserve one final parent delivery.
 - AGY maps `read`, `grep`, `find`, and `ls` in declared order to `view_file`, `grep_search`, `find_by_name`, and `list_dir`; omitted or empty tools grant none. AGY receives no Pi extensions, mutation/shell tools, permission-request tool, or nested-agent capability.
 - A non-empty `subagent_agents` grants spawning tools and pins nested targets. Spawning tool names under `builtin-tools` invalidate the profile.
 
 ## Model provider selection
 
-- Model identifiers and effort encoding are provider-specific. After replacing a provider extension, rediscover the live registry with `pi --list-models`; do not carry old suffixes forward by analogy. When a provider collapses effort variants, use its canonical model ID plus the profile `thinking` field (`spec/archive/260909-1928-create-global-scout-researcher-and-worker-profiles/verification.md`).
+- Model identifiers and effort encoding are provider-specific. After replacing a provider extension, rediscover the live registry with `pi --list-models`; do not carry old suffixes forward by analogy. When a provider collapses effort variants, use its canonical model ID plus the profile or target-local `thinking` field (`spec/archive/260909-1928-create-global-scout-researcher-and-worker-profiles/verification.md`).
 
 ## Session and prompt behavior
 

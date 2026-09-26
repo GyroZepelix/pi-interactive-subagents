@@ -18,6 +18,12 @@ Every spawn must name a valid discoverable agent selected from the active truste
 
 AGY profiles use a separate native boundary: a dedicated parent-session artifact workspace contains one generated primary agent with exactly the translated read tools, `mainAgent: true`, and `subagent: false`. Launch keeps the child cwd as the process workspace and adds the generated-agent root plus the distinct resolved parent Pi cwd. It never derives roots from task text, profile prose, referenced paths, or model output, and never passes `--dangerously-skip-permissions`. Default prompt-free workspace reads remain subject to explicit user AGY permission overrides; reported denied actions fail with bounded action and stderr evidence (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
 
+## Model-chain safety
+
+A chain prepares all shared capabilities, target-local extension paths, lifecycle controls, and required external executables before pane creation. Attempts run sequentially and receive only the original task plus shared role body; output, reasoning, tool transcripts, and provider conversation state never cross attempts. Shared built-ins are read-only, while declared Pi target extensions remain full trusted executable grants (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`).
+
+Exhaustion classification accepts durable quota/usage/subscription/billing/budget/credit wording plus bare terminal 429 and resource-exhausted variants. It receives only structured terminal provider evidence: the final settled Pi assistant error or a valid AGY terminal `ERROR` envelope's structured error. Never classify formatted diagnostics, stderr-only malformed AGY output, denied actions, cancellation, interruption, or pane loss. Fixed bounded reasons prevent raw payload, task, stderr, or credentials from entering provenance. Bare 429 and resource exhaustion intentionally accept temporary-throttling false positives (`pi-extension/subagents/model-chain.ts`, `pi-extension/subagents/agy.ts`, `pi-extension/subagents/session.ts`).
+
 ## Name safety
 
 Omitted runtime names are auto-suffixed across running, in-flight, and registered sessions. Explicit names are trimmed and rejected on collisions before launch, so registry entries and name-only routing cannot become ambiguous. Registry reads validate names and entries, and writes use own data properties so special names such as `__proto__` remain persistent handles instead of mutating object prototypes (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`).
@@ -29,6 +35,8 @@ New Pi profile launches persist a strict version 1 `extension-grants` snapshot c
 Snapshot parsing is a strict union. Reject unknown, mixed, incomplete, malformed, duplicate, relative, non-canonical, or nesting-inconsistent new snapshots. Existing valid legacy snapshots remain a separate strict `toolAllowlist` shape, replay through `--no-extensions --tools` with their stored extension paths, and are read without automatic rewriting (`pi-extension/subagents/session.ts`).
 
 Pi resume never re-reads profiles or package settings and preflights exact stored paths. AGY likewise replays only a strict snapshot containing its exact conversation ID, cwd, model, effort, identity, logical/native tools, generated-agent content, and in version 2 its ordered additional workspace roots; drift or missing state fails before pane creation, and successful continuation atomically updates only the conversation ID. Existing valid version 1 AGY snapshots remain an exact legacy shape and resume without gaining the current parent cwd. Canonical state or session paths are reserved while launching. Finished Claude children are not resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
+
+A running, exhausted, or failed chain uses a separate strict registry tag and package-owned sidecar. No losing native session or snapshot is addressable through the logical name. A successful target atomically replaces chain ownership with that exact native entry; if replacement fails, the result remains deliverable with an explicit non-resumable warning. Winner continuation is native and never falls back (`pi-extension/subagents/model-chain.ts`, `pi-extension/subagents/session.ts`, `pi-extension/subagents/index.ts`).
 
 ## Shell and live-input boundaries
 
@@ -43,4 +51,4 @@ Pi resume never re-reads profiles or package settings and preflights exact store
 
 ## Runtime files
 
-Name registries, AGY resume snapshots, and activity snapshots use temp-file rename with strict schema validation. Errors in best-effort metadata writes must not turn into an unrestricted resume; an AGY result may remain delivered but explicitly non-resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/session.ts`, `pi-extension/subagents/activity.ts`).
+Name registries, model-chain sidecars, AGY resume snapshots, and activity snapshots use temp-file rename with strict schema validation. Errors in best-effort metadata writes must not turn into an unrestricted resume; an AGY result may remain delivered but explicitly non-resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/session.ts`, `pi-extension/subagents/activity.ts`).
