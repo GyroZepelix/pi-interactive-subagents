@@ -17,6 +17,12 @@ import {
 } from "node:fs";
 import { translateAgyTools } from "./agy.ts";
 import {
+  loadMcpConfigCatalog,
+  resolveMcpServerReferences,
+  type McpServerReference,
+  type McpSupportTool,
+} from "./mcp-config.ts";
+import {
   basename,
   dirname,
   isAbsolute,
@@ -55,6 +61,7 @@ export interface ParsedAgentDefinition {
   description?: string;
   model?: string;
   builtinTools: string[];
+  mcpServers: string[];
   extensions: AgentExtensionSelector[];
   skills: string[];
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -74,6 +81,8 @@ export interface ParsedAgentDefinition {
 
 export interface AgentDefinition extends Omit<ParsedAgentDefinition, "modelChain"> {
   extensionPaths: string[];
+  mcpServerReferences: McpServerReference[];
+  mcpSupportTools: McpSupportTool[];
   modelChain?: AgentModelChainTarget[];
 }
 
@@ -110,6 +119,7 @@ const SUPPORTED_FIELDS = new Set([
   "description",
   "model",
   "builtin-tools",
+  "mcp-servers",
   "extensions",
   "skill",
   "skills",
@@ -146,6 +156,7 @@ const BUILTIN_TOOL_VALUES = new Set([
   "grep",
   "find",
   "ls",
+  "codemode",
 ]);
 const SPAWNING_TOOL_VALUES = new Set([
   "subagent",
@@ -619,6 +630,18 @@ export function parseAgentDefinition(
   }
   const skillsField = hasOwn(frontmatter, "skill") ? "skill" : "skills";
   const builtinTools = builtinToolList(frontmatter, filePath, diagnostics);
+  const mcpServers = stringList(frontmatter, "mcp-servers", filePath, diagnostics);
+  for (const name of mcpServers) {
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+      diagnostics.push(
+        diagnostic(
+          filePath,
+          "mcp-servers",
+          `entry "${name}" must contain only letters, digits, '_' and '-'`,
+        ),
+      );
+    }
+  }
   const extensions = extensionSelectors(frontmatter, filePath, diagnostics);
   const modelChain = modelChainTargets(frontmatter, filePath, diagnostics);
   const skills = stringList(frontmatter, skillsField, filePath, diagnostics);
@@ -634,7 +657,7 @@ export function parseAgentDefinition(
   const cli = optionalEnum<AgentCli>(frontmatter, "cli", CLI_VALUES, filePath, diagnostics);
   if (modelChain !== undefined) {
     for (const field of [
-      "cli", "model", "thinking", "extensions", "skill", "skills", "subagent_agents",
+      "cli", "model", "thinking", "extensions", "mcp-servers", "skill", "skills", "subagent_agents",
       "session-mode", "system-prompt", "auto-exit", "interactive",
     ] as const) {
       if (hasOwn(frontmatter, field)) {
@@ -653,7 +676,7 @@ export function parseAgentDefinition(
     }
   }
   if (cli === "claude") {
-    for (const field of ["builtin-tools", "extensions"] as const) {
+    for (const field of ["builtin-tools", "mcp-servers", "extensions"] as const) {
       if (hasOwn(frontmatter, field)) {
         diagnostics.push(
           diagnostic(filePath, field, `cannot be used with cli: claude; ${field} is Pi-only`),
@@ -664,6 +687,7 @@ export function parseAgentDefinition(
   if (cli === "agy") {
     for (const field of [
       "extensions",
+      "mcp-servers",
       "skill",
       "skills",
       "subagent_agents",
@@ -698,6 +722,7 @@ export function parseAgentDefinition(
     description: optionalString(frontmatter, "description", filePath, diagnostics),
     model: optionalString(frontmatter, "model", filePath, diagnostics),
     builtinTools,
+    mcpServers,
     extensions,
     skills,
     thinking: optionalEnum(frontmatter, "thinking", THINKING_VALUES, filePath, diagnostics),
@@ -1379,7 +1404,9 @@ async function resolveAgentExtensions(
   }
 
   return {
-    agent: diagnostics.length === 0 ? { ...agent, extensionPaths } : null,
+    agent: diagnostics.length === 0
+      ? { ...agent, extensionPaths, mcpServerReferences: [], mcpSupportTools: [] }
+      : null,
     diagnostics,
   };
 }
@@ -1467,10 +1494,32 @@ export async function discoverAgentDefinitions(
     discovered = parsedAgents.map((agent) => ({
       ...agent,
       extensionPaths: [],
+      mcpServerReferences: [],
+      mcpSupportTools: [],
       ...(agent.modelChain
         ? { modelChain: agent.modelChain.map((target) => ({ ...target, extensionPaths: [] })) }
         : {}),
     }));
+  }
+
+  if (discovered.some((agent) => agent.mcpServers.length > 0)) {
+    const catalog = loadMcpConfigCatalog(options);
+    const resolvedMcpAgents: AgentDefinition[] = [];
+    for (const agent of discovered) {
+      const resolution = resolveMcpServerReferences(agent.mcpServers, catalog);
+      if ("errors" in resolution) {
+        diagnostics.push(...resolution.errors.map((message) =>
+          diagnostic(agent.filePath, "mcp-servers", message)
+        ));
+        continue;
+      }
+      resolvedMcpAgents.push({
+        ...agent,
+        mcpServerReferences: resolution.serverReferences,
+        mcpSupportTools: resolution.supportTools,
+      });
+    }
+    discovered = resolvedMcpAgents;
   }
 
   const allowed = options.allowedNames;

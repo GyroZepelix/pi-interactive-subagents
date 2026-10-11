@@ -11,6 +11,7 @@ Repository-local planning and execution artifacts.
 <!-- spec-items:active:start -->
 | Item | Kind | Status | Updated |
 | --- | --- | --- | --- |
+| [Add MCP and codemode profile access](./active/261002-1653-add-mcp-and-codemode-profile-access/plan.md) | work-item | planned | 2026-10-02 |
 <!-- spec-items:active:end -->
 
 ## Archive

@@ -28,6 +28,10 @@ import {
   discoverAgentDefinitions,
   parseAgentDefinition,
 } from "../pi-extension/subagents/agents.ts";
+import {
+  digestNormalizedMcpConfig,
+  validateAndNormalizeMcpServerConfig,
+} from "../pi-extension/subagents/mcp-config.ts";
 
 import {
   getLeafId,
@@ -1500,6 +1504,216 @@ describe("subagent discovery", () => {
       parse("builtin-tools: [grep, find, ls]").agent?.builtinTools,
       ["grep", "find", "ls"],
     );
+  });
+
+  it("parses flat Pi codemode and exact MCP grants with deny-all defaults", () => {
+    const parse = (fields: string) => parseAgentDefinition(
+      `---\nname: mcp-profile\n${fields}---\nbody`,
+      "/tmp/mcp-profile.md",
+      "global",
+    );
+
+    assert.deepEqual(parse("").agent?.mcpServers, []);
+    assert.deepEqual(parse('mcp-servers: ""\n').agent?.mcpServers, []);
+    const commaGranted = parse("builtin-tools: [read, codemode]\nmcp-servers: docs, local-tools, docs\n");
+    assert.deepEqual(commaGranted.agent?.mcpServers, ["docs", "local-tools"]);
+    const granted = parse("builtin-tools: [read, codemode]\nmcp-servers: [docs, local-tools, docs]\n");
+    assert.deepEqual(granted.diagnostics, []);
+    assert.deepEqual(granted.agent?.builtinTools, ["read", "codemode"]);
+    assert.deepEqual(granted.agent?.mcpServers, ["docs", "local-tools"]);
+
+    const invalidName = parse("mcp-servers: [docs, 'bad.name']\n");
+    assert.equal(invalidName.agent, null);
+    assert.ok(invalidName.diagnostics.some((entry) =>
+      entry.field === "mcp-servers" && /letters, digits/.test(entry.message)
+    ));
+  });
+
+  it("rejects MCP grants on Claude, AGY, and model-chain profiles even when empty", () => {
+    const cases = [
+      "name: claude-mcp\ncli: claude\nmcp-servers: []",
+      "name: agy-mcp\ncli: agy\nmcp-servers: ''",
+      [
+        "name: chain-mcp",
+        "mcp-servers: []",
+        "model-chain:",
+        "  - { cli: agy, model: first }",
+        "  - { cli: pi, model: second }",
+      ].join("\n"),
+    ];
+    for (const [index, frontmatter] of cases.entries()) {
+      const parsed = parseAgentDefinition(
+        `---\n${frontmatter}\n---\nbody`,
+        `/tmp/unsupported-mcp-${index}.md`,
+        "global",
+      );
+      assert.equal(parsed.agent, null);
+      assert.ok(parsed.diagnostics.some((entry) =>
+        entry.field === "mcp-servers" && /cannot be used/.test(entry.message)
+      ));
+    }
+  });
+
+  it("normalizes semantic MCP config before digesting without resolving expressions", () => {
+    const digest = (raw: unknown) => {
+      const result = validateAndNormalizeMcpServerConfig("tools", raw, "global");
+      assert.ok(!("error" in result), "expected a valid MCP config");
+      return digestNormalizedMcpConfig(result.normalized);
+    };
+    const base = {
+      command: "node",
+      args: ["server.mjs"],
+      env: { TOKEN: "${TOKEN}", MODE: "!printf safe" },
+      exposure: "codemode",
+      enabled: true,
+      timeout: 60,
+      toolExposure: { "get_*": "codemode", "delete_*": "hidden" },
+    };
+    const equivalent = {
+      timeout: 60,
+      type: "stdio",
+      enabled: true,
+      toolExposure: { "get_*": "codemode-deferred", "delete_*": "hidden" },
+      env: { MODE: "!printf safe", TOKEN: "${TOKEN}" },
+      args: ["server.mjs"],
+      command: "node",
+      exposure: "codemode-deferred",
+    };
+
+    assert.equal(digest(base), digest(equivalent));
+    for (const changed of [
+      { ...base, command: "nodejs" },
+      { ...base, exposure: "direct" },
+      { ...base, toolExposure: { "delete_*": "hidden", "get_*": "codemode" } },
+      { url: "https://example.test/mcp", headers: { Authorization: "Bearer ${TOKEN}" } },
+    ]) {
+      assert.notEqual(digest(base), digest(changed));
+    }
+    assert.notEqual(
+      digest({ ...base, toolExposure: { "*": "hidden", "get_*": "direct" } }),
+      digest({ ...base, toolExposure: { "get_*": "direct", "*": "hidden" } }),
+      "overlapping tool exposure order must remain semantic",
+    );
+  });
+
+  it("resolves trusted MCP sources with project precedence and non-secret canonical references", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir, globalAgentsDir }) => {
+      const globalConfig = join(globalDir, "mcp.json");
+      const projectConfig = join(projectDir, ".pi", "mcp.json");
+      const alternateCwd = join(dirname(projectDir), "alternate-child-cwd");
+      const marker = join(dirname(projectDir), "must-not-run");
+      mkdirSync(join(alternateCwd, ".pi"), { recursive: true });
+      writeFileSync(
+        join(alternateCwd, ".pi", "mcp.json"),
+        JSON.stringify({ mcpServers: { shared: { command: "wrong-runtime-cwd" } } }),
+      );
+      const globalText = JSON.stringify({
+        mcpServers: {
+          shared: { command: "global-command", env: { SECRET: "global-secret" } },
+          fallback: { url: "https://global.example/mcp", headers: { Authorization: "Bearer ${TOKEN}" } },
+          directOnly: { command: "direct-server", exposure: "direct" },
+        },
+      });
+      const projectText = JSON.stringify({
+        mcpServers: {
+          shared: {
+            command: "project-command",
+            env: { TOKEN: `!touch ${marker}` },
+            exposure: "deferred",
+          },
+        },
+      });
+      writeFileSync(globalConfig, globalText);
+      writeFileSync(projectConfig, projectText);
+      writeAgentFile(globalAgentsDir, "project-wins", [
+        "name: project-wins",
+        `cwd: ${alternateCwd}`,
+        "mcp-servers: [shared, fallback]",
+      ].join("\n"));
+      writeAgentFile(
+        globalAgentsDir,
+        "direct-only",
+        "name: direct-only\nmcp-servers: [directOnly]",
+      );
+
+      const trusted = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const agent = trusted.agents.find((entry) => entry.name === "project-wins");
+      assert.ok(agent);
+      assert.deepEqual(agent.mcpServerReferences.map(({ name, scope, source }) => ({ name, scope, source })), [
+        { name: "shared", scope: "project", source: realpathSync(projectConfig) },
+        { name: "fallback", scope: "global", source: realpathSync(globalConfig) },
+      ]);
+      assert.deepEqual(agent.mcpSupportTools, ["codemode", "tool-search"]);
+      assert.deepEqual(
+        trusted.agents.find((entry) => entry.name === "direct-only")?.mcpSupportTools,
+        [],
+        "direct exposure requires no indirect support tool to remain active",
+      );
+      const identityText = JSON.stringify(agent.mcpServerReferences);
+      assert.equal(identityText.includes("project-command"), false);
+      assert.equal(identityText.includes("global-secret"), false);
+      assert.equal(identityText.includes("TOKEN"), false);
+      assert.equal(existsSync(marker), false, "config command expressions must not execute");
+      assert.equal(readFileSync(globalConfig, "utf8"), globalText);
+      assert.equal(readFileSync(projectConfig, "utf8"), projectText);
+
+      const untrusted = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: false });
+      const untrustedAgent = untrusted.agents.find((entry) => entry.name === "project-wins");
+      assert.ok(untrustedAgent);
+      assert.deepEqual(untrustedAgent.mcpServerReferences.map(({ name, scope }) => ({ name, scope })), [
+        { name: "shared", scope: "global" },
+        { name: "fallback", scope: "global" },
+      ]);
+    });
+  });
+
+  it("fails MCP discovery closed for project tombstones, source errors, missing names, and namespace collisions", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir, globalAgentsDir }) => {
+      const globalConfig = join(globalDir, "mcp.json");
+      const projectConfig = join(projectDir, ".pi", "mcp.json");
+      writeFileSync(globalConfig, JSON.stringify({
+        mcpServers: {
+          shared: { command: "global" },
+          "name-clash": { command: "one" },
+          name_clash: { command: "two" },
+        },
+      }));
+      for (const [name, selection] of [
+        ["shadowed", "shared"],
+        ["missing", "absent"],
+        ["collision", "name-clash"],
+      ] as const) {
+        writeAgentFile(globalAgentsDir, name, `name: ${name}\nmcp-servers: [${selection}]`);
+      }
+
+      writeFileSync(projectConfig, JSON.stringify({
+        mcpServers: { shared: { command: "project", enabled: false } },
+      }));
+      const disabled = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.equal(disabled.agents.some((entry) => entry.name === "shadowed"), false);
+      assert.ok(disabled.diagnostics.some((entry) =>
+        entry.filePath.endsWith("shadowed.md") &&
+        entry.field === "mcp-servers" &&
+        /disabled/.test(entry.message)
+      ));
+      assert.equal(disabled.agents.some((entry) => entry.name === "missing"), false);
+      assert.equal(disabled.agents.some((entry) => entry.name === "collision"), false);
+      assert.ok(disabled.diagnostics.some((entry) => /namespace normalization/.test(entry.message)));
+
+      writeFileSync(projectConfig, JSON.stringify({ mcpServers: { shared: { command: 42 } } }));
+      const invalidOverride = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.equal(invalidOverride.agents.some((entry) => entry.name === "shadowed"), false);
+      assert.ok(invalidOverride.diagnostics.some((entry) =>
+        entry.filePath.endsWith("shadowed.md") && /needs "command"/.test(entry.message)
+      ));
+
+      writeFileSync(projectConfig, "{ not-json");
+      const malformed = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.equal(malformed.agents.some((entry) => entry.name === "shadowed"), false);
+      assert.ok(malformed.diagnostics.some((entry) =>
+        entry.field === "mcp-servers" && /invalid JSON/.test(entry.message)
+      ));
+    });
   });
 
   it("retains exact package sources and ordered extension selectors", () => {
