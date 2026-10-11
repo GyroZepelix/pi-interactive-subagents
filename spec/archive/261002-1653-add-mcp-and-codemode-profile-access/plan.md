@@ -120,7 +120,7 @@ New launch and resume share one sandbox application helper. Both preflight frame
   - Acceptance: Canonical discovery produces one ordered non-secret MCP grant or an actionable fail-closed diagnostic without connecting servers or reading credentials; existing non-MCP profiles still resolve.
   - Verification: focused discovery/config tests, `npm test`, dependency-tree inspection, and segment reviews.
 
-- [ ] **T02 - Implement and prove filtered runtime and replay**
+- [x] **T02 - Implement and prove filtered runtime and replay**
   - Depends on: T01
   - Scope: Add snapshot v2, shared launch/resume preflight, explicit built-in support loading, protected filtered MCP control, activation/provenance corrections, Pi-native runtime behavior, non-model lifecycle evidence, user documentation, durable wiki updates, and whole-plan verification.
   - Expected areas: `pi-extension/subagents/index.ts`, `session.ts`, `subagent-protocol.ts`, `subagent-capability-activation.ts`, new MCP child control/config modules, tests and fixtures, `README.md`, `docs/agent-definitions.md`, relevant wiki pages, package metadata if final corrections require it
@@ -184,8 +184,8 @@ New launch and resume share one sandbox application helper. Both preflight frame
 
 - [x] Planning complete and confirmed.
 - [x] T01 complete.
-- [ ] T02 not started.
-- [ ] Verification not run.
+- [x] T02 complete.
+- [x] Verification complete.
 
 ## Execution handoff
 

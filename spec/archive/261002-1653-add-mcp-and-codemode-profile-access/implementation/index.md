@@ -4,7 +4,7 @@ Plan: `../plan.md`
 Mode: sliced
 Assurance: high - external process/network authority, credentials, capability isolation, and persisted replay are in scope
 Review tier: focused review per slice; separate Standards and Spec reviews at segment and final whole-plan gates
-Current: `02.02`
+Current: `complete`
 Expected implementation sessions: 3
 Implementation starting checkpoint: `75166866e769d501a8aaaf02dd851b3bebfae52c`
 
@@ -62,7 +62,7 @@ Segment gate: final slice focused review plus separate Standards and Spec review
 
 Boundary 02.01 -> 02.02: process-level marker fixtures and durable documentation depend on stable unit-tested launch/resume behavior. Keeping them separate preserves diagnostic attribution between runtime construction and external-process isolation while reducing interruption cost.
 
-- [ ] 02.02: Prove non-model lifecycle isolation, document the contract, and complete whole-plan verification (packet: `./02-02-integration-docs-verification.md`)
+- [x] 02.02: Prove non-model lifecycle isolation, document the contract, and complete whole-plan verification (packet: `./02-02-integration-docs-verification.md`)
 
 ## Discoveries and blockers
 

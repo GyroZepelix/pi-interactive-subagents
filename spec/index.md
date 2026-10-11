@@ -11,7 +11,6 @@ Repository-local planning and execution artifacts.
 <!-- spec-items:active:start -->
 | Item | Kind | Status | Updated |
 | --- | --- | --- | --- |
-| [Add MCP and codemode profile access](./active/261002-1653-add-mcp-and-codemode-profile-access/plan.md) | work-item | planned | 2026-10-02 |
 <!-- spec-items:active:end -->
 
 ## Archive
@@ -30,6 +29,7 @@ Repository-local planning and execution artifacts.
 | [Add Antigravity harness support](./archive/260925-1525-add-antigravity-harness-support/plan.md) | work-item | completed | 2026-09-25 |
 | [Allow AGY subagents to read the parent workspace](./archive/260926-1205-allow-agy-subagents-to-read-the-parent-workspace/plan.md) | work-item | completed | 2026-09-26 |
 | [Configurable model fallback](./archive/260926-1248-configurable-model-fallback/plan.md) | work-item | completed | 2026-09-26 |
+| [Add MCP and codemode profile access](./archive/261002-1653-add-mcp-and-codemode-profile-access/plan.md) | work-item | completed | 2026-10-11 |
 <!-- spec-items:archive:end -->
 
 ## Templates

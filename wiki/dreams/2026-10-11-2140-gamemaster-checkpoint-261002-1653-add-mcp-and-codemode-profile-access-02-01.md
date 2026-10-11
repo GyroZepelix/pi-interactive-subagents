@@ -45,8 +45,8 @@ The slice extended the strict snapshot union with version 2, carried only canoni
 
 ## Source of truth
 
-- spec/active/261002-1653-add-mcp-and-codemode-profile-access/implementation/02-01-runtime-and-replay.md: completion evidence, check results, review verdict, and residual uncertainty.
-- spec/active/261002-1653-add-mcp-and-codemode-profile-access/implementation/index.md: completed 02.01 identity and Current 02.02 handoff.
+- spec/archive/261002-1653-add-mcp-and-codemode-profile-access/implementation/02-01-runtime-and-replay.md: completion evidence, check results, review verdict, and residual uncertainty.
+- spec/archive/261002-1653-add-mcp-and-codemode-profile-access/implementation/index.md: completed 02.01 identity and Current 02.02 handoff.
 - pi-extension/subagents/subagent-mcp-control.ts: protected filtered child MCP registration and empty ambient loader.
 - pi-extension/subagents/session.ts: strict loadout version 2 and compatibility union.
 - pi-extension/subagents/index.ts: shared preflight, capability environment, and command ordering.

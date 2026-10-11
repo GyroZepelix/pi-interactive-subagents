@@ -25,7 +25,7 @@ The default is 500 milliseconds.
 
 ## Requirements
 
-- Pi 0.87.0 (the verified target)
+- Pi 1.0.0 or newer
 - tmux
 - Antigravity CLI `agy` on `PATH` for profiles using `cli: agy` (verified with 1.2.11)
 
@@ -57,7 +57,8 @@ Project definitions override global definitions with the same effective name. Pr
 name: inspector
 description: Examines a codebase without changing it
 model: openrouter/example-model
-builtin-tools: [read, grep, find, ls]
+builtin-tools: [read, grep, find, ls, codemode]
+mcp-servers: [project-docs]
 extensions:
   - package: npm:@example/pi-web-tools
     paths: [index.ts]
@@ -70,6 +71,23 @@ Inspect the requested area and report concise findings with file references.
 ```
 
 See [Agent definitions](docs/agent-definitions.md) for the complete contract, including every field, validation, precedence, trust behavior, tool isolation, nested spawning, resume snapshots, and external-harness limitations.
+
+### Codemode and MCP server grants
+
+Flat Pi profiles may list `codemode` in `builtin-tools` and exact configured server names in `mcp-servers`. Both fields accept comma-delimited strings or YAML string arrays. Missing or empty values grant nothing; wildcards and per-tool grants are not supported.
+
+```yaml
+builtin-tools: [read, grep, codemode]
+mcp-servers: [project-docs, issue-tracker]
+```
+
+An MCP name grants the complete configured server while preserving Pi's `direct`, `codemode`, `deferred`, and `hidden` server/per-tool exposure and resource tools. The extension automatically loads `codemode` and `tool_search` support required by the selected exposures. Codemode can execute model-authored JavaScript and call its reachable tools, so grant it only when that authority is intended.
+
+Server names resolve from the global Pi `mcp.json` and, only in a trusted active project, that project's `.pi/mcp.json`. A project entry replaces a same-named global entry, including when the replacement is invalid or disabled; a runtime child `cwd` override does not change this source decision. Malformed source files, missing or disabled selections, invalid selected entries, and selected namespace collisions exclude the profile before pane creation. Once identity passes, connection and sign-in failures use Pi's normal MCP diagnostics and do not create a package-specific terminal startup failure.
+
+Restricted children keep `--no-extensions --no-builtin-tools` and never load ambient `builtin:mcp`. A protected controller re-reads only selected entries, verifies their source and semantic SHA-256 digest, and gives them to Pi's MCP runtime with ambient loading empty. Snapshots retain only ordered server name, canonical source path, scope, and digest--not config bodies, resolved environment values, headers, OAuth tokens, or provider credentials. Resume refuses changed, missing, disabled, invalid, or source-mismatched entries before pane creation and asks for a fresh spawn.
+
+`mcp-servers` filters ambient file configuration, not explicitly selected `extensions`. A declared profile extension remains trusted arbitrary code and may register additional MCP servers or perform process/network I/O. The field is rejected on Claude, AGY, and `model-chain` profiles, even when empty.
 
 ### Antigravity profiles
 
@@ -165,7 +183,7 @@ Names are unique within one parent session and remain registered after a child f
 - A finished Pi child resumes asynchronously and later reports another result.
 - A successfully completed AGY child resumes asynchronously by its exact persisted conversation ID and immutable launch-time capability snapshot, including the exact additional workspace list. Existing version 1 snapshots replay their original boundary without acquiring the current parent cwd. Missing, malformed, mismatched, unavailable, or concurrently claimed state fails before pane creation.
 - Pi resume replays a strictly validated launch-time capability snapshot. It does not reread the profile or package settings.
-- New snapshots retain selected built-ins and ordered canonical profile extension paths. Resume uses the current contents at those paths and is refused before pane creation if required state or files are missing, malformed, non-canonical, duplicated, or reserved.
+- New version 2 snapshots retain selected built-ins, ordered canonical profile extension paths, MCP support state, and non-secret server references. Resume uses current extension contents and revalidates each exact MCP source/digest before pane creation; missing, disabled, malformed, changed, source-mismatched, non-canonical, duplicated, or reserved state is refused with fresh-spawn guidance.
 - Existing valid strict `toolAllowlist` snapshots remain resumable through their legacy `--tools` path and are not rewritten automatically.
 - A finished `cli: claude` child cannot be resumed through `subagent_message`.
 - During a model chain, the logical name points to strict non-resumable controller state. On success it is atomically replaced by the winning Pi session or AGY snapshot, and later `subagent_message` uses only that native resume path. Failed and all-exhausted chains cannot resume a failed attempt; start a new self-contained `subagent` invocation, which begins again at target one. A later native continuation never triggers automatic fallback.
@@ -184,7 +202,7 @@ If a child remains unresponsive, inspect its pane and session first. To recover 
 
 Profiles are parsed as YAML and validated before use. Unknown keys, conflicting aliases, invalid enum values, pseudo-booleans, malformed list values, and malformed YAML exclude the definition with a file-and-field diagnostic. Legacy profile `tools` is rejected with guidance to split Pi built-ins into `builtin-tools` and custom capabilities into package `extensions`.
 
-Every new named Pi child launches with global extension discovery and initial built-ins disabled. Missing or empty `builtin-tools` grants no Pi built-ins. The only accepted names are `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, and `ls`; `ask_question` remains available through the package's protected runtime control.
+Every new named Pi child launches with global extension discovery and initial built-ins disabled. Missing or empty `builtin-tools` grants no Pi built-ins. The accepted names are `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, `ls`, and `codemode`; `ask_question` remains available through the package's protected runtime control. `codemode` and `mcp-servers` require Pi 1.0 or newer and are supported only by flat Pi profiles.
 
 `extensions` is an optional YAML array of package mappings. Each `package` must exactly match a source configured in Pi settings. Omit `paths` to select every enabled extension resource from that package in Pi's resolved order, or provide a non-empty array of exact package-relative resource paths. Absolute paths, `.` or `..` segments, duplicate packages or selectors, disabled resources, root escapes, missing files, and empty selections invalidate the profile. Package order and explicit selector order are preserved; canonical duplicate files keep their first occurrence.
 
@@ -192,7 +210,7 @@ Package lookup is read-only and never installs or updates packages, accesses the
 
 A declared extension is a grant to execute the complete trusted extension with the user's permissions. It is not a per-tool sandbox. The extension may register tools, hooks, commands, or providers and may change active tools dynamically. It may override built-in names; when custom tool names collide, the first declared extension wins.
 
-Child extension order is protected runtime control first, optional spawning control second, selected profile extensions in resolved order, and tool-free capability activation last. This keeps framework tool names protected while activating selected built-ins and extension tools before model requests. Nested spawning is granted only by a non-empty `subagent_agents` field, and `PI_SUBAGENT_ALLOWED` pins the child to those effective names. Listing spawning controls under `builtin-tools` is invalid.
+Child extension order is protected runtime control first, optional spawning control second, required built-in codemode/tool-search support, protected filtered MCP control when granted, selected profile extensions in resolved order, and tool-free capability activation last. This keeps framework and selected ambient MCP names protected while preserving Pi-native exposure and activating selected built-ins and trusted extension tools before model requests. Nested spawning is granted only by a non-empty `subagent_agents` field, and `PI_SUBAGENT_ALLOWED` pins the child to those effective names. Listing spawning controls under `builtin-tools` is invalid.
 
 Project-controlled prompts are read only when `ctx.isProjectTrusted()` is true. `builtin-tools` and `extensions` are Pi-only for `cli: claude` and make such a profile invalid, even when explicitly empty. For `cli: agy`, `builtin-tools` is the strict native-tool allowlist; Pi extensions and lifecycle fields are unsupported and explicitly rejected.
 
@@ -230,10 +248,11 @@ Install the locked development dependencies after reviewing the dependency chang
 npm ci
 ```
 
-Safe unit and package checks:
+Safe unit, non-model MCP lifecycle, and package checks:
 
 ```bash
 npm test
+node --test --test-concurrency=1 test/integration/mcp-capability.test.ts
 npm pack --dry-run --json
 git diff --check
 ```

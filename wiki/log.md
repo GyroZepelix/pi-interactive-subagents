@@ -155,3 +155,19 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/map.md`, `wiki/architecture.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
 - Verification: source claims were compared with the implementation; deterministic model-free tests cover strict parsing, target extension resolution, preparation, terminal evidence, classifier boundaries, sequential outcomes, registry state, and widget metadata. Full safe verification and independent reviews are recorded in the work-item verification artifact.
 - Notes: bare 429 and resource exhaustion intentionally accept temporary-throttling ambiguity. Target extensions remain full trusted grants. Live model exhaustion, switching, and winner continuation remain separately approval-gated and unverified.
+
+## [2026-10-11] update | filtered MCP and codemode profile grants
+
+- Trigger: implementation of `261002-1653-add-mcp-and-codemode-profile-access` established Pi 1.0+ codemode and exact ambient MCP server grants for flat Pi profiles.
+- Inputs: `pi-extension/subagents/agents.ts`, `mcp-config.ts`, `index.ts`, `session.ts`, `subagent-mcp-control.ts`, `subagent-capability-activation.ts`, focused unit tests, the non-model MCP lifecycle fixture, and the active work-item plan.
+- Wiki pages changed: `wiki/architecture.md`, `wiki/map.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, and `wiki/log.md`.
+- Verification: source claims were compared with the implementation; disposable local process/HTTP fixtures prove selected-versus-ambient loading, exposure/resources/prompt integrity, native failure diagnostics, credential-safe state, and teardown without a model call. Whole-plan checks and independent reviews are recorded in the work-item verification artifact.
+- Notes: ambient file filtering does not sandbox declared trusted extensions. Version 2 Pi replay pins exact source/digest while version 1 and legacy snapshots retain their existing paths. Configured-model lifecycle testing remains approval-gated and unverified.
+
+## [2026-10-11] dream | final MCP isolation checkpoint
+
+- Trigger: `/dream` run after archived completion of Gamemaster checkpoint `261002-1653-add-mcp-and-codemode-profile-access/02.02`.
+- Inputs: current session, `spec/archive/261002-1653-add-mcp-and-codemode-profile-access/{plan,verification,outcome}.md`, final Current evidence, local MCP fixture, review verdicts, and archive validation.
+- Wiki pages changed: `wiki/dreams/2026-10-11-2220-gamemaster-checkpoint-261002-1653-add-mcp-and-codemode-profile-access-02-02.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261002-1653-add-mcp-and-codemode-profile-access.md`, `wiki/observations.md`, and `wiki/log.md`.
+- Verification: re-read changed files; memory safety, catalog identity/coverage, exact checkpoint marker, ledger-link and prior-section preservation, archive-aware sources, wiki-only scope, relative links, fences, and `git diff --check` passed.
+- Notes: retained one tentative Dream-workflow observation about archive-aware checkpoint source references. No additional dynamic MCP guidance qualified because the implementation session had already updated the relevant durable pages. Live configured-model and real external MCP/OAuth behavior remain intentionally unverified.

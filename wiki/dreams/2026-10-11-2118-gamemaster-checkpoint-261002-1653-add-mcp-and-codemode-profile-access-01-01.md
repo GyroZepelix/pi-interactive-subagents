@@ -44,8 +44,8 @@ The implementation first obtained the required dependency and lockfile approval,
 
 ## Source of truth
 
-- spec/active/261002-1653-add-mcp-and-codemode-profile-access/implementation/01-01-capability-domain.md: completion evidence, checks, review verdicts, and retry record.
-- spec/active/261002-1653-add-mcp-and-codemode-profile-access/implementation/index.md: completed 01.01 identity and Current 02.01 handoff.
+- spec/archive/261002-1653-add-mcp-and-codemode-profile-access/implementation/01-01-capability-domain.md: completion evidence, checks, review verdicts, and retry record.
+- spec/archive/261002-1653-add-mcp-and-codemode-profile-access/implementation/index.md: completed 01.01 identity and Current 02.01 handoff.
 - pi-extension/subagents/mcp-config.ts: canonical validation, normalization, digest, trust, and source-reference behavior.
 - pi-extension/subagents/agents.ts: profile parsing and discovery integration.
 
