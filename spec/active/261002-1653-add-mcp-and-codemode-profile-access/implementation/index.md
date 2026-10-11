@@ -4,7 +4,7 @@ Plan: `../plan.md`
 Mode: sliced
 Assurance: high - external process/network authority, credentials, capability isolation, and persisted replay are in scope
 Review tier: focused review per slice; separate Standards and Spec reviews at segment and final whole-plan gates
-Current: `02.01`
+Current: `02.02`
 Expected implementation sessions: 3
 Implementation starting checkpoint: `75166866e769d501a8aaaf02dd851b3bebfae52c`
 
@@ -54,11 +54,11 @@ Boundary 01.01 -> 02.01: runtime and persisted replay must consume one verified 
 ### T02: Implement and prove filtered runtime and replay
 
 Depends on: T01
-Segment starting checkpoint: unrecorded
+Segment starting checkpoint: `d4cea5bb4a18fff0cecd6af34194bcc0320a97bb`
 Segment acceptance: initial and resumed children expose only selected ambient servers with correct discovery/exposure, reject drift before pane creation, preserve old snapshots and trusted extension behavior, and ship verified documentation.
 Segment gate: final slice focused review plus separate Standards and Spec reviews expanded across T02 and whole-plan acceptance.
 
-- [ ] 02.01: Implement loadout v2, filtered child MCP, launch/resume, and exposure-safe activation (packet: `./02-01-runtime-and-replay.md`)
+- [x] 02.01: Implement loadout v2, filtered child MCP, launch/resume, and exposure-safe activation (packet: `./02-01-runtime-and-replay.md`)
 
 Boundary 02.01 -> 02.02: process-level marker fixtures and durable documentation depend on stable unit-tested launch/resume behavior. Keeping them separate preserves diagnostic attribution between runtime construction and external-process isolation while reducing interruption cost.
 

@@ -31,6 +31,7 @@ import {
 import {
   digestNormalizedMcpConfig,
   validateAndNormalizeMcpServerConfig,
+  verifyMcpServerReferences,
 } from "../pi-extension/subagents/mcp-config.ts";
 
 import {
@@ -104,7 +105,13 @@ import subagentRuntimeControlExtension from "../pi-extension/subagents/subagent-
 import capabilityActivationExtension, {
   resolveProfileActiveTools,
   SUBAGENT_BUILTIN_TOOLS_ENV,
+  SUBAGENT_CAPABILITY_VERSION_ENV,
+  SUBAGENT_MCP_SUPPORT_TOOLS_ENV,
 } from "../pi-extension/subagents/subagent-capability-activation.ts";
+import filteredMcpControlExtension from "../pi-extension/subagents/subagent-mcp-control.ts";
+import {
+  SUBAGENT_MCP_REFERENCES_ENV,
+} from "../pi-extension/subagents/subagent-protocol.ts";
 import { __pollForExitTest__ } from "../pi-extension/subagents/tmux.ts";
 import {
   QUESTION_ANSWER_PREFIX,
@@ -461,28 +468,50 @@ describe("session.ts", () => {
       cwd: "/work/research",
       agentDir: "/home/u/.pi/agent",
     };
+    const versionTwoSample: SubagentLoadout = {
+      ...versionedSample,
+      version: 2,
+      capabilityMode: "mcp-capabilities",
+      builtinTools: ["read", "codemode"],
+      mcpServerReferences: [{
+        name: "docs",
+        source: "/home/u/.pi/agent/mcp.json",
+        scope: "global",
+        digest: "a".repeat(64),
+      }],
+      mcpSupportTools: ["codemode", "tool-search"],
+    };
 
     it("writes the versioned sidecar next to the session file", () => {
       const sf = join(dir, "s1.jsonl");
-      writeSubagentLoadout(sf, versionedSample);
+      writeSubagentLoadout(sf, versionTwoSample);
       assert.equal(loadoutSidecarPath(sf), sf + ".loadout.json");
       assert.ok(existsSync(sf + ".loadout.json"));
     });
 
-    it("round-trips new versioned and valid legacy strict loadouts", () => {
-      for (const [name, sample] of [["versioned", versionedSample], ["legacy", legacySample]] as const) {
+    it("round-trips version 2, version 1, and valid legacy strict loadouts", () => {
+      for (const [name, sample] of [
+        ["version-two", versionTwoSample],
+        ["version-one", versionedSample],
+        ["legacy", legacySample],
+      ] as const) {
         const sf = join(dir, `${name}.jsonl`);
         writeSubagentLoadout(sf, sample);
         assert.deepEqual(readSubagentLoadout(sf), sample);
       }
     });
 
-    it("reads a legacy strict sidecar without rewriting it", () => {
-      const sf = join(dir, "legacy-preserved.jsonl");
-      const original = JSON.stringify(legacySample, null, 2) + "\n";
-      writeFileSync(loadoutSidecarPath(sf), original, "utf8");
-      assert.deepEqual(readSubagentLoadout(sf), legacySample);
-      assert.equal(readFileSync(loadoutSidecarPath(sf), "utf8"), original);
+    it("reads version-1 and legacy strict sidecars without rewriting their bytes", () => {
+      for (const [name, sample] of [
+        ["version-one-preserved", versionedSample],
+        ["legacy-preserved", legacySample],
+      ] as const) {
+        const sf = join(dir, `${name}.jsonl`);
+        const original = JSON.stringify(sample, null, 2) + "\n";
+        writeFileSync(loadoutSidecarPath(sf), original, "utf8");
+        assert.deepEqual(readSubagentLoadout(sf), sample);
+        assert.equal(readFileSync(loadoutSidecarPath(sf), "utf8"), original);
+      }
     });
 
     it("returns null when the sidecar is absent", () => {
@@ -504,6 +533,10 @@ describe("session.ts", () => {
         { ...legacySample, autoExit: "yes" },
         { ...legacySample, toolAllowlist: null },
         { ...versionedSample, unexpected: true },
+        { ...versionTwoSample, capabilityMode: "extension-grants" },
+        { ...versionTwoSample, mcpServerReferences: undefined },
+        { ...versionTwoSample, mcpSupportTools: ["tool-search", "codemode"] },
+        { ...versionTwoSample, toolAllowlist: "read" },
       ];
       for (const [index, value] of cases.entries()) {
         const sf = join(dir, `invalid-mode-${index}.jsonl`);
@@ -529,6 +562,34 @@ describe("session.ts", () => {
           "utf8",
         );
         assert.equal(readSubagentLoadout(sf), null, `expected case ${index} to fail closed`);
+      }
+    });
+
+    it("rejects malformed, duplicate, noncanonical, and inconsistent version-2 capability state", () => {
+      const cases = [
+        { ...versionTwoSample, mcpServerReferences: [
+          ...versionTwoSample.mcpServerReferences,
+          ...versionTwoSample.mcpServerReferences,
+        ] },
+        { ...versionTwoSample, mcpServerReferences: [{
+          ...versionTwoSample.mcpServerReferences[0],
+          source: "relative/mcp.json",
+        }] },
+        { ...versionTwoSample, mcpServerReferences: [{
+          ...versionTwoSample.mcpServerReferences[0],
+          digest: "A".repeat(64),
+        }] },
+        { ...versionTwoSample, mcpServerReferences: [{
+          ...versionTwoSample.mcpServerReferences[0],
+          config: { command: "must-not-persist" },
+        }] },
+        { ...versionTwoSample, mcpSupportTools: ["unknown"] },
+        { ...versionTwoSample, mcpServerReferences: [], mcpSupportTools: ["codemode"] },
+      ];
+      for (const [index, value] of cases.entries()) {
+        const sf = join(dir, `invalid-v2-capability-${index}.jsonl`);
+        writeFileSync(sf + ".loadout.json", JSON.stringify(value), "utf8");
+        assert.equal(readSubagentLoadout(sf), null, `expected version-2 case ${index} to fail closed`);
       }
     });
 
@@ -1594,6 +1655,183 @@ describe("subagent discovery", () => {
       digest({ ...base, toolExposure: { "get_*": "direct", "*": "hidden" } }),
       "overlapping tool exposure order must remain semantic",
     );
+  });
+
+  it("revalidates exact MCP references without retaining ambient entries or persisted secrets", () => {
+    withTempDir((dir) => {
+      const source = join(dir, "mcp.json");
+      const selected = {
+        command: "selected-command",
+        env: { TOKEN: "${SELECTED_SECRET}" },
+        exposure: "hidden",
+        toolExposure: { script: "codemode", later: "deferred" },
+      };
+      writeFileSync(source, JSON.stringify({
+        mcpServers: {
+          selected,
+          ambient: { command: "ambient-command", env: { TOKEN: "literal-ambient-secret" } },
+        },
+      }));
+      const normalized = validateAndNormalizeMcpServerConfig("selected", selected, "global");
+      assert.ok(!("error" in normalized));
+      const reference = {
+        name: "selected",
+        source: realpathSync(source),
+        scope: "global" as const,
+        digest: digestNormalizedMcpConfig(normalized.normalized),
+      };
+
+      const verified = verifyMcpServerReferences([reference]);
+      assert.ok(!("errors" in verified));
+      assert.deepEqual(verified.supportTools, ["codemode", "tool-search"]);
+      assert.deepEqual(verified.servers.map((server) => server.name), ["selected"]);
+      assert.doesNotMatch(JSON.stringify(reference), /SELECTED_SECRET|ambient-command|literal-ambient-secret/);
+
+      writeFileSync(source, JSON.stringify({
+        mcpServers: { ...JSON.parse(readFileSync(source, "utf8")).mcpServers,
+          selected: { ...selected, command: "changed-command" } },
+      }));
+      const drift = verifyMcpServerReferences([reference]);
+      assert.ok("errors" in drift);
+      assert.match(drift.errors.join("\n"), /configuration changed/);
+      assert.doesNotMatch(drift.errors.join("\n"), /SELECTED_SECRET|changed-command/);
+
+      writeFileSync(source, JSON.stringify({
+        mcpServers: { selected: { ...selected, enabled: false } },
+      }));
+      const disabled = verifyMcpServerReferences([reference]);
+      assert.ok("errors" in disabled);
+      assert.match(disabled.errors.join("\n"), /disabled/);
+
+      writeFileSync(source, JSON.stringify({ mcpServers: { selected: { command: 42 } } }));
+      const invalid = verifyMcpServerReferences([reference]);
+      assert.ok("errors" in invalid);
+      assert.match(invalid.errors.join("\n"), /needs "command"/);
+
+      rmSync(source);
+      const missing = verifyMcpServerReferences([reference]);
+      assert.ok("errors" in missing);
+      assert.match(missing.errors.join("\n"), /no longer configured/);
+
+      const replacement = join(dir, "replacement.json");
+      writeFileSync(replacement, JSON.stringify({ mcpServers: { selected } }));
+      symlinkSync(replacement, source);
+      const sourceMismatch = verifyMcpServerReferences([reference]);
+      assert.ok("errors" in sourceMismatch);
+      assert.match(sourceMismatch.errors.join("\n"), /source identity changed/);
+    });
+  });
+
+  it("filtered MCP control registers only exact verified references before profile extensions", () => {
+    withTempDir((dir) => {
+      const source = join(dir, "mcp.json");
+      const selected = { command: "selected-command", exposure: "direct" };
+      writeFileSync(source, JSON.stringify({
+        mcpServers: {
+          selected,
+          ambient: { command: "ambient-command" },
+        },
+      }));
+      const normalized = validateAndNormalizeMcpServerConfig("selected", selected, "global");
+      assert.ok(!("error" in normalized));
+      const references = [{
+        name: "selected",
+        source: realpathSync(source),
+        scope: "global" as const,
+        digest: digestNormalizedMcpConfig(normalized.normalized),
+      }];
+      const saved = process.env[SUBAGENT_MCP_REFERENCES_ENV];
+      const savedCapabilityVersion = process.env[SUBAGENT_CAPABILITY_VERSION_ENV];
+      process.env[SUBAGENT_CAPABILITY_VERSION_ENV] = "2";
+      process.env[SUBAGENT_MCP_REFERENCES_ENV] = JSON.stringify(references);
+      const registered: Array<{ name: string; config: unknown }> = [];
+      const handlers: string[] = [];
+      const api = {
+        registerMcpServer(name: string, config: unknown) { registered.push({ name, config }); },
+        registerToolRenderer() {},
+        registerCommand() {},
+        on(event: string) { handlers.push(event); },
+      } as any;
+      try {
+        filteredMcpControlExtension(api);
+        assert.deepEqual(registered.map((entry) => entry.name), ["selected"]);
+        assert.equal(registered.some((entry) => entry.name === "ambient"), false);
+        assert.ok(handlers.includes("session_start"), "expected Pi-native MCP lifecycle handlers");
+      } finally {
+        restoreEnvVar(SUBAGENT_MCP_REFERENCES_ENV, saved);
+        restoreEnvVar(SUBAGENT_CAPABILITY_VERSION_ENV, savedCapabilityVersion);
+      }
+    });
+  });
+
+  it("reserves selected MCP names while allowing differently named trusted registrations", async () => {
+    const dir = createTestDir();
+    const savedReferences = process.env[SUBAGENT_MCP_REFERENCES_ENV];
+    const savedCapabilityVersion = process.env[SUBAGENT_CAPABILITY_VERSION_ENV];
+    let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+    try {
+      const source = join(dir, "mcp.json");
+      const selected = { command: "selected-command", exposure: "direct" };
+      writeFileSync(source, JSON.stringify({ mcpServers: { selected } }));
+      const normalized = validateAndNormalizeMcpServerConfig("selected", selected, "global");
+      assert.ok(!("error" in normalized));
+      process.env[SUBAGENT_CAPABILITY_VERSION_ENV] = "2";
+      process.env[SUBAGENT_MCP_REFERENCES_ENV] = JSON.stringify([{
+        name: "selected",
+        source: realpathSync(source),
+        scope: "global",
+        digest: digestNormalizedMcpConfig(normalized.normalized),
+      }]);
+
+      const settingsManager = SettingsManager.inMemory();
+      const resourceLoader = new DefaultResourceLoader({
+        cwd: dir,
+        agentDir: dir,
+        settingsManager,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        extensionFactories: [
+          { name: "filtered-mcp", factory: filteredMcpControlExtension },
+          {
+            name: "duplicate-profile",
+            factory(pi) {
+              pi.registerMcpServer("selected", { command: "replacement-command" });
+            },
+          },
+          {
+            name: "additional-profile",
+            factory(pi) {
+              pi.registerMcpServer("additional", { command: "additional-command" });
+            },
+          },
+        ],
+      });
+      await resourceLoader.reload();
+      const created = await createAgentSession({
+        cwd: dir,
+        agentDir: dir,
+        noTools: "builtin",
+        resourceLoader,
+        settingsManager,
+        sessionManager: PiSessionManager.inMemory(dir),
+      });
+      session = created.session;
+
+      assert.ok(created.extensionsResult.errors.some((error) =>
+        /already registered/.test(error.error) && /selected/.test(error.error)
+      ));
+      const registrations = (created.extensionsResult.runtime as any).mcpServers.list();
+      assert.deepEqual(registrations.map((entry: any) => entry.name), ["selected", "additional"]);
+      assert.equal(registrations[0].config.command, "selected-command");
+    } finally {
+      session?.dispose();
+      restoreEnvVar(SUBAGENT_MCP_REFERENCES_ENV, savedReferences);
+      restoreEnvVar(SUBAGENT_CAPABILITY_VERSION_ENV, savedCapabilityVersion);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("resolves trusted MCP sources with project precedence and non-secret canonical references", async () => {
@@ -2927,6 +3165,8 @@ describe("subagent discovery", () => {
         builtinTools: ["read"],
         extensionPaths: [],
         grantSpawning: true,
+        mcpServerReferences: [],
+        mcpSupportTools: [],
       });
       const prepared = testApi.prepareAgentLaunch(
         { agent: "declared-name", task: "Inspect the change" },
@@ -2945,15 +3185,20 @@ describe("subagent discovery", () => {
       assert.doesNotMatch(launch.fullTask, /Canonical body/);
       assert.deepEqual(launch.capabilityEnvironment, [
         `${SUBAGENT_BUILTIN_TOOLS_ENV}='read'`,
+        `${SUBAGENT_CAPABILITY_VERSION_ENV}=2`,
         "PI_SUBAGENT_ALLOWED='child-agent'",
+        `${SUBAGENT_MCP_REFERENCES_ENV}='[]'`,
+        `${SUBAGENT_MCP_SUPPORT_TOOLS_ENV}=''`,
       ]);
       assert.deepEqual(launch.loadout, {
-        version: 1,
-        capabilityMode: "extension-grants",
+        version: 2,
+        capabilityMode: "mcp-capabilities",
         agent: "declared-name",
         builtinTools: ["read"],
         extensionPaths: [],
         grantSpawning: true,
+        mcpServerReferences: [],
+        mcpSupportTools: [],
         model: "provider/restricted",
         thinking: "medium",
         systemPromptMode: "replace",
@@ -3067,6 +3312,8 @@ describe("subagent discovery", () => {
       builtinTools: [],
       extensionPaths: [],
       grantSpawning: true,
+      mcpServerReferences: [],
+      mcpSupportTools: [],
     });
   });
 
@@ -3331,6 +3578,7 @@ describe("subagent discovery", () => {
       ),
       [
         `${SUBAGENT_BUILTIN_TOOLS_ENV}='read,grep'`,
+        `${SUBAGENT_CAPABILITY_VERSION_ENV}=1`,
         "PI_SUBAGENT_ALLOWED=''",
       ],
     );
@@ -3341,6 +3589,7 @@ describe("subagent discovery", () => {
       ),
       [
         `${SUBAGENT_BUILTIN_TOOLS_ENV}=''`,
+        `${SUBAGENT_CAPABILITY_VERSION_ENV}=1`,
         "PI_SUBAGENT_ALLOWED='scout,worker'",
       ],
     );
@@ -3351,6 +3600,109 @@ describe("subagent discovery", () => {
       ),
       /inconsistent nested-spawn state/,
     );
+  });
+
+  it("prepares version-2 MCP launch state and protected extension order without secret material", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir, globalAgentsDir }) => {
+      const selected = {
+        command: "selected-command",
+        env: { TOKEN: "${PRIVATE_TOKEN}" },
+        exposure: "hidden",
+        toolExposure: { script: "codemode", later: "deferred" },
+      };
+      writeFileSync(join(globalDir, "mcp.json"), JSON.stringify({
+        mcpServers: {
+          selected,
+          ambient: { command: "ambient-command", env: { TOKEN: "ambient-secret" } },
+        },
+      }));
+      writeAgentFile(
+        globalAgentsDir,
+        "mcp-agent",
+        "name: mcp-agent\nbuiltin-tools: [read]\nmcp-servers: [selected]",
+      );
+      const profileExtension = join(projectDir, "profile-extension.ts");
+      writeFileSync(profileExtension, "export default function () {}\n");
+      const discovered = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const baseAgent = discovered.agents.find((agent) => agent.name === "mcp-agent");
+      assert.ok(baseAgent);
+      const agent = { ...baseAgent, extensionPaths: [realpathSync(profileExtension)] };
+      const sandbox = testApi.prepareAgentSandbox(agent);
+      assert.ok("sandbox" in sandbox);
+      const prepared = testApi.prepareAgentLaunch(
+        { agent: "mcp-agent", task: "Inspect" },
+        agent,
+        sandbox.sandbox,
+        projectDir,
+      );
+      assert.ok("launch" in prepared);
+      assert.ok(prepared.launch.loadout && "version" in prepared.launch.loadout);
+      assert.equal(prepared.launch.loadout.version, 2);
+      if (prepared.launch.loadout.version !== 2) assert.fail("expected version 2 loadout");
+      assert.deepEqual(prepared.launch.loadout.mcpSupportTools, ["codemode", "tool-search"]);
+      assert.deepEqual(prepared.launch.loadout.mcpServerReferences.map((ref) => ref.name), ["selected"]);
+      assert.match(
+        testApi.validateLoadoutPreflight({
+          ...prepared.launch.loadout,
+          mcpSupportTools: [],
+        }),
+        /support state no longer matches/,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(prepared.launch.loadout) + prepared.launch.capabilityEnvironment.join(" "),
+        /PRIVATE_TOKEN|ambient-command|ambient-secret|selected-command/,
+      );
+
+      const parts: string[] = [];
+      testApi.applySandboxToParts(parts, prepared.launch.loadout, {
+        artifactDir: projectDir,
+        name: "mcp-agent",
+        artifactId: "mcp-launch",
+      });
+      const extensions = parts.flatMap((part, index) =>
+        part === "-e" ? [parts[index + 1].slice(1, -1)] : []
+      );
+      assert.deepEqual(extensions, [
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-runtime-control.ts", import.meta.url)),
+        "builtin:codemode",
+        "builtin:tool-search",
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-mcp-control.ts", import.meta.url)),
+        realpathSync(profileExtension),
+        fileURLToPath(new URL("../pi-extension/subagents/subagent-capability-activation.ts", import.meta.url)),
+      ]);
+      assert.equal(extensions.includes("builtin:mcp"), false);
+    });
+  });
+
+  it("loads standalone codemode without MCP or ambient MCP support", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(parts, {
+        version: 2,
+        capabilityMode: "mcp-capabilities",
+        agent: "coder",
+        builtinTools: ["codemode"],
+        extensionPaths: [],
+        grantSpawning: false,
+        mcpServerReferences: [],
+        mcpSupportTools: [],
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: d,
+        agentDir: d,
+      }, { artifactDir: d, name: "coder", artifactId: "codemode-only" });
+      const extensions = parts.flatMap((part, index) =>
+        part === "-e" ? [parts[index + 1].slice(1, -1)] : []
+      );
+      assert.ok(extensions.includes("builtin:codemode"));
+      assert.equal(extensions.includes("builtin:tool-search"), false);
+      assert.equal(extensions.some((entry) => entry.endsWith("subagent-mcp-control.ts")), false);
+      assert.equal(extensions.includes("builtin:mcp"), false);
+    });
   });
 
   it("replays versioned capability environment and explicit nested deny-all from snapshots", () => {
@@ -3373,6 +3725,7 @@ describe("subagent discovery", () => {
       }),
       [
         `${SUBAGENT_BUILTIN_TOOLS_ENV}='read,grep'`,
+        `${SUBAGENT_CAPABILITY_VERSION_ENV}=1`,
         "PI_SUBAGENT_ALLOWED=''",
       ],
     );
@@ -3715,6 +4068,66 @@ describe("subagent discovery", () => {
       agentDir: "/tmp/agent",
     });
     assert.match(error, /reserved framework path/);
+  });
+
+  it("refuses MCP config drift through the public resume tool before pane creation", async () => {
+    const d = createTestDir();
+    try {
+      const source = join(d, "mcp.json");
+      const original = { command: "first-command", exposure: "direct" };
+      writeFileSync(source, JSON.stringify({ mcpServers: { selected: original } }));
+      const normalized = validateAndNormalizeMcpServerConfig("selected", original, "global");
+      assert.ok(!("error" in normalized));
+      const sessionPath = join(d, "finished-mcp-child.jsonl");
+      writeFileSync(sessionPath, '{"type":"session","id":"mcp-child-session"}\n', "utf8");
+      writeSubagentLoadout(sessionPath, {
+        version: 2,
+        capabilityMode: "mcp-capabilities",
+        agent: "mcp-agent",
+        builtinTools: [],
+        extensionPaths: [],
+        grantSpawning: false,
+        mcpServerReferences: [{
+          name: "selected",
+          source: realpathSync(source),
+          scope: "global",
+          digest: digestNormalizedMcpConfig(normalized.normalized),
+        }],
+        mcpSupportTools: [],
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: d,
+        agentDir: d,
+      });
+      writeFileSync(source, JSON.stringify({
+        mcpServers: { selected: { ...original, command: "secret-changed-command" } },
+      }));
+      registerName(join(d, "artifacts", "test-session"), "mcp-agent", {
+        sessionFile: sessionPath,
+        sessionId: "mcp-child-session",
+      });
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+      assert.ok(messageTool);
+
+      const result = await messageTool.execute(
+        "resume-mcp-drift",
+        { name: "mcp-agent", message: "Continue" },
+        undefined,
+        undefined,
+        createMockContext(d, true),
+      );
+      assert.match(result.content[0].text, /MCP capability identity check failed/);
+      assert.match(result.content[0].text, /spawn a fresh subagent/i);
+      assert.doesNotMatch(result.content[0].text, /secret-changed-command/);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 
   it("refuses a missing snapshotted path through the public resume tool before pane creation", async () => {
@@ -4799,6 +5212,28 @@ describe("subagent runtime control", () => {
       assert.equal(active.includes("bash"), false);
     });
 
+    it("keeps required MCP support active without blanket-activating MCP-owned tools", () => {
+      const mcpControlPath = fileURLToPath(
+        new URL("../pi-extension/subagents/subagent-mcp-control.ts", import.meta.url),
+      );
+      const tools = [
+        ...availableTools,
+        { name: "codemode", sourceInfo: { source: "builtin" } },
+        { name: "tool_search", sourceInfo: { source: "builtin" } },
+        { name: "mcp__selected__direct", sourceInfo: { source: "local", path: mcpControlPath } },
+        { name: "mcp__selected__hidden", sourceInfo: { source: "local", path: mcpControlPath } },
+      ];
+      assert.deepEqual(
+        resolveProfileActiveTools("", tools, "codemode,tool-search"),
+        ["codemode", "tool_search", "ask_question", "web_search", "write"],
+      );
+      assert.deepEqual(
+        resolveProfileActiveTools("", tools, "", ["mcp__selected__direct", "tool_search"]),
+        ["mcp__selected__direct", "tool_search", "ask_question", "web_search", "write"],
+        "Pi-native direct/support activation must survive the trailing checkpoint",
+      );
+    });
+
     it("fails malformed private built-in input closed without disabling extension tools", () => {
       assert.deepEqual(resolveProfileActiveTools("read,unknown", availableTools), [
         "ask_question",
@@ -4937,6 +5372,44 @@ describe("subagent runtime control", () => {
         session?.dispose();
         restoreEnvVar(SUBAGENT_BUILTIN_TOOLS_ENV, savedBuiltinTools);
         rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not let a version-1 replay inherit version-2 MCP support activation", () => {
+      const savedBuiltinTools = process.env[SUBAGENT_BUILTIN_TOOLS_ENV];
+      const savedCapabilityVersion = process.env[SUBAGENT_CAPABILITY_VERSION_ENV];
+      const savedSupportTools = process.env[SUBAGENT_MCP_SUPPORT_TOOLS_ENV];
+      process.env[SUBAGENT_BUILTIN_TOOLS_ENV] = "";
+      process.env[SUBAGENT_CAPABILITY_VERSION_ENV] = "1";
+      process.env[SUBAGENT_MCP_SUPPORT_TOOLS_ENV] = "codemode,tool-search";
+      const handlers = new Map<string, Array<(...args: any[]) => void>>();
+      let activeTools: string[] = [];
+      const api = {
+        on(event: string, handler: (...args: any[]) => void) {
+          if (!handlers.has(event)) handlers.set(event, []);
+          handlers.get(event)!.push(handler);
+        },
+        getAllTools() {
+          return [
+            ...availableTools,
+            { name: "codemode", sourceInfo: { source: "builtin" } },
+            { name: "tool_search", sourceInfo: { source: "builtin" } },
+          ];
+        },
+        getActiveTools() { return [...activeTools]; },
+        setActiveTools(names: string[]) { activeTools = [...names]; },
+      } as any;
+
+      try {
+        capabilityActivationExtension(api);
+        for (const handler of handlers.get("session_start") ?? []) {
+          handler({ type: "session_start", reason: "startup" }, {});
+        }
+        assert.deepEqual(activeTools, ["ask_question", "web_search", "write"]);
+      } finally {
+        restoreEnvVar(SUBAGENT_BUILTIN_TOOLS_ENV, savedBuiltinTools);
+        restoreEnvVar(SUBAGENT_CAPABILITY_VERSION_ENV, savedCapabilityVersion);
+        restoreEnvVar(SUBAGENT_MCP_SUPPORT_TOOLS_ENV, savedSupportTools);
       }
     });
 

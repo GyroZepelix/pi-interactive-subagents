@@ -5,7 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export type McpConfigScope = "global" | "project";
 export type McpSupportTool = "codemode" | "tool-search";
@@ -19,6 +19,16 @@ export interface McpServerReference {
 
 export interface McpCapabilityResolution {
   serverReferences: McpServerReference[];
+  supportTools: McpSupportTool[];
+}
+
+export interface VerifiedMcpServer {
+  name: string;
+  config: McpServerConfig;
+}
+
+export interface VerifiedMcpCapability {
+  servers: VerifiedMcpServer[];
   supportTools: McpSupportTool[];
 }
 
@@ -349,6 +359,33 @@ export function digestNormalizedMcpConfig(normalized: NormalizedServerConfig): s
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
+export function isCanonicalMcpServerReference(value: unknown): value is McpServerReference {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return (
+    keys.length === 4 &&
+    keys.every((key) => key === "name" || key === "source" || key === "scope" || key === "digest") &&
+    typeof value.name === "string" &&
+    SERVER_NAME.test(value.name) &&
+    typeof value.source === "string" &&
+    isAbsolute(value.source) &&
+    resolve(value.source) === value.source &&
+    (value.scope === "global" || value.scope === "project") &&
+    typeof value.digest === "string" &&
+    /^[a-f0-9]{64}$/.test(value.digest)
+  );
+}
+
+export function areCanonicalMcpServerReferences(
+  values: unknown,
+): values is McpServerReference[] {
+  if (!Array.isArray(values) || !values.every(isCanonicalMcpServerReference)) return false;
+  const names = values.map((reference) => reference.name);
+  if (new Set(names).size !== names.length) return false;
+  const namespaces = names.map(namespace);
+  return new Set(namespaces).size === namespaces.length;
+}
+
 function readConfigSource(path: string, scope: McpConfigScope): ConfigSource {
   if (!existsSync(path)) return { path, scope, entries: {} };
   let source: string;
@@ -375,6 +412,74 @@ function readConfigSource(path: string, scope: McpConfigScope): ConfigSource {
     return { path: source, scope, entries: null, error: "autoEnableCodemode must be a boolean" };
   }
   return { path: source, scope, entries: (parsed.mcpServers as JsonRecord | undefined) ?? {} };
+}
+
+/**
+ * Re-read exact snapshotted entries and prove that their non-secret identities still match.
+ * This deliberately ignores current project/global precedence: resume is pinned to each stored source.
+ */
+export function verifyMcpServerReferences(
+  references: readonly McpServerReference[],
+): VerifiedMcpCapability | { errors: string[] } {
+  if (!areCanonicalMcpServerReferences(references)) {
+    return { errors: ["MCP server references are not canonical, unique, and namespace-safe"] };
+  }
+
+  const errors: string[] = [];
+  const servers: VerifiedMcpServer[] = [];
+  let needsCodemode = false;
+  let needsToolSearch = false;
+
+  for (const reference of references) {
+    const source = readConfigSource(reference.source, reference.scope);
+    if (source.path !== reference.source) {
+      errors.push(`server "${reference.name}" source identity changed: ${reference.source}`);
+      continue;
+    }
+    if (source.error) {
+      errors.push(`${reference.source}: ${source.error}`);
+      continue;
+    }
+    if (!source.entries || !Object.prototype.hasOwnProperty.call(source.entries, reference.name)) {
+      errors.push(`${reference.source}: server "${reference.name}" is no longer configured`);
+      continue;
+    }
+
+    const validated = validateAndNormalizeMcpServerConfig(
+      reference.name,
+      source.entries[reference.name],
+      reference.scope,
+    );
+    if ("error" in validated) {
+      errors.push(`${reference.source}: server "${reference.name}": ${validated.error}`);
+      continue;
+    }
+    if (validated.config.enabled === false) {
+      errors.push(`${reference.source}: server "${reference.name}" is disabled`);
+      continue;
+    }
+    if (digestNormalizedMcpConfig(validated.normalized) !== reference.digest) {
+      errors.push(`${reference.source}: server "${reference.name}" configuration changed`);
+      continue;
+    }
+
+    const exposures = [
+      validated.config.exposure ?? "codemode",
+      ...Object.values(validated.config.toolExposure ?? {}),
+    ];
+    needsCodemode ||= exposures.includes("codemode");
+    needsToolSearch ||= exposures.includes("deferred");
+    servers.push({ name: reference.name, config: validated.config });
+  }
+
+  if (errors.length > 0) return { errors };
+  return {
+    servers,
+    supportTools: [
+      ...(needsCodemode ? ["codemode" as const] : []),
+      ...(needsToolSearch ? ["tool-search" as const] : []),
+    ],
+  };
 }
 
 /** Read only the ambient MCP file identities and literal JSON values for canonical profile resolution. */

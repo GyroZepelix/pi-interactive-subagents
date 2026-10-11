@@ -14,6 +14,11 @@ import {
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  areCanonicalMcpServerReferences,
+  type McpServerReference,
+  type McpSupportTool,
+} from "./mcp-config.ts";
 
 export interface SessionEntry {
   type: string;
@@ -118,13 +123,24 @@ export interface LegacySubagentLoadout extends SubagentLoadoutBase {
 }
 
 /** Version 1 sidecars for profile built-ins plus trusted extension grants. */
-export interface VersionedSubagentLoadout extends SubagentLoadoutBase {
+export interface VersionedSubagentLoadoutV1 extends SubagentLoadoutBase {
   version: 1;
   capabilityMode: "extension-grants";
   builtinTools: string[];
   grantSpawning: boolean;
 }
 
+/** Version 2 sidecars add exact MCP identity and exposure support state. */
+export interface VersionedSubagentLoadoutV2 extends SubagentLoadoutBase {
+  version: 2;
+  capabilityMode: "mcp-capabilities";
+  builtinTools: string[];
+  grantSpawning: boolean;
+  mcpServerReferences: McpServerReference[];
+  mcpSupportTools: McpSupportTool[];
+}
+
+export type VersionedSubagentLoadout = VersionedSubagentLoadoutV1 | VersionedSubagentLoadoutV2;
 export type SubagentLoadout = LegacySubagentLoadout | VersionedSubagentLoadout;
 
 /** Path of the loadout sidecar written next to a subagent session file. */
@@ -153,6 +169,7 @@ const PROFILE_BUILTIN_TOOLS = new Set([
   "grep",
   "find",
   "ls",
+  "codemode",
 ]);
 
 const COMMON_LOADOUT_FIELDS = [
@@ -168,12 +185,17 @@ const COMMON_LOADOUT_FIELDS = [
   "agentDir",
 ] as const;
 const LEGACY_LOADOUT_FIELDS = new Set([...COMMON_LOADOUT_FIELDS, "toolAllowlist"]);
-const VERSIONED_LOADOUT_FIELDS = new Set([
+const VERSIONED_V1_LOADOUT_FIELDS = new Set([
   ...COMMON_LOADOUT_FIELDS,
   "version",
   "capabilityMode",
   "builtinTools",
   "grantSpawning",
+]);
+const VERSIONED_V2_LOADOUT_FIELDS = new Set([
+  ...VERSIONED_V1_LOADOUT_FIELDS,
+  "mcpServerReferences",
+  "mcpSupportTools",
 ]);
 
 function isNullableString(value: unknown): value is string | null {
@@ -251,10 +273,8 @@ function isLegacySubagentLoadout(loadout: Record<string, unknown>): boolean {
   return spawnable.length > 0 ? hasEverySpawningTool : !hasAnySpawningTool;
 }
 
-function isVersionedSubagentLoadout(loadout: Record<string, unknown>): boolean {
-  if (!hasExactFields(loadout, VERSIONED_LOADOUT_FIELDS)) return false;
+function hasValidVersionedFields(loadout: Record<string, unknown>): boolean {
   if (!hasValidCommonLoadoutFields(loadout)) return false;
-  if (loadout.version !== 1 || loadout.capabilityMode !== "extension-grants") return false;
   if (!isStringArray(loadout.builtinTools)) return false;
   if (
     loadout.builtinTools.some((tool) => !PROFILE_BUILTIN_TOOLS.has(tool)) ||
@@ -272,6 +292,33 @@ function isVersionedSubagentLoadout(loadout: Record<string, unknown>): boolean {
   return loadout.grantSpawning
     ? spawnable !== null && spawnable.length > 0
     : spawnable === null;
+}
+
+function isVersionedSubagentLoadout(loadout: Record<string, unknown>): boolean {
+  if (loadout.version === 1) {
+    return (
+      hasExactFields(loadout, VERSIONED_V1_LOADOUT_FIELDS) &&
+      loadout.capabilityMode === "extension-grants" &&
+      hasValidVersionedFields(loadout)
+    );
+  }
+  if (loadout.version !== 2) return false;
+  if (
+    !hasExactFields(loadout, VERSIONED_V2_LOADOUT_FIELDS) ||
+    loadout.capabilityMode !== "mcp-capabilities" ||
+    !hasValidVersionedFields(loadout) ||
+    !areCanonicalMcpServerReferences(loadout.mcpServerReferences)
+  ) return false;
+  if (!isStringArray(loadout.mcpSupportTools)) return false;
+  const supportTools = loadout.mcpSupportTools as string[];
+  if ((loadout.mcpServerReferences as McpServerReference[]).length === 0 && supportTools.length > 0) {
+    return false;
+  }
+  if (supportTools.some((tool) => tool !== "codemode" && tool !== "tool-search")) return false;
+  if (new Set(supportTools).size !== supportTools.length) return false;
+  return supportTools.join(",") === ["codemode", "tool-search"]
+    .filter((tool) => supportTools.includes(tool))
+    .join(",");
 }
 
 export function isSubagentLoadout(value: unknown): value is SubagentLoadout {

@@ -73,9 +73,18 @@ import {
   type SubagentSessionMode,
 } from "./agents.ts";
 import {
+  encodeMcpServerReferences,
   SUBAGENT_BUILTIN_TOOLS_ENV,
+  SUBAGENT_CAPABILITY_VERSION_ENV,
+  SUBAGENT_MCP_REFERENCES_ENV,
+  SUBAGENT_MCP_SUPPORT_TOOLS_ENV,
   SUBAGENT_MODEL_CHAIN_ENV,
 } from "./subagent-protocol.ts";
+import {
+  verifyMcpServerReferences,
+  type McpServerReference,
+  type McpSupportTool,
+} from "./mcp-config.ts";
 import {
   encodeQuestionAnswer,
   questionAcknowledgmentPath,
@@ -809,10 +818,19 @@ const SUBAGENT_CONTROL_TOOLS = ["ask_question"] as const;
 function buildVersionedCapabilityEnvironment(
   builtinTools: readonly string[],
   allowedAgents: readonly string[],
+  mcpServerReferences?: readonly McpServerReference[],
+  mcpSupportTools?: readonly McpSupportTool[],
 ): string[] {
   return [
     `${SUBAGENT_BUILTIN_TOOLS_ENV}=${shellEscape(builtinTools.join(","))}`,
+    `${SUBAGENT_CAPABILITY_VERSION_ENV}=${mcpServerReferences === undefined ? "1" : "2"}`,
     `PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`,
+    ...(mcpServerReferences === undefined
+      ? []
+      : [
+        `${SUBAGENT_MCP_REFERENCES_ENV}=${shellEscape(encodeMcpServerReferences(mcpServerReferences))}`,
+        `${SUBAGENT_MCP_SUPPORT_TOOLS_ENV}=${shellEscape((mcpSupportTools ?? []).join(","))}`,
+      ]),
   ];
 }
 
@@ -823,13 +841,23 @@ function buildProfileCapabilityEnvironment(
   if (capabilities.grantSpawning !== (allowedAgents.length > 0)) {
     throw new Error("Profile capability environment has inconsistent nested-spawn state");
   }
-  return buildVersionedCapabilityEnvironment(capabilities.builtinTools, allowedAgents);
+  return buildVersionedCapabilityEnvironment(
+    capabilities.builtinTools,
+    allowedAgents,
+    capabilities.mcpServerReferences,
+    capabilities.mcpSupportTools,
+  );
 }
 
 function buildResumeCapabilityEnvironment(loadout: SubagentLoadout): string[] {
   const allowedAgents = loadout.spawnable ?? [];
   if ("version" in loadout) {
-    return buildVersionedCapabilityEnvironment(loadout.builtinTools, allowedAgents);
+    return buildVersionedCapabilityEnvironment(
+      loadout.builtinTools,
+      allowedAgents,
+      loadout.version === 2 ? loadout.mcpServerReferences : undefined,
+      loadout.version === 2 ? loadout.mcpSupportTools : undefined,
+    );
   }
   return [`PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`];
 }
@@ -838,6 +866,8 @@ interface PreparedAgentSandbox {
   builtinTools: string[];
   extensionPaths: string[];
   grantSpawning: boolean;
+  mcpServerReferences: McpServerReference[];
+  mcpSupportTools: McpSupportTool[];
 }
 
 interface PreparedSingleAgentLaunch {
@@ -904,6 +934,8 @@ function prepareAgentSandbox(
         (extensionPath) => resolve(extensionPath) !== SPAWNING_EXTENSION_PATH,
       ),
       grantSpawning,
+      mcpServerReferences: [...(agent.mcpServerReferences ?? [])],
+      mcpSupportTools: [...(agent.mcpSupportTools ?? [])],
     },
   };
 }
@@ -1007,12 +1039,14 @@ function prepareAgentLaunch(
     }
   }
   const loadout: SubagentLoadout | null = harness !== "pi" ? null : {
-    version: 1,
-    capabilityMode: "extension-grants",
+    version: 2,
+    capabilityMode: "mcp-capabilities",
     agent: normalizedParams.agent ?? null,
     builtinTools: [...sandbox.builtinTools],
     extensionPaths: [...sandbox.extensionPaths],
     grantSpawning,
+    mcpServerReferences: [...sandbox.mcpServerReferences],
+    mcpSupportTools: [...sandbox.mcpSupportTools],
     model: effectiveModel ?? null,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,
@@ -1030,12 +1064,12 @@ function prepareAgentLaunch(
     };
   }
   if (loadout) {
-    const replayError = validateLoadoutExtensionPaths(loadout);
+    const replayError = validateLoadoutPreflight(loadout);
     if (replayError) {
       return {
         error:
           `Agent "${agent.name}" cannot create a safe sandbox snapshot: ${replayError}. ` +
-          `Restore the required extension file or update ${agent.filePath}.`,
+          `Restore the exact configuration or extension input, or update ${agent.filePath}.`,
       };
     }
   }
@@ -1116,6 +1150,9 @@ function validateLoadoutExtensionPaths(loadout: SubagentLoadout): string | null 
         realpathSync(runtimeControlPath),
         SPAWNING_EXTENSION_PATH,
         realpathSync(activationControlPath),
+        ...(loadout.version === 2
+          ? [realpathSync(join(SUBAGENTS_DIR, "subagent-mcp-control.ts"))]
+          : []),
       ]);
       const reservedProfilePath = canonicalProfilePaths.find((path) => reservedPaths.has(path));
       if (reservedProfilePath) {
@@ -1124,6 +1161,19 @@ function validateLoadoutExtensionPaths(loadout: SubagentLoadout): string | null 
     } catch {
       return "sandbox extension path could not be canonicalized";
     }
+  }
+  return null;
+}
+
+function validateLoadoutPreflight(loadout: SubagentLoadout): string | null {
+  const extensionError = validateLoadoutExtensionPaths(loadout);
+  if (extensionError) return extensionError;
+  if (!("version" in loadout) || loadout.version !== 2) return null;
+
+  const verified = verifyMcpServerReferences(loadout.mcpServerReferences);
+  if ("errors" in verified) return `MCP capability identity check failed: ${verified.errors.join("; ")}`;
+  if (verified.supportTools.join(",") !== loadout.mcpSupportTools.join(",")) {
+    return "MCP capability support state no longer matches the selected server exposure";
   }
   return null;
 }
@@ -1195,6 +1245,18 @@ function applySandboxToParts(
   if ("version" in loadout) {
     parts.push("--no-extensions", "--no-builtin-tools");
     if (loadout.grantSpawning) parts.push("-e", shellEscape(SPAWNING_EXTENSION_PATH));
+
+    if (loadout.version === 2) {
+      const hasMcp = loadout.mcpServerReferences.length > 0;
+      if (hasMcp || loadout.builtinTools.includes("codemode")) {
+        parts.push("-e", shellEscape("builtin:codemode"));
+      }
+      if (hasMcp) {
+        parts.push("-e", shellEscape("builtin:tool-search"));
+        parts.push("-e", shellEscape(join(SUBAGENTS_DIR, "subagent-mcp-control.ts")));
+      }
+    }
+
     for (const extensionPath of loadout.extensionPaths) {
       parts.push("-e", shellEscape(extensionPath));
     }
@@ -1790,6 +1852,7 @@ export const __test__ = {
   prepareAgentSandbox,
   prepareAgentLaunch,
   validateLoadoutExtensionPaths,
+  validateLoadoutPreflight,
   buildArtifactPath,
   applySandboxToParts,
   buildResumeCapabilityEnvironment,
@@ -3570,7 +3633,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           return { content: [{ type: "text" as const, text: err }], details: { error: err } };
         }
 
-        const extensionReplayError = validateLoadoutExtensionPaths(loadout);
+        const extensionReplayError = validateLoadoutPreflight(loadout);
         if (extensionReplayError) {
           const err =
             `Cannot safely resume "${requestedName}": ${extensionReplayError}. ` +

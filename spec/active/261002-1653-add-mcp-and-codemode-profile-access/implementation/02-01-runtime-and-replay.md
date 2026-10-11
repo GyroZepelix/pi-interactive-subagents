@@ -62,7 +62,16 @@ Run one focused review over Current. Reviewers apply the credible-harm blocker s
 
 ## Attempt log
 
-No attempts recorded.
+### Attempt 1 - completed
+
+- Starting checkpoint: `d4cea5bb4a18fff0cecd6af34194bcc0320a97bb`; the working tree and index were clean and the prior slice checkpoint was already committed.
+- Changed paths: `pi-extension/subagents/index.ts`, `mcp-config.ts`, `session.ts`, `subagent-capability-activation.ts`, `subagent-protocol.ts`, new `subagent-mcp-control.ts`, and `test/test.ts`.
+- Acceptance: new flat-Pi launches persist strict version-2 MCP capability state, retain default-deny CLI flags, load standalone codemode or ordered filtered MCP support without `builtin:mcp`, and use one source/digest/support preflight for launch and resume before pane creation. The child control revalidates and registers only selected entries through Pi's public MCP factory with ambient loading empty; selected names are reserved before trusted profile extensions while different names remain allowed.
+- Exposure and compatibility: the trailing activation checkpoint preserves Pi-native direct/support activation and trusted extension tools without blanket-activating inactive MCP-owned tools. A capability-version marker prevents version-1 replay from inheriting version-2 support; version-1 and legacy sidecar bytes remain readable without rewriting.
+- Secret boundary: loadouts and capability environment carry only ordered `{name, source, scope, digest}` references and support names; tests cover absence of config bodies and credential expressions. Missing, invalid, disabled, source-mismatched, digest-drifted, and support-inconsistent references fail closed.
+- Checks passed: focused runtime/discovery/snapshot/activation/MCP tests (105/105), full `npm test` (266/266, with inherited `PI_SUBAGENT_ALLOWED` unset), `git diff --check`, and spec item validation.
+- Focused review: PASS with no blocking or non-blocking findings; retry count 0/2. Reviewer uncertainty about final full-suite attestation was resolved by the later 266/266 run. File-loaded MCP provenance remains for the process-level 02.02 fixture, as planned.
+- Residual Current uncertainty: no configured-model or external-process MCP lifecycle test was run; process markers, runtime exposure/resource proof, and documentation remain assigned to `02.02`.
 
 ## Completion and handoff
 
