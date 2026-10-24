@@ -825,6 +825,8 @@ export function mergeNewEntries(
 
 export interface SessionStats {
   model: string | null;
+  /** Provider of `model` (e.g. "anthropic"), when the session records it. */
+  provider?: string | null;
   toolCount: number;
   /** Cumulative token usage across all assistant turns. */
   inputTokens: number;
@@ -854,6 +856,7 @@ export function summarizeSessionStats(sessionFile: string): SessionStats | null 
 
   const stats: SessionStats = {
     model: null,
+    provider: null,
     toolCount: 0,
     inputTokens: 0,
     outputTokens: 0,
@@ -867,6 +870,8 @@ export function summarizeSessionStats(sessionFile: string): SessionStats | null 
     if (entry.type === "model_change") {
       const modelId = (entry as { modelId?: unknown }).modelId;
       if (typeof modelId === "string" && modelId) stats.model = modelId;
+      const provider = (entry as { provider?: unknown }).provider;
+      if (typeof provider === "string" && provider) stats.provider = provider;
       continue;
     }
     if (entry.type !== "message") continue;
@@ -875,6 +880,8 @@ export function summarizeSessionStats(sessionFile: string): SessionStats | null 
 
     const model = (msg as { model?: unknown }).model;
     if (typeof model === "string" && model) stats.model = model;
+    const provider = (msg as { provider?: unknown }).provider;
+    if (typeof provider === "string" && provider) stats.provider = provider;
 
     for (const block of msg.content) {
       if (block.type === "toolCall") stats.toolCount++;

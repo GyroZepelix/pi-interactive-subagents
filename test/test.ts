@@ -961,6 +961,47 @@ describe("session.ts", () => {
       assert.equal(summarizeSessionStats(file)!.model, "claude-sonnet-4-6");
     });
 
+    it("captures provider from model_change", () => {
+      const file = createSessionFile(dir, [
+        SESSION_HEADER,
+        { type: "model_change", id: "mc-001", parentId: null, provider: "anthropic", modelId: "claude-opus-5-5" },
+        asstWithUsage("a1", { usage: { totalTokens: 10, cost: { total: 0 } } }),
+      ]);
+      const stats = summarizeSessionStats(file)!;
+      assert.equal(stats.model, "claude-opus-5-5");
+      assert.equal(stats.provider, "anthropic");
+    });
+
+    it("prefers per-message provider over model_change", () => {
+      const file = createSessionFile(dir, [
+        SESSION_HEADER,
+        { type: "model_change", id: "mc-001", parentId: null, provider: "openai", modelId: "gpt-5" },
+        {
+          type: "message",
+          id: "a1",
+          parentId: "user-001",
+          message: {
+            role: "assistant",
+            provider: "anthropic",
+            model: "claude-opus-5-5",
+            content: [{ type: "text", text: "ok" }],
+          },
+        },
+      ]);
+      const stats = summarizeSessionStats(file)!;
+      assert.equal(stats.model, "claude-opus-5-5");
+      assert.equal(stats.provider, "anthropic");
+    });
+
+    it("returns null provider when the session records none", () => {
+      const file = createSessionFile(dir, [
+        SESSION_HEADER,
+        { type: "model_change", id: "mc-001", parentId: null, modelId: "claude-sonnet-4-6" },
+        asstWithUsage("a1", { model: "claude-sonnet-4-6", usage: { totalTokens: 10, cost: { total: 0 } } }),
+      ]);
+      assert.equal(summarizeSessionStats(file)!.provider, null);
+    });
+
     it("handles missing usage gracefully", () => {
       const file = createSessionFile(dir, [SESSION_HEADER, USER_MSG, ASSISTANT_MSG]);
       const stats = summarizeSessionStats(file)!;
@@ -7357,6 +7398,55 @@ describe("subagent display helpers", () => {
       assert.equal(testApi.contextWindowFor("gemini-2.5-pro"), 1_000_000);
       assert.equal(testApi.contextWindowFor("some-unknown-model"), undefined);
       assert.equal(testApi.contextWindowFor(null), undefined);
+    });
+  });
+
+  describe("resolveContextWindow", () => {
+    const models = [
+      { id: "claude-opus-5-5", provider: "anthropic", contextWindow: 1_000_000 },
+      { id: "claude-opus-5-5", provider: "amazon-bedrock", contextWindow: 500_000 },
+      { id: "claude-sonnet-4-6", provider: "anthropic", contextWindow: 0 },
+      { id: "custom-model", provider: "local", contextWindow: 32_000 },
+    ];
+    const registry = {
+      find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+      getAll: () => models,
+    };
+
+    it("uses find(provider, model) when the provider is known", () => {
+      assert.equal(testApi.resolveContextWindow("claude-opus-5-5", "amazon-bedrock", registry), 500_000);
+      assert.equal(testApi.resolveContextWindow("claude-opus-5-5", "anthropic", registry), 1_000_000);
+    });
+
+    it("falls back to the first id match when provider is missing or find misses", () => {
+      assert.equal(testApi.resolveContextWindow("claude-opus-5-5", null, registry), 1_000_000);
+      assert.equal(testApi.resolveContextWindow("custom-model", "other", registry), 32_000);
+    });
+
+    it("falls back to contextWindowFor when registry is absent or has no valid match", () => {
+      assert.equal(testApi.resolveContextWindow("claude-opus-5-5", "anthropic", undefined), 200_000);
+      assert.equal(testApi.resolveContextWindow("gemini-2.5-pro", "google", registry), 1_000_000);
+      // Non-positive registry window is ignored.
+      assert.equal(testApi.resolveContextWindow("claude-sonnet-4-6", "anthropic", registry), 200_000);
+    });
+
+    it("ignores registry errors and continues to the next step", () => {
+      const throwingFind = { find: () => { throw new Error("boom"); }, getAll: () => models };
+      assert.equal(testApi.resolveContextWindow("custom-model", "local", throwingFind), 32_000);
+      const throwingAll = { find: () => { throw new Error("boom"); }, getAll: () => { throw new Error("boom"); } };
+      assert.equal(testApi.resolveContextWindow("claude-opus-5-5", "anthropic", throwingAll), 200_000);
+    });
+
+    it("returns undefined for unknown models with no registry", () => {
+      assert.equal(testApi.resolveContextWindow("some-unknown-model", null, undefined), undefined);
+      assert.equal(testApi.resolveContextWindow(null, null, registry), undefined);
+    });
+
+    it("yields a 1.0M gauge for anthropic/claude-opus-5-5 with a real-shaped registry", () => {
+      // Mirrors pi's bundled registry entry: anthropic/claude-opus-5-5 contextWindow 1000000.
+      const window = testApi.resolveContextWindow("claude-opus-5-5", "anthropic", registry);
+      assert.equal(window, 1_000_000);
+      assert.equal(testApi.formatContextUsage(282_000, window), "28.2%/1.0M");
     });
   });
 

@@ -392,6 +392,46 @@ function contextWindowFor(model: string | null | undefined): number | undefined 
   return undefined;
 }
 
+/** Minimal model-registry shape used to resolve context windows. */
+interface ContextWindowRegistry {
+  find?(provider: string, modelId: string): { contextWindow?: unknown } | undefined;
+  getAll?(): ReadonlyArray<{ id?: unknown; contextWindow?: unknown }>;
+}
+
+function validContextWindow(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Resolve a model's context window: registry `find(provider, model)`, then the
+ * first registry entry whose id matches, then the static `contextWindowFor`
+ * table. Invalid windows and registry errors fall through to the next step.
+ */
+function resolveContextWindow(
+  model: string | null | undefined,
+  provider: string | null | undefined,
+  registry?: ContextWindowRegistry | null,
+): number | undefined {
+  if (model && registry) {
+    if (provider) {
+      try {
+        const window = validContextWindow(registry.find?.(provider, model)?.contextWindow);
+        if (window) return window;
+      } catch {
+        // fall through to id-only lookup
+      }
+    }
+    try {
+      const match = registry.getAll?.().find((m) => m?.id === model);
+      const window = validContextWindow(match?.contextWindow);
+      if (window) return window;
+    } catch {
+      // fall through to static table
+    }
+  }
+  return contextWindowFor(model);
+}
+
 /** Context-usage gauge: "18.0%/200k" when window known, else "37k ctx". */
 function formatContextUsage(tokens: number, contextWindow: number | undefined): string {
   if (!contextWindow) return `${formatTokens(tokens)} ctx`;
@@ -1884,6 +1924,7 @@ export const __test__ = {
   formatTokens,
   formatContextUsage,
   contextWindowFor,
+  resolveContextWindow,
   formatUsageSegments,
   widgetIcon,
 };
@@ -3909,7 +3950,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (stats) {
           const segs = formatUsageSegments(stats).map((s) => theme.fg("dim", s));
           if (stats.contextTokens > 0) {
-            const window = contextWindowFor(stats.model);
+            const window = resolveContextWindow(stats.model, stats.provider, latestCtx?.modelRegistry);
             const ctxStr = formatContextUsage(stats.contextTokens, window);
             const pct = window ? (stats.contextTokens / window) * 100 : 0;
             const coloredCtx =
