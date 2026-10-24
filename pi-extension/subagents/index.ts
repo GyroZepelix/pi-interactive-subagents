@@ -613,6 +613,7 @@ interface RunningSubagent {
     ok: boolean;
     reason?: "missing" | "invalid" | "wrong-id";
     error?: string;
+    field?: string;
   };
   abortController?: AbortController;
   cli?: "pi" | "claude" | "agy";
@@ -1301,7 +1302,7 @@ function applyRunningActivityRead(
 ): void {
   running.activityRead = read.ok
     ? { ok: true }
-    : { ok: false, reason: read.reason, error: read.error };
+    : { ok: false, reason: read.reason, error: read.error, field: read.field };
 
   if (read.ok) {
     running.activity = read.activity;
@@ -1323,6 +1324,7 @@ function applyRunningActivityRead(
   running.statusState = observeStatus(running.statusState, {
     snapshot: read.reason,
     snapshotError: read.error,
+    snapshotField: read.field,
   }, observedAt);
 }
 

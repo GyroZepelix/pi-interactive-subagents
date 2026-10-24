@@ -1066,10 +1066,85 @@ describe("status.ts", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
     state = observeStatus(state, { snapshot: "missing" }, 1_000);
 
-    assert.equal(classifyStatus(state, 60_999).kind, "starting");
+    const preStall = classifyStatus(state, 60_999);
+    assert.equal(preStall.kind, "starting");
+    assert.equal(preStall.statusLabel, null);
     const stalled = classifyStatus(state, 61_000);
     assert.equal(stalled.kind, "stalled");
-    assert.equal(stalled.statusLabel, null);
+    assert.equal(stalled.statusLabel, "no activity");
+  });
+
+  it("labels stalled invalid and missing snapshots without echoing raw error text", () => {
+    const rawError = "phase must be secret-provider-value\ncall-xyz";
+    let invalid = createStatusState({ source: "pi", startTimeMs: 0 });
+    invalid = observeStatus(invalid, { snapshot: "invalid", snapshotError: rawError, snapshotField: "phase" }, 1_000);
+
+    const preStall = classifyStatus(invalid, 60_999);
+    assert.equal(preStall.kind, "starting");
+    assert.equal(preStall.statusLabel, null);
+    assert.equal(formatStatusLine("Worker", preStall), "Worker running 1m, starting.");
+
+    const advanced = advanceStatusState(invalid, 61_000);
+    assert.equal(advanced.transition, "stalled");
+    assert.equal(advanced.snapshot.kind, "stalled");
+    assert.equal(advanced.snapshot.statusLabel, "invalid activity");
+    const statusLine = formatStatusLine("Worker", advanced.snapshot);
+    const transitionLine = formatTransitionLine("Worker", advanced.snapshot, "stalled");
+    assert.equal(statusLine, "Worker running 1m, stalled 1m (invalid activity: phase).");
+    assert.equal(transitionLine, statusLine);
+
+    const testApi = (subagentsModule as any).__test__;
+    const widgetLabel = testApi.formatWidgetRightLabel(advanced.snapshot);
+    assert.equal(widgetLabel, " stalled · invalid activity 1m ");
+    for (const line of [statusLine, transitionLine, widgetLabel]) {
+      assert.doesNotMatch(line, /secret|call-xyz|must be|\n/);
+      assert.ok(line.length <= 120);
+    }
+
+    // A non-identifier field is never displayed.
+    let unsafe = createStatusState({ source: "pi", startTimeMs: 0 });
+    unsafe = observeStatus(unsafe, { snapshot: "invalid", snapshotField: "bad field\nvalue" }, 1_000);
+    assert.equal(
+      formatStatusLine("Worker", classifyStatus(unsafe, 61_000)),
+      "Worker running 1m, stalled 1m (invalid activity).",
+    );
+
+    let missing = createStatusState({ source: "pi", startTimeMs: 0 });
+    missing = observeStatus(missing, { snapshot: "missing" }, 1_000);
+    const missingSnapshot = classifyStatus(missing, 61_000);
+    assert.equal(formatStatusLine("Worker", missingSnapshot), "Worker running 1m, stalled 1m (no activity).");
+    assert.equal(testApi.formatWidgetRightLabel(missingSnapshot), " stalled · no activity 1m ");
+  });
+
+  it("labels invalid snapshots only after a healthy snapshot ages into stalled", () => {
+    let state = createStatusState({ source: "pi", startTimeMs: 0 });
+    state = observeStatus(state, {
+      snapshot: "present",
+      updatedAt: 5_000,
+      sequence: 1,
+      phase: "active",
+      active: true,
+      activeScope: "tool",
+      activeSince: 5_000,
+      activityLabel: "bash",
+    }, 5_000);
+    state = advanceStatusState(state, 6_000).nextState;
+    state = observeStatus(state, { snapshot: "invalid", snapshotField: "sequence" }, 10_000);
+
+    const preStall = classifyStatus(state, 69_999);
+    assert.equal(preStall.kind, "active");
+    assert.equal(preStall.statusLabel, null);
+
+    const advanced = advanceStatusState(state, 70_000);
+    assert.equal(advanced.transition, "stalled");
+    assert.equal(advanced.snapshot.statusLabel, "invalid activity");
+    assert.match(formatStatusLine("Worker", advanced.snapshot), /stalled 1m \(invalid activity: sequence\)\.$/);
+
+    // wrong-id keeps its existing pre-stall label.
+    let wrongId = observeStatus(state, { snapshot: "wrong-id" }, 10_000);
+    wrongId = { ...wrongId, snapshotProblemSinceMs: 10_000 };
+    assert.equal(classifyStatus(wrongId, 20_000).statusLabel, "wrong activity id");
+    assert.equal(classifyStatus(wrongId, 70_000).statusLabel, "wrong activity id");
   });
 
   it("classifies active snapshots without aging into stalled", () => {
@@ -5966,7 +6041,6 @@ describe("subagent activity snapshots", () => {
         { latestEvent: "unknown" },
         { runningChildId: 42 },
         { toolActive: "yes" },
-        { toolName: "bad\nname" },
       ];
 
       for (const [index, overrides] of cases.entries()) {
@@ -5977,8 +6051,142 @@ describe("subagent activity snapshots", () => {
         const read = readSubagentActivityFile(activityFile, `child-${index}`);
         assert.equal(read.ok, false);
         assert.equal((read as { ok: false; reason: string }).reason, "invalid");
+        assert.equal((read as { field?: string }).field, Object.keys(overrides)[0]);
       }
+
+      const unparsable = getSubagentActivityFile(dir, "child-json");
+      writeFileSync(unparsable, "{\n");
+      const parseRead = readSubagentActivityFile(unparsable, "child-json");
+      assert.equal(parseRead.ok, false);
+      assert.equal((parseRead as { reason: string }).reason, "invalid");
+      assert.equal("field" in parseRead, false);
     });
+  });
+
+  it("drops invalid optional diagnostic strings and accepts the snapshot", () => {
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "subagent-activity"), { recursive: true });
+      const cases: Record<string, unknown>[] = [
+        { toolCallId: "call-abc123\nfc_0123456789_0" },
+        { toolCallId: "call-abc\r\nfc_1" },
+        { toolName: "bad\nname" },
+        { toolName: "x".repeat(201) },
+        { messageEventType: "text\rdelta" },
+        { messageEventType: "m".repeat(201) },
+        { toolCallId: 42 },
+      ];
+
+      for (const [index, overrides] of cases.entries()) {
+        const id = `drop-${index}`;
+        const activityFile = getSubagentActivityFile(dir, id);
+        const activity = validActivity({
+          runningChildId: id,
+          latestEvent: "tool_execution_start",
+          phase: "active",
+          activeScope: "tool",
+          toolActive: true,
+          ...overrides,
+        });
+        writeFileSync(activityFile, `${JSON.stringify(activity)}\n`);
+
+        const read = readSubagentActivityFile(activityFile, id);
+        assert.ok(read.ok, `expected ok for ${JSON.stringify(overrides)}`);
+        const field = Object.keys(overrides)[0];
+        assert.equal(field in read.activity, false);
+        assert.equal(read.activity.phase, "active");
+      }
+
+      // Valid optional strings are preserved, and wrong-id handling is unchanged.
+      const keptFile = getSubagentActivityFile(dir, "kept");
+      writeFileSync(keptFile, `${JSON.stringify(validActivity({
+        runningChildId: "kept",
+        toolCallId: "call-1",
+        toolName: "bash",
+        messageEventType: "text_delta",
+      }))}\n`);
+      const kept = readSubagentActivityFile(keptFile, "kept");
+      assert.ok(kept.ok);
+      assert.equal(kept.activity.toolCallId, "call-1");
+      assert.equal(kept.activity.toolName, "bash");
+      assert.equal(kept.activity.messageEventType, "text_delta");
+      assert.deepEqual(readSubagentActivityFile(keptFile, "other"), { ok: false, reason: "wrong-id" });
+
+      // Structural fields stay strict even when an optional string is also bad.
+      const structuralFile = getSubagentActivityFile(dir, "structural");
+      writeFileSync(structuralFile, `${JSON.stringify(validActivity({
+        runningChildId: "structural",
+        updatedAt: "bad",
+        toolCallId: "a\nb",
+      }))}\n`);
+      const structural = readSubagentActivityFile(structuralFile, "structural");
+      assert.equal(structural.ok, false);
+      assert.equal((structural as { reason: string }).reason, "invalid");
+      assert.equal((structural as { field?: string }).field, "updatedAt");
+    });
+  });
+
+  it("sanitizes CR/LF and over-length provider strings in recorder output", () => {
+    withTempDir((dir) => {
+      let currentNow = 1_000;
+      const activityFile = getSubagentActivityFile(dir, "child-s");
+      const recorder = createSubagentActivityRecorder({
+        runningChildId: "child-s",
+        activityFile,
+        now: () => currentNow,
+      });
+      const cursorId = "call-abc123\nfc_0123456789_0";
+
+      recorder.sessionStart();
+      recorder.toolExecutionStart(cursorId, "ba\r\n\nsh");
+      let read = readSubagentActivityFile(activityFile, "child-s");
+      assert.ok(read.ok);
+      assert.equal(read.activity.toolCallId, "call-abc123 fc_0123456789_0");
+      assert.equal(read.activity.toolName, "ba sh");
+
+      const longId = `${"x".repeat(150)}\n${"y".repeat(150)}`;
+      recorder.toolCall(longId, "t".repeat(250));
+      read = readSubagentActivityFile(activityFile, "child-s");
+      assert.ok(read.ok);
+      assert.equal(read.activity.toolCallId, `${"x".repeat(150)} ${"y".repeat(49)}`);
+      assert.equal(read.activity.toolName, "t".repeat(200));
+
+      for (const step of [
+        () => recorder.toolExecutionUpdate(cursorId, "bash"),
+        () => recorder.toolResult(cursorId, "bash"),
+        () => recorder.toolExecutionEnd(cursorId, "bash"),
+      ]) {
+        // Advance past the throttle window so throttled updates flush immediately.
+        currentNow += 1_000;
+        step();
+        read = readSubagentActivityFile(activityFile, "child-s");
+        assert.ok(read.ok);
+        assert.equal(read.activity.toolCallId, "call-abc123 fc_0123456789_0");
+      }
+
+      // Raw file content itself is sanitized, not only the parsed result.
+      const raw = JSON.parse(readFileSync(activityFile, "utf8"));
+      assert.equal(raw.toolCallId, "call-abc123 fc_0123456789_0");
+    });
+  });
+
+  it("sanitizes messageEventType from throttled message updates", async () => {
+    const dir = createTestDir();
+    try {
+      const activityFile = getSubagentActivityFile(dir, "child-m");
+      const recorder = createSubagentActivityRecorder({
+        runningChildId: "child-m",
+        activityFile,
+        now: () => 10_000,
+      });
+      recorder.messageUpdate(`text\r\ndelta${"z".repeat(300)}`);
+      const read = readSubagentActivityFile(activityFile, "child-m");
+      assert.ok(read.ok);
+      assert.equal(read.activity.messageEventType?.length, 200);
+      assert.ok(read.activity.messageEventType?.startsWith("text delta"));
+      assert.equal(JSON.parse(readFileSync(activityFile, "utf8")).messageEventType, read.activity.messageEventType);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not let tool_result resurrect finished tool activity", () => {
@@ -6485,6 +6693,96 @@ describe("subagent interruption", () => {
       assert.equal(runningMap.get("a1").pendingWaitingReply, false);
     } finally {
       runningMap.clear();
+    }
+  });
+
+  it("keeps a child with a Cursor-style toolCallId active past the stall threshold", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const dir = createTestDir();
+    try {
+      const activityFile = getSubagentActivityFile(dir, "a1");
+      mkdirSync(dirname(activityFile), { recursive: true });
+      writeFileSync(activityFile, `${JSON.stringify(activity(5, {
+        latestEvent: "tool_execution_start",
+        phase: "active",
+        agentActive: true,
+        toolActive: true,
+        activeScope: "tool",
+        activeSince: 1_000,
+        toolCallId: "call-abc123\nfc_0123456789_0",
+        toolName: "bash",
+        waitingSince: undefined,
+      }))}\n`);
+      const running = makeRunning({ activityFile });
+
+      testApi.observeRunningSubagent(running, 1_000);
+      const advanced = advanceStatusState(running.statusState, 120_000);
+      assert.equal(running.activityRead.ok, true);
+      assert.equal(advanced.snapshot.kind, "active");
+      assert.equal(advanced.transition, null);
+      assert.match(testApi.formatWidgetRightLabel(advanced.snapshot), /^ active \u00b7 bash /);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("carries the failing field from an invalid read into stalled status", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const running = makeRunning({ activityFile: "activity.json" });
+    testApi.observeRunningSubagent(running, 1_000, () => ({
+      ok: false,
+      reason: "invalid",
+      error: "unknown activity phase",
+      field: "phase",
+    }));
+    assert.deepEqual(running.activityRead, {
+      ok: false,
+      reason: "invalid",
+      error: "unknown activity phase",
+      field: "phase",
+    });
+    const snapshot = classifyStatus(running.statusState, 61_000);
+    assert.equal(snapshot.kind, "stalled");
+    assert.match(formatStatusLine("Implementer", snapshot), /\(invalid activity: phase\)\.$/);
+    assert.doesNotMatch(formatStatusLine("Implementer", snapshot), /unknown activity phase/);
+    assert.match(testApi.formatWidgetRightLabel(snapshot), /stalled \u00b7 invalid activity/);
+    assert.doesNotMatch(testApi.formatWidgetRightLabel(snapshot), /phase/);
+  });
+
+  it("confirms a waiting reply when the newer snapshot carries a CR/LF toolCallId", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const dir = createTestDir();
+    let clock = 0;
+    runningMap.clear();
+
+    try {
+      const activityFile = getSubagentActivityFile(dir, "a1");
+      mkdirSync(dirname(activityFile), { recursive: true });
+      const cursorId = "call-abc123\nfc_0123456789_0";
+      writeFileSync(activityFile, `${JSON.stringify(activity(10, { toolCallId: cursorId }))}\n`);
+      runningMap.set("a1", makeRunning({ activityFile }));
+
+      const result = await testApi.handleSubagentSteer(
+        { name: "Implementer", message: "keep going" },
+        {
+          send() {
+            writeFileSync(
+              activityFile,
+              `${JSON.stringify(activity(11, { latestEvent: "input", toolCallId: cursorId }))}\n`,
+            );
+          },
+          timeoutMs: 100,
+          pollMs: 10,
+          now: () => clock,
+          sleep: async (ms: number) => { clock += ms; },
+        },
+      );
+
+      assert.deepEqual(result.details, { id: "a1", name: "Implementer", status: "delivered" });
+    } finally {
+      runningMap.clear();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

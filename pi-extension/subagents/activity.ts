@@ -49,7 +49,7 @@ export interface SubagentActivityState {
 
 export type ActivityReadResult =
   | { ok: true; activity: SubagentActivityState }
-  | { ok: false; reason: "missing" | "invalid" | "wrong-id"; error?: string };
+  | { ok: false; reason: "missing" | "invalid" | "wrong-id"; error?: string; field?: string };
 
 export type SubagentShutdownReason = "quit" | "reload" | "new" | "resume" | "fork";
 
@@ -99,6 +99,16 @@ const KNOWN_EVENTS = new Set<SubagentActivityEvent>([
   "session_shutdown",
 ]);
 const MAX_ACTIVITY_STRING_LENGTH = 200;
+const OPTIONAL_ACTIVITY_STRING_FIELDS = ["messageEventType", "toolCallId", "toolName"] as const;
+
+/**
+ * Normalize a provider-supplied diagnostic string so recorder output always
+ * passes strict reading: collapse each CR/LF run to one space and cap length.
+ */
+function sanitizeActivityString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return value.replace(/[\r\n]+/g, " ").slice(0, MAX_ACTIVITY_STRING_LENGTH);
+}
 
 export function getSubagentActivityFile(artifactDir: string, runningChildId: string): string {
   return join(artifactDir, "subagent-activity", `${runningChildId}.json`);
@@ -139,49 +149,59 @@ function validateOptionalActivityString(object: Record<string, unknown>, fieldNa
   return value.length <= MAX_ACTIVITY_STRING_LENGTH ? null : `${fieldName} is too long`;
 }
 
-function invalidActivity(error: string): ActivityReadResult {
-  return { ok: false, reason: "invalid", error };
+function invalidActivity(error: string, field?: string): ActivityReadResult {
+  return field ? { ok: false, reason: "invalid", error, field } : { ok: false, reason: "invalid", error };
 }
+
+const STRUCTURAL_FIELD_CHECKS: Array<[string, (object: Record<string, unknown>, fieldName: string) => string | null]> = [
+  ["createdAt", validateFiniteNumber],
+  ["updatedAt", validateFiniteNumber],
+  ["sequence", validateInteger],
+  ["agentActive", validateBoolean],
+  ["turnActive", validateBoolean],
+  ["providerActive", validateBoolean],
+  ["toolActive", validateBoolean],
+  ["activeSince", validateOptionalFiniteNumber],
+  ["waitingSince", validateOptionalFiniteNumber],
+  ["turnIndex", validateOptionalInteger],
+  ["toolStartedAt", validateOptionalFiniteNumber],
+  ["toolEndedAt", validateOptionalFiniteNumber],
+];
 
 function validateActivity(value: unknown, expectedRunningChildId: string): ActivityReadResult {
   const object = requireObject(value);
   if (!object) return invalidActivity("activity must be an object");
-  if (object.version !== 1) return invalidActivity("unsupported activity version");
-  if (typeof object.runningChildId !== "string") return invalidActivity("runningChildId must be a string");
+  if (object.version !== 1) return invalidActivity("unsupported activity version", "version");
+  if (typeof object.runningChildId !== "string") {
+    return invalidActivity("runningChildId must be a string", "runningChildId");
+  }
   if (object.runningChildId !== expectedRunningChildId) return { ok: false, reason: "wrong-id" };
   if (typeof object.latestEvent !== "string" || !KNOWN_EVENTS.has(object.latestEvent as SubagentActivityEvent)) {
-    return invalidActivity("unknown latestEvent");
+    return invalidActivity("unknown latestEvent", "latestEvent");
   }
   if (typeof object.phase !== "string" || !KNOWN_PHASES.has(object.phase as SubagentActivityPhase)) {
-    return invalidActivity("unknown activity phase");
+    return invalidActivity("unknown activity phase", "phase");
   }
   if (
     object.activeScope != null &&
     (typeof object.activeScope !== "string" || !KNOWN_SCOPES.has(object.activeScope as SubagentActivityScope))
   ) {
-    return invalidActivity("unknown activeScope");
+    return invalidActivity("unknown activeScope", "activeScope");
   }
 
-  const validationError = [
-    validateFiniteNumber(object, "createdAt"),
-    validateFiniteNumber(object, "updatedAt"),
-    validateInteger(object, "sequence"),
-    validateBoolean(object, "agentActive"),
-    validateBoolean(object, "turnActive"),
-    validateBoolean(object, "providerActive"),
-    validateBoolean(object, "toolActive"),
-    validateOptionalFiniteNumber(object, "activeSince"),
-    validateOptionalFiniteNumber(object, "waitingSince"),
-    validateOptionalInteger(object, "turnIndex"),
-    validateOptionalFiniteNumber(object, "toolStartedAt"),
-    validateOptionalFiniteNumber(object, "toolEndedAt"),
-    validateOptionalActivityString(object, "messageEventType"),
-    validateOptionalActivityString(object, "toolCallId"),
-    validateOptionalActivityString(object, "toolName"),
-  ].find((error) => error != null);
-  if (validationError) return invalidActivity(validationError);
+  for (const [fieldName, validate] of STRUCTURAL_FIELD_CHECKS) {
+    const error = validate(object, fieldName);
+    if (error) return invalidActivity(error, fieldName);
+  }
 
-  return { ok: true, activity: object as unknown as SubagentActivityState };
+  // Optional diagnostic strings are provider-supplied and have no structural
+  // role; drop an invalid one instead of rejecting the whole snapshot.
+  const activity: Record<string, unknown> = { ...object };
+  for (const fieldName of OPTIONAL_ACTIVITY_STRING_FIELDS) {
+    if (validateOptionalActivityString(activity, fieldName)) delete activity[fieldName];
+  }
+
+  return { ok: true, activity: activity as unknown as SubagentActivityState };
 }
 
 export function readSubagentActivityFile(
@@ -450,15 +470,15 @@ export function createSubagentActivityRecorder(params: {
       record("message_update", (current, observedAt) => {
         current.agentActive = true;
         current.turnActive = true;
-        current.messageEventType = messageEventType;
+        current.messageEventType = sanitizeActivityString(messageEventType);
         if (!current.toolActive) markActive(current, "streaming", observedAt);
       }, "throttled");
     },
     toolExecutionStart(toolCallId, toolName) {
       record("tool_execution_start", (current, observedAt) => {
         current.toolActive = true;
-        current.toolCallId = toolCallId;
-        current.toolName = toolName;
+        current.toolCallId = sanitizeActivityString(toolCallId);
+        current.toolName = sanitizeActivityString(toolName);
         current.toolStartedAt = observedAt;
         markActive(current, "tool", observedAt, true);
       }, "immediate");
@@ -466,31 +486,31 @@ export function createSubagentActivityRecorder(params: {
     toolCall(toolCallId, toolName) {
       record("tool_call", (current, observedAt) => {
         current.toolActive = true;
-        current.toolCallId = toolCallId ?? current.toolCallId;
-        current.toolName = toolName ?? current.toolName;
+        current.toolCallId = sanitizeActivityString(toolCallId) ?? current.toolCallId;
+        current.toolName = sanitizeActivityString(toolName) ?? current.toolName;
         markActive(current, "tool", observedAt);
       }, "immediate");
     },
     toolExecutionUpdate(toolCallId, toolName) {
       record("tool_execution_update", (current, observedAt) => {
         current.toolActive = true;
-        current.toolCallId = toolCallId ?? current.toolCallId;
-        current.toolName = toolName ?? current.toolName;
+        current.toolCallId = sanitizeActivityString(toolCallId) ?? current.toolCallId;
+        current.toolName = sanitizeActivityString(toolName) ?? current.toolName;
         markActive(current, "tool", observedAt);
       }, "throttled");
     },
     toolResult(toolCallId, toolName) {
       record("tool_result", (current) => {
-        current.toolCallId = toolCallId ?? current.toolCallId;
-        current.toolName = toolName ?? current.toolName;
+        current.toolCallId = sanitizeActivityString(toolCallId) ?? current.toolCallId;
+        current.toolName = sanitizeActivityString(toolName) ?? current.toolName;
         refreshActiveScope(current);
       }, "immediate");
     },
     toolExecutionEnd(toolCallId, toolName) {
       record("tool_execution_end", (current, observedAt) => {
         current.toolActive = false;
-        current.toolCallId = toolCallId ?? current.toolCallId;
-        current.toolName = toolName ?? current.toolName;
+        current.toolCallId = sanitizeActivityString(toolCallId) ?? current.toolCallId;
+        current.toolName = sanitizeActivityString(toolName) ?? current.toolName;
         current.toolEndedAt = observedAt;
         refreshActiveScope(current);
       }, "immediate");

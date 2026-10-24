@@ -11,6 +11,7 @@ Repository-local planning and execution artifacts.
 <!-- spec-items:active:start -->
 | Item | Kind | Status | Updated |
 | --- | --- | --- | --- |
+| [Use model registry for subagent context window gauge](./active/261024-1924-use-model-registry-for-subagent-context-window-gauge/plan.md) | work-item | planned | 2026-10-24 |
 <!-- spec-items:active:end -->
 
 ## Archive
@@ -30,6 +31,7 @@ Repository-local planning and execution artifacts.
 | [Allow AGY subagents to read the parent workspace](./archive/260926-1205-allow-agy-subagents-to-read-the-parent-workspace/plan.md) | work-item | completed | 2026-09-26 |
 | [Configurable model fallback](./archive/260926-1248-configurable-model-fallback/plan.md) | work-item | completed | 2026-09-26 |
 | [Add MCP and codemode profile access](./archive/261002-1653-add-mcp-and-codemode-profile-access/plan.md) | work-item | completed | 2026-10-11 |
+| [Fix false stalled status from invalid activity snapshots](./archive/261024-1918-fix-false-stalled-status-from-invalid-activity-snapshots/plan.md) | work-item | completed | 2026-10-24 |
 <!-- spec-items:archive:end -->
 
 ## Templates

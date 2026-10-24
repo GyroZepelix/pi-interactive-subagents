@@ -171,3 +171,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/dreams/2026-10-11-2220-gamemaster-checkpoint-261002-1653-add-mcp-and-codemode-profile-access-02-02.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261002-1653-add-mcp-and-codemode-profile-access.md`, `wiki/observations.md`, and `wiki/log.md`.
 - Verification: re-read changed files; memory safety, catalog identity/coverage, exact checkpoint marker, ledger-link and prior-section preservation, archive-aware sources, wiki-only scope, relative links, fences, and `git diff --check` passed.
 - Notes: retained one tentative Dream-workflow observation about archive-aware checkpoint source references. No additional dynamic MCP guidance qualified because the implementation session had already updated the relevant durable pages. Live configured-model and real external MCP/OAuth behavior remain intentionally unverified.
+
+## [2026-10-24] dream | activity snapshot diagnostic-string boundary
+
+- Trigger: `/dream` run after Gamemaster checkpoint `261024-1918-fix-false-stalled-status-from-invalid-activity-snapshots/direct` (archived completed).
+- Inputs: current session, `spec/archive/261024-1918-fix-false-stalled-status-from-invalid-activity-snapshots/{plan,verification,outcome}.md`, `pi-extension/subagents/{activity,status,index}.ts`, regression tests in `test/test.ts`, live Cursor activity-file observations, and the completion review verdict.
+- Wiki pages changed: `wiki/conventions/runtime-safety.md`, `wiki/architecture.md`, `wiki/development.md`, `wiki/dreams/2026-10-24-1955-gamemaster-checkpoint-261024-1918-fix-false-stalled-status-from-invalid-activity.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261024-1918-fix-false-stalled-status-from-invalid-activity-snapshots.md`, and `wiki/log.md`.
+- Verification: re-read changed files; memory safety scan, catalog coverage, exact checkpoint marker uniqueness, ledger link, wiki-only scope, and `git diff --check` passed.
+- Notes: live new-code widget behavior and in-child recorder sanitization remain unit-tested only because the live session loads the installed package. The AGY reviewer `read_file` denial was kept episodic only.

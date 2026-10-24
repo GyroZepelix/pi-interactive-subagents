@@ -23,6 +23,8 @@ No lint, formatter-check, non-emitting type-check, or CI command is defined.
 
 When running the top-level unit suite from inside a spawned subagent, unset `PI_SUBAGENT_ALLOWED` unless the test specifically targets nested allowlisting. A present value intentionally filters discovery and makes top-level profile and command expectations fail (`pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `spec/archive/260914-1641-fix-frozen-subagent-reply-delivery/verification.md`).
 
+A live subagent spawned from the current Pi session exercises the package copy that session loaded, for both the parent widget and the child runtime control. Child `-e` paths derive from the parent extension directory. When Pi loads the installed package rather than this working tree, such a check verifies only installed code. To exercise uncommitted changes, run the working-tree reader and status modules on the live artifacts, or use a `pi -ne -e <path>` session as the integration harness does (`pi-extension/subagents/index.ts`, `spec/archive/261024-1918-fix-false-stalled-status-from-invalid-activity-snapshots/verification.md`).
+
 ## Test organization
 
 - `test/test.ts` directly imports production modules and exercises session persistence, validated profile discovery, trust, precedence, canonical identity, fail-closed tools, model-chain parsing/extension resolution/preparation/classification/sequencing/registry ownership, activity/status transitions, tool registration, runtime names, steering acknowledgment and timeout, settled auto-exit event sequences (including retry recovery, final error, abort, and outstanding-work guards), missing-pane recovery, rendering, and tmux helpers.

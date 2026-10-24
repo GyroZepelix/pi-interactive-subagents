@@ -38,6 +38,7 @@ export type StatusObservation =
   | {
       snapshot: "missing" | "invalid" | "wrong-id";
       snapshotError?: string;
+      snapshotField?: string;
     };
 
 export interface SubagentStatusState {
@@ -58,6 +59,7 @@ export interface SubagentStatusState {
   snapshotState: StatusSnapshotState;
   snapshotProblemSinceMs: number | null;
   snapshotError: string | null;
+  snapshotField: string | null;
   currentKind: SubagentStatusKind;
 }
 
@@ -74,6 +76,7 @@ export interface StatusSnapshot {
   activityLabel: string | null;
   snapshotState: StatusSnapshotState;
   snapshotError: string | null;
+  snapshotField: string | null;
   snapshotProblemText: string | null;
   statusLabel: string | null;
 }
@@ -128,8 +131,18 @@ function boundStatusLine(line: string): string {
   return truncateText(line.replace(/\s+/g, " ").trim(), MAX_STATUS_LINE_LENGTH);
 }
 
-function snapshotProblemLabel(snapshotState: StatusSnapshotState): string | null {
+const SNAPSHOT_FIELD_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,39}$/;
+
+/** Accept only a bare identifier-like field name; never echo arbitrary text. */
+function normalizeSnapshotField(field: string | undefined): string | null {
+  return field != null && SNAPSHOT_FIELD_PATTERN.test(field) ? field : null;
+}
+
+function snapshotProblemLabel(snapshotState: StatusSnapshotState, stalled: boolean): string | null {
   if (snapshotState === "wrong-id") return "wrong activity id";
+  if (!stalled) return null;
+  if (snapshotState === "invalid") return "invalid activity";
+  if (snapshotState === "missing") return "no activity";
   return null;
 }
 
@@ -221,6 +234,7 @@ export function createStatusState(params: {
     snapshotState: "unseen",
     snapshotProblemSinceMs: null,
     snapshotError: null,
+    snapshotField: null,
     currentKind: initialKind,
   };
 }
@@ -239,6 +253,7 @@ export function observeStatus(
       snapshotState: observation.snapshot,
       snapshotProblemSinceMs: state.snapshotProblemSinceMs ?? now,
       snapshotError: observation.snapshotError ?? null,
+      snapshotField: observation.snapshot === "invalid" ? normalizeSnapshotField(observation.snapshotField) : null,
     };
   }
 
@@ -282,6 +297,7 @@ export function observeStatus(
     snapshotState: "present",
     snapshotProblemSinceMs: null,
     snapshotError: null,
+    snapshotField: null,
     localOverrideAtMs: null,
     localOverrideSequence: null,
   };
@@ -306,25 +322,26 @@ export function forceStatusAfterInterrupt(state: SubagentStatusState, now: numbe
     snapshotState: "present",
     snapshotProblemSinceMs: null,
     snapshotError: null,
+    snapshotField: null,
     currentKind: "waiting",
   };
 }
 
 function classifyProblemState(state: SubagentStatusState, now: number): Pick<StatusSnapshot, "kind" | "statusLabel"> {
-  const problemLabel = snapshotProblemLabel(state.snapshotState);
+  const stalledLabel = snapshotProblemLabel(state.snapshotState, true);
   const hasValidSnapshot = state.lastActivityAtMs != null;
 
   if (!hasValidSnapshot) {
     const referenceMs = state.firstObservationAtMs ?? state.startTimeMs;
     const elapsedMs = Math.max(0, now - referenceMs);
     return elapsedMs >= SNAPSHOT_STALLED_AFTER_MS
-      ? { kind: "stalled", statusLabel: problemLabel }
+      ? { kind: "stalled", statusLabel: stalledLabel }
       : { kind: "starting", statusLabel: null };
   }
 
   const problemSinceMs = state.snapshotProblemSinceMs ?? now;
   const problemMs = Math.max(0, now - problemSinceMs);
-  if (problemMs >= SNAPSHOT_STALLED_AFTER_MS) return { kind: "stalled", statusLabel: problemLabel };
+  if (problemMs >= SNAPSHOT_STALLED_AFTER_MS) return { kind: "stalled", statusLabel: stalledLabel };
 
   const lastHealthyKind = state.activeNow
     ? "active"
@@ -333,7 +350,7 @@ function classifyProblemState(state: SubagentStatusState, now: number): Pick<Sta
       : state.currentKind === "stalled"
         ? "starting"
         : state.currentKind;
-  return { kind: lastHealthyKind, statusLabel: problemLabel };
+  return { kind: lastHealthyKind, statusLabel: snapshotProblemLabel(state.snapshotState, false) };
 }
 
 export function classifyStatus(state: SubagentStatusState, now: number): StatusSnapshot {
@@ -354,6 +371,7 @@ export function classifyStatus(state: SubagentStatusState, now: number): StatusS
       activityLabel: null,
       snapshotState: state.snapshotState,
       snapshotError: null,
+      snapshotField: null,
       snapshotProblemText: null,
       statusLabel: null,
     };
@@ -405,6 +423,7 @@ export function classifyStatus(state: SubagentStatusState, now: number): StatusS
     activityLabel: state.activityLabel,
     snapshotState: state.snapshotState,
     snapshotError: state.snapshotError,
+    snapshotField: state.snapshotField,
     snapshotProblemText,
     statusLabel,
   };
@@ -449,7 +468,11 @@ function formatWaitingDetail(snapshot: StatusSnapshot): string {
 }
 
 function formatStalledDetail(snapshot: StatusSnapshot): string {
-  const detail = snapshot.statusLabel ? ` (${snapshot.statusLabel})` : "";
+  const field = snapshot.snapshotState === "invalid" && snapshot.statusLabel === "invalid activity"
+    ? normalizeSnapshotField(snapshot.snapshotField ?? undefined)
+    : null;
+  const label = snapshot.statusLabel && field ? `${snapshot.statusLabel}: ${field}` : snapshot.statusLabel;
+  const detail = label ? ` (${label})` : "";
   const duration = snapshot.snapshotProblemText ? ` ${snapshot.snapshotProblemText}` : "";
   return `stalled${duration}${detail}`;
 }
