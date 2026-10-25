@@ -179,3 +179,19 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/conventions/runtime-safety.md`, `wiki/architecture.md`, `wiki/development.md`, `wiki/dreams/2026-10-24-1955-gamemaster-checkpoint-261024-1918-fix-false-stalled-status-from-invalid-activity.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261024-1918-fix-false-stalled-status-from-invalid-activity-snapshots.md`, and `wiki/log.md`.
 - Verification: re-read changed files; memory safety scan, catalog coverage, exact checkpoint marker uniqueness, ledger link, wiki-only scope, and `git diff --check` passed.
 - Notes: live new-code widget behavior and in-child recorder sanitization remain unit-tested only because the live session loads the installed package. The AGY reviewer `read_file` denial was kept episodic only.
+
+## [2026-10-25] update | AGY operator read policy preflight and denial diagnostics
+
+- Trigger: implementation of `261025-0909-enable-read-anywhere-agy-subagents-via-operator-permission-policy` (T01, T02) changed durable AGY launch, resume, and denial behavior.
+- Inputs: `pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`, `test/test.ts`, `README.md`, `docs/agent-definitions.md`, and the active work-item plan.
+- Wiki pages changed: `wiki/architecture.md`, `wiki/conventions/runtime-safety.md`, and `wiki/log.md`.
+- Verification: claims checked against the implementation working tree; focused AGY tests and the full unit suite passed in a clean `PI_SUBAGENT_*` environment.
+- Notes: live AGY 1.4.7 behavior under the `read_file(*)` and `write_file(*)` policy is unverified until the approval-gated canary runs.
+
+## [2026-10-25] dream | AGY deny-rule reporting and child test environment
+
+- Trigger: `/dream` run after Gamemaster checkpoint `261025-0909-enable-read-anywhere-agy-subagents-via-operator-permission-policy/direct` (archived completed).
+- Inputs: current session, `spec/archive/261025-0909-enable-read-anywhere-agy-subagents-via-operator-permission-policy/{plan,verification,outcome}.md`, `pi-extension/subagents/agy.ts`, live canary evidence, and review verdicts.
+- Wiki pages changed: `wiki/conventions/runtime-safety.md`, `wiki/development.md`, `wiki/dreams/2026-10-25-0946-gamemaster-checkpoint-261025-0909-enable-read-anywhere-agy-subagents-via-operato.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261025-0909-enable-read-anywhere-agy-subagents-via-operator-permission-policy.md`, and `wiki/log.md`.
+- Verification: re-read changed files; memory safety scan, catalog coverage, exact checkpoint marker uniqueness, ledger link, relative links, wiki-only scope, and `git diff --check` passed.
+- Notes: the canary procedure and AGY 1.4.7 baseline stayed episodic; secret-path denies remain proven only by mechanism on a harmless path.

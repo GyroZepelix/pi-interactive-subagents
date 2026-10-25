@@ -7,8 +7,88 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { shellEscape } from "./tmux.ts";
+
+// Operator-managed AGY permission policy. The extension only reads and warns;
+// it never writes AGY settings.
+export const AGY_POLICY_ALLOW_RULE = "read_file(*)";
+export const AGY_POLICY_DENY_RULE = "write_file(*)";
+
+export function agyPermissionSettingsPath(home = process.env.HOME || homedir()): string {
+  return join(home, ".gemini", "antigravity-cli", "settings.json");
+}
+
+export type AgyPolicyInput =
+  | { path: string; content: string }
+  | { path: string; readError: "missing" | "unreadable" };
+
+/**
+ * Pure policy evaluation. Returns null when permissions.allow contains exactly
+ * `read_file(*)` and permissions.deny contains exactly `write_file(*)`;
+ * otherwise returns one bounded warning line naming what is missing.
+ */
+export function evaluateAgyPermissionPolicy(input: AgyPolicyInput): string | null {
+  const missingBoth = `permissions.allow "${AGY_POLICY_ALLOW_RULE}" and permissions.deny "${AGY_POLICY_DENY_RULE}"`;
+  let problem: string;
+  if ("readError" in input) {
+    problem = `settings file is ${input.readError}; missing ${missingBoth}`;
+  } else {
+    let parsed: unknown;
+    let parseFailed = false;
+    try {
+      parsed = JSON.parse(input.content);
+    } catch {
+      parseFailed = true;
+    }
+    if (parseFailed) {
+      problem = `settings file is not valid JSON; missing ${missingBoth}`;
+    } else if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      problem = `settings file is not a JSON object; missing ${missingBoth}`;
+    } else {
+      const permissions = (parsed as Record<string, unknown>).permissions;
+      if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) {
+        problem = `settings has no permissions object; missing ${missingBoth}`;
+      } else {
+        const { allow, deny } = permissions as Record<string, unknown>;
+        const missing: string[] = [];
+        if (!Array.isArray(allow) || !allow.includes(AGY_POLICY_ALLOW_RULE)) {
+          missing.push(`permissions.allow "${AGY_POLICY_ALLOW_RULE}"`);
+        }
+        if (!Array.isArray(deny) || !deny.includes(AGY_POLICY_DENY_RULE)) {
+          missing.push(`permissions.deny "${AGY_POLICY_DENY_RULE}"`);
+        }
+        if (missing.length === 0) return null;
+        problem = `missing ${missing.join(" and ")}`;
+      }
+    }
+  }
+  const path = input.path.length <= 300 ? input.path : `${input.path.slice(0, 300)}…`;
+  return `Warning: AGY permission policy not satisfied (${path}: ${problem}); ` +
+    `AGY may deny reads outside its workspaces. Launch continues; see README "AGY permission policy".`;
+}
+
+/** Reads only $HOME/.gemini/antigravity-cli/settings.json; never blocks or writes. */
+export function checkAgyPermissionPolicy(home?: string): string | null {
+  const path = agyPermissionSettingsPath(home);
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return evaluateAgyPermissionPolicy({
+      path,
+      readError: code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unreadable",
+    });
+  }
+  return evaluateAgyPermissionPolicy({ path, content });
+}
+
+export const AGY_DENIAL_REMEDY =
+  `remedy: configure the documented AGY read policy (permissions.allow "${AGY_POLICY_ALLOW_RULE}" ` +
+  `with permissions.deny "${AGY_POLICY_DENY_RULE}" in ~/.gemini/antigravity-cli/settings.json) ` +
+  `or stage the evidence inside an AGY workspace root`;
 
 export const AGY_LOGICAL_TOOL_MAP = {
   read: "view_file",
@@ -97,7 +177,11 @@ function boundedDiagnostic(value: string, max = 4000): string {
   return normalized.length <= max ? normalized : `${normalized.slice(0, max)}…`;
 }
 
-export function parseAgyResult(raw: string, stderr = ""): ParsedAgyResult {
+export function parseAgyResult(
+  raw: string,
+  stderr = "",
+  workspaceRoots: readonly string[] = [],
+): ParsedAgyResult {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -118,11 +202,15 @@ export function parseAgyResult(raw: string, stderr = ""): ParsedAgyResult {
 
   if (Array.isArray(result.denied_actions) && result.denied_actions.length > 0) {
     const denied = boundedDiagnostic(JSON.stringify(result.denied_actions));
+    const roots = boundedDiagnostic(workspaceRoots.join(", "), 1000);
     const stderrDetail = boundedDiagnostic(stderr);
     return {
       ok: false,
       status,
-      error: `AGY denied one or more actions: ${denied}${stderrDetail ? `; stderr: ${stderrDetail}` : ""}`,
+      error: `AGY denied one or more actions: ${denied}` +
+        `${roots ? `; AGY workspace roots: ${roots}` : ""}` +
+        `; ${AGY_DENIAL_REMEDY}` +
+        `${stderrDetail ? `; stderr: ${stderrDetail}` : ""}`,
     };
   }
 
@@ -215,6 +303,11 @@ export function deriveAgyAdditionalWorkspaceRoots(parentCwd: string, childCwd: s
 
 export function agyAdditionalWorkspaceRoots(state: AgyResumeState): readonly string[] {
   return state.version === 2 ? state.additionalWorkspaceRoots : [];
+}
+
+/** Child cwd, generated-agent root, and any additional roots, deduplicated. */
+export function agyWorkspaceRoots(state: AgyResumeState): string[] {
+  return [...new Set([state.cwd, state.agentRoot, ...agyAdditionalWorkspaceRoots(state)])];
 }
 
 function isResolvedAbsolutePath(value: unknown): value is string {

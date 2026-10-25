@@ -106,7 +106,36 @@ builtin-tools: [read, grep, find, ls]
 Inspect the requested code and report evidence without changing files.
 ```
 
-The extension keeps the resolved child cwd as AGY's process workspace and generates a collision-resistant primary-agent definition under the parent Pi session's artifact directory. It passes that generated-agent root through `--add-dir` and, when the parent Pi cwd differs from the child cwd, passes the resolved parent cwd once as a second added workspace. No task text or referenced path can add another root. It does not write either repository, `~/.gemini`, AGY settings, authentication, plugins, or external profile dotfiles, and it never passes `--dangerously-skip-permissions`. Under AGY's default no-override policy, granted reads in these workspaces are prompt-free; explicit user permission rules can still deny them, and reported denials fail with bounded action and stderr diagnostics.
+The extension keeps the resolved child cwd as AGY's process workspace and generates a collision-resistant primary-agent definition under the parent Pi session's artifact directory. It passes that generated-agent root through `--add-dir` and, when the parent Pi cwd differs from the child cwd, passes the resolved parent cwd once as a second added workspace. No task text or referenced path can add another root. It does not write either repository, `~/.gemini`, AGY settings, authentication, plugins, or external profile dotfiles, and it never passes `--dangerously-skip-permissions`. Under AGY's default no-override policy, granted reads in these workspaces are prompt-free, but headless AGY soft-denies reads outside them (for example `/private/tmp` evidence, sibling repositories, or resolved skill symlinks). Explicit user permission rules can still deny workspace reads. Reported denials fail with bounded action, workspace-root, remedy, and stderr diagnostics.
+
+#### AGY permission policy
+
+To let read-only AGY subagents read files outside their workspaces, the operator configures AGY's documented fine-grained permission rules in `~/.gemini/antigravity-cli/settings.json`. AGY evaluates `Deny > Ask > Allow`, and these rules override workspace defaults. Merge the `permissions` block into the existing file and keep other keys such as `trustedWorkspaces`:
+
+```json
+{
+  "permissions": {
+    "allow": ["read_file(*)"],
+    "deny": [
+      "write_file(*)",
+      "read_file(/Users/<you>/.ssh)",
+      "read_file(/Users/<you>/.gemini/antigravity-cli/antigravity-oauth-token)",
+      "read_file(/Users/<you>/.pi/agent/auth.json)",
+      "read_file(/Users/<you>/.codex/auth.json)",
+      "read_file(/Users/<you>/.docker/config.json)",
+      "read_file(/Users/<you>/Library/Keychains)"
+    ]
+  }
+}
+```
+
+- `read_file(*)` allows reads anywhere. `write_file(*)` denies every file write, including inside workspaces, so a read-only child can never write. Commands, MCP, and web stay at AGY's headless soft-denied Ask default.
+- The deny list names secret files and directories by absolute real path. Extend it with any other credential locations on the machine. A read deny also denies writes to that path.
+- The policy is global. It also applies to interactive AGY use on the machine, which loses file editing while `write_file(*)` is denied.
+- Path globs are unsupported, so secrets inside readable repositories (for example `.env` files) remain readable. Keep them out of reach or deny them by exact path.
+- On AGY 1.4.7, matches of these explicit deny rules (writes and secret reads) are returned to the model as tool errors and are not listed in `denied_actions`, so they do not fail the run by themselves. Only headless soft-denials (for example, reads outside the workspaces without the allow rule) appear in `denied_actions` and fail the run.
+
+The extension never writes this file. Before each AGY launch or resume it only reads it and checks that `permissions.allow` contains `read_file(*)` and `permissions.deny` contains `write_file(*)`. When the file is missing, unreadable, invalid, or incomplete, the launch or resume acknowledgment gains one `Warning: AGY permission policy not satisfied ...` line naming the missing rule; the launch still proceeds. Pi and Claude launches are unaffected. Without the policy, stage evidence inside an AGY workspace root instead.
 
 ### Model fallback chains
 

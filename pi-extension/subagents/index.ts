@@ -99,8 +99,10 @@ import {
   agyAgentDefinitionPath,
   buildAgyAgentName,
   buildAgyCommand,
+  checkAgyPermissionPolicy,
   deriveAgyAdditionalWorkspaceRoots,
   parseAgyResult,
+  agyWorkspaceRoots,
   readAgyResumeState,
   serializeAgyAgent,
   translateAgyTools,
@@ -1918,6 +1920,7 @@ export const __test__ = {
   resolveResultPresentation,
   resolveChainResultPresentation,
   resolveResumeLaunchBehavior,
+  withAgyPolicyWarning,
   watchSubagent,
   runningSubagents,
   formatElapsed,
@@ -2367,6 +2370,26 @@ function deliverPendingQuestion(running: RunningSubagent): void {
   );
 }
 
+/**
+ * Appends the non-blocking AGY permission-policy warning to a launch or resume
+ * acknowledgment when any target uses AGY and the operator policy is missing.
+ * Pi and Claude acknowledgments are returned unchanged.
+ */
+function withAgyPolicyWarning(
+  text: string,
+  harnesses: readonly string[],
+  check: () => string | null = checkAgyPermissionPolicy,
+): string {
+  if (!harnesses.includes("agy")) return text;
+  let warning: string | null;
+  try {
+    warning = check();
+  } catch {
+    warning = null;
+  }
+  return warning ? `${text}\n${warning}` : text;
+}
+
 function hasValidAgyResumeSnapshot(stateFile: string | undefined): boolean {
   if (!stateFile) return false;
   const state = readAgyResumeState(stateFile);
@@ -2440,7 +2463,8 @@ async function watchSubagent(
       const stderr = running.agyStderrFile && existsSync(running.agyStderrFile)
         ? readFileSync(running.agyStderrFile, "utf8")
         : "";
-      const parsed = parseAgyResult(stdout, stderr);
+      const runState = running.agyStateFile ? readAgyResumeState(running.agyStateFile) : null;
+      const parsed = parseAgyResult(stdout, stderr, runState ? agyWorkspaceRoots(runState) : []);
       close(surface);
 
       if (!parsed.ok || result.exitCode !== 0) {
@@ -2980,6 +3004,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const preparedTargets = "chainTargets" in preparedLaunch.launch
           ? preparedLaunch.launch.chainTargets.map((target) => target.launch)
           : [preparedLaunch.launch];
+        const preparedHarnesses = preparedTargets.map((target) => target.harness);
         if (preparedTargets.some((target) => target.harness === "agy") && !isCommandAvailable("agy")) {
           const err =
             `Agent "${agentDefs.name}" requires the Antigravity CLI executable \`agy\`, ` +
@@ -3118,9 +3143,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text:
+              text: withAgyPolicyWarning(
                 `Sub-agent "${params.name}" launched model-chain target 1/${preparedLaunch.launch.chainTargets.length} ` +
                 `and is now running in the background. Results will be delivered automatically after the chain stops.`,
+                preparedHarnesses,
+              ),
             }],
             details: {
               id: chain.first.id,
@@ -3220,11 +3247,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text:
+              text: withAgyPolicyWarning(
                 `Sub-agent "${params.name}" launched and is now running in the background. ` +
                 `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
                 `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
                 `Until then, move on to other work or tell the user you're waiting.`,
+                preparedHarnesses,
+              ),
             },
           ],
           details: {
@@ -3641,7 +3670,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               );
             });
           return {
-            content: [{ type: "text" as const, text: `AGY conversation "${name}" resumed.` }],
+            content: [{ type: "text" as const, text: withAgyPolicyWarning(`AGY conversation "${name}" resumed.`, ["agy"]) }],
             details: { id, name, launchScriptFile, harness: "agy", status: "started" },
           };
         }

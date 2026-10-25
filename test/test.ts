@@ -64,7 +64,11 @@ import {
   agyAgentDefinitionPath,
   buildAgyAgentName,
   buildAgyCommand,
+  checkAgyPermissionPolicy,
   deriveAgyAdditionalWorkspaceRoots,
+  evaluateAgyPermissionPolicy,
+  agyPermissionSettingsPath,
+  agyWorkspaceRoots,
   isAgyResumeState,
   parseAgyResult,
   readAgyResumeState,
@@ -4695,11 +4699,21 @@ describe("AGY harness helpers", () => {
     assert.equal(denied.ok, false);
     assert.match((denied as any).error, /denied one or more actions.*read_file.*outside\/plan\.md.*stderr: approval unavailable/);
     assert.doesNotMatch((denied as any).error, /success without a non-empty response/);
+    assert.match((denied as any).error, /remedy: configure the documented AGY read policy.*read_file\(\*\).*write_file\(\*\).*stage the evidence inside an AGY workspace root/);
+    assert.doesNotMatch((denied as any).error, /AGY workspace roots:/);
+    const deniedWithRoots = parseAgyResult(JSON.stringify({
+      status: "SUCCESS",
+      denied_actions: [{ tool: "read_file", path: "/private/tmp/evidence.md" }],
+    }), "headless soft-deny", ["/child/cwd", "/artifacts/agy/workspaces/id", "/parent"]) as any;
+    assert.match(
+      deniedWithRoots.error,
+      /denied one or more actions: .*\/private\/tmp\/evidence\.md.*; AGY workspace roots: \/child\/cwd, \/artifacts\/agy\/workspaces\/id, \/parent; remedy: .*; stderr: headless soft-deny$/,
+    );
     const boundedDenied = parseAgyResult(JSON.stringify({
       status: "SUCCESS",
       denied_actions: ["x".repeat(5000)],
-    }), "y".repeat(5000));
-    assert.ok((boundedDenied as any).error.length < 8100);
+    }), "y".repeat(5000), ["/r".repeat(3000)]);
+    assert.ok((boundedDenied as any).error.length < 9400);
 
     const malformed = parseAgyResult("not-json", "RESOURCE_EXHAUSTED diagnostic") as any;
     assert.match(malformed.error, /invalid JSON.*RESOURCE_EXHAUSTED diagnostic/);
@@ -4717,6 +4731,67 @@ describe("AGY harness helpers", () => {
     assert.equal(deniedError.providerError, undefined);
     assert.match((parseAgyResult(JSON.stringify({ status: "WAITING" })) as any).error, /non-terminal/);
     assert.match((parseAgyResult(JSON.stringify({ status: "CANCELLED", error: "cancelled" })) as any).error, /cancelled/);
+  });
+
+  it("evaluates the operator AGY permission policy with bounded warnings", () => {
+    const path = "/home/op/.gemini/antigravity-cli/settings.json";
+    assert.equal(agyPermissionSettingsPath("/home/op"), path);
+    const satisfied = JSON.stringify({
+      trustedWorkspaces: ["/x"],
+      permissions: { allow: ["read_file(*)"], deny: ["write_file(*)", "read_file(/home/op/.ssh)"] },
+    });
+    assert.equal(evaluateAgyPermissionPolicy({ path, content: satisfied }), null);
+    const cases: Array<[Parameters<typeof evaluateAgyPermissionPolicy>[0], RegExp]> = [
+      [{ path, readError: "missing" }, /settings file is missing; missing permissions\.allow "read_file\(\*\)" and permissions\.deny "write_file\(\*\)"/],
+      [{ path, readError: "unreadable" }, /settings file is unreadable; missing permissions\.allow .* and permissions\.deny/],
+      [{ path, content: "{not json" }, /not valid JSON; missing permissions\.allow .* and permissions\.deny/],
+      [{ path, content: "[1]" }, /not a JSON object; missing permissions\.allow .* and permissions\.deny/],
+      [{ path, content: "{\"trustedWorkspaces\":[]}" }, /no permissions object; missing permissions\.allow .* and permissions\.deny/],
+      [{ path, content: JSON.stringify({ permissions: { deny: ["write_file(*)"] } }) }, /: missing permissions\.allow "read_file\(\*\)"\)/],
+      [{ path, content: JSON.stringify({ permissions: { allow: ["read_file(*)"], deny: ["write_file(/x)"] } }) }, /: missing permissions\.deny "write_file\(\*\)"\)/],
+      [{ path, content: JSON.stringify({ permissions: { allow: ["read_file( * )"], deny: "write_file(*)" } }) }, /missing permissions\.allow .* and permissions\.deny/],
+    ];
+    for (const [input, expected] of cases) {
+      const warning = evaluateAgyPermissionPolicy(input);
+      assert.ok(warning, JSON.stringify(input));
+      assert.match(warning, expected);
+      assert.match(warning, /^Warning: AGY permission policy not satisfied \(/);
+      assert.match(warning, /Launch continues/);
+      assert.equal(warning.includes("\n"), false);
+      assert.ok(warning.length < 700);
+    }
+    assert.ok(evaluateAgyPermissionPolicy({ path: "/p".repeat(5000), readError: "missing" })!.length < 700);
+
+    withTempDir((home) => {
+      assert.match(checkAgyPermissionPolicy(home) ?? "", /settings file is missing/);
+      mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
+      writeFileSync(agyPermissionSettingsPath(home), satisfied);
+      assert.equal(checkAgyPermissionPolicy(home), null);
+      assert.equal(readFileSync(agyPermissionSettingsPath(home), "utf8"), satisfied);
+    });
+  });
+
+  it("appends the AGY policy warning only to unsatisfied AGY acknowledgments", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const ack = "Sub-agent launched.";
+    const warning = "Warning: AGY permission policy not satisfied (x: missing y)";
+    let calls = 0;
+    const unsatisfied = () => { calls += 1; return warning; };
+    assert.equal(testApi.withAgyPolicyWarning(ack, ["pi"], unsatisfied), ack);
+    assert.equal(testApi.withAgyPolicyWarning(ack, ["claude"], unsatisfied), ack);
+    assert.equal(calls, 0);
+    assert.equal(testApi.withAgyPolicyWarning(ack, ["agy"], () => null), ack);
+    assert.equal(testApi.withAgyPolicyWarning(ack, ["pi", "agy"], unsatisfied), `${ack}\n${warning}`);
+    assert.equal(testApi.withAgyPolicyWarning(ack, ["agy"], () => { throw new Error("boom"); }), ack);
+  });
+
+  it("lists child cwd, generated-agent root, and additional roots for denial diagnostics", () => {
+    const state = makeState("/tmp/agy-roots");
+    assert.deepEqual(agyWorkspaceRoots(state), [state.cwd, state.agentRoot]);
+    assert.deepEqual(
+      agyWorkspaceRoots({ ...state, version: 2, additionalWorkspaceRoots: ["/parent"] }),
+      [state.cwd, state.agentRoot, "/parent"],
+    );
   });
 
   it("round-trips strict version 1 and version 2 resume state and detects workspace drift", () => {
@@ -7060,6 +7135,78 @@ describe("subagent interruption", () => {
       assert.deepEqual(persistedState && agyAdditionalWorkspaceRoots(persistedState), [resolve(parentWorkspace)]);
       assert.equal(runningMap.has(running.id), false);
     });
+  });
+
+  it("fails an AGY denial with workspace roots, remedy, and stderr evidence", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    runningMap.clear();
+    await withIsolatedAgentEnv(async ({ projectDir }) => {
+      const agentName = "pi-scout-denied";
+      const agentRoot = resolve(join(projectDir, "agy-workspace"));
+      const identity = "Inspect only.";
+      const description = "Scout";
+      const nativeTools = ["view_file"];
+      const agentMarkdown = serializeAgyAgent({ name: agentName, description, nativeTools, identity });
+      writeAgyAgent(agentRoot, agentName, agentMarkdown);
+      const parentWorkspace = resolve(join(projectDir, "parent-workspace"));
+      mkdirSync(parentWorkspace);
+      const stateFile = join(projectDir, "agy-state.json");
+      writeAgyResumeState(stateFile, {
+        version: 2,
+        harness: "agy",
+        conversationId: null,
+        profileName: "scout",
+        runtimeName: "Denied",
+        description,
+        cwd: resolve(projectDir),
+        model: null,
+        effort: null,
+        identity,
+        logicalTools: ["read"],
+        nativeTools,
+        agentRoot,
+        agentName,
+        agentMarkdown,
+        additionalWorkspaceRoots: [parentWorkspace],
+      });
+      const stdoutFile = join(projectDir, "denied.json");
+      const stderrFile = join(projectDir, "denied.stderr");
+      writeFileSync(stdoutFile, JSON.stringify({
+        conversation_id: "conv-denied",
+        status: "SUCCESS",
+        response: "",
+        denied_actions: [{ tool: "read_file", path: "/private/tmp/review.md" }],
+      }));
+      writeFileSync(stderrFile, "soft-denied in headless mode");
+      const running = makeRunning({
+        id: "agy-denied",
+        cli: "agy",
+        sessionFile: stdoutFile,
+        agyStdoutFile: stdoutFile,
+        agyStderrFile: stderrFile,
+        agyStateFile: stateFile,
+        statusState: createStatusState({ source: "agy", startTimeMs: Date.now() }),
+        startTime: Date.now(),
+      });
+      runningMap.set(running.id, running);
+      const result = await testApi.watchSubagent(
+        running,
+        new AbortController().signal,
+        async () => ({ reason: "sentinel", exitCode: 0 }),
+        () => {},
+      );
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.resumeSupported, false);
+      assert.match(result.errorMessage, /denied one or more actions.*\/private\/tmp\/review\.md/);
+      assert.ok(result.errorMessage.includes(
+        `AGY workspace roots: ${resolve(projectDir)}, ${agentRoot}, ${parentWorkspace}`,
+      ));
+      assert.match(result.errorMessage, /remedy: .*read_file\(\*\).*stage the evidence inside an AGY workspace root/);
+      assert.match(result.errorMessage, /stderr: soft-denied in headless mode$/);
+      assert.equal(readAgyResumeState(stateFile)?.conversationId, null);
+    });
+    runningMap.clear();
   });
 
   it("does not promise AGY resume after interruption without a persisted conversation ID", async () => {
