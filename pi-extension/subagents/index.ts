@@ -712,6 +712,31 @@ const RUNNING_CHILDREN_COUNT_KEY = Symbol.for("pi-subagents/running-children-cou
 let latestCtx: ExtensionContext | null = null;
 /** Latest ExtensionAPI, used to deliver ask_question notifications from the watcher. */
 let latestPi: ExtensionAPI | null = null;
+/**
+ * Raw model registry captured at session_start. Renderers run on every TUI
+ * frame and must never read ctx getters, which throw after session replacement.
+ */
+let latestModelRegistry: ContextWindowRegistry | null = null;
+/** Set first in session_shutdown; gates late async result delivery. */
+let sessionShutDown = false;
+
+/**
+ * Deliver an async subagent message. After this instance's session_shutdown
+ * the captured `pi` is stale, so delivery is skipped; any throw from a stale
+ * API is contained so watcher callbacks never produce unhandled rejections.
+ */
+function deliverSubagentMessage(
+  pi: Pick<ExtensionAPI, "sendMessage">,
+  message: Parameters<ExtensionAPI["sendMessage"]>[0],
+  options?: Parameters<ExtensionAPI["sendMessage"]>[1],
+): void {
+  if (sessionShutDown) return;
+  try {
+    pi.sendMessage(message, options);
+  } catch {
+    // Stale extension API after session replacement; nothing to deliver to.
+  }
+}
 
 /** Interval timer for widget re-renders. */
 let widgetInterval: ReturnType<typeof setInterval> | null = null;
@@ -1928,6 +1953,7 @@ export const __test__ = {
   formatContextUsage,
   contextWindowFor,
   resolveContextWindow,
+  deliverSubagentMessage,
   formatUsageSegments,
   widgetIcon,
 };
@@ -2870,6 +2896,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    try {
+      latestModelRegistry = (ctx.modelRegistry as ContextWindowRegistry | undefined) ?? null;
+    } catch {
+      latestModelRegistry = null;
+    }
+    sessionShutDown = false;
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.
@@ -2882,6 +2914,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // Clean up on session shutdown
   pi.on("session_shutdown", (_event, _ctx) => {
+    // pi invalidates this instance's ctx and pi right after shutdown handlers
+    // run; drop them first so late watchers and the widget never touch them.
+    sessionShutDown = true;
+    latestCtx = null;
+    latestPi = null;
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
@@ -3089,7 +3126,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               const winner = result.chainWinnerIndex !== undefined
                 ? attempts[result.chainWinnerIndex]
                 : undefined;
-              pi.sendMessage(
+              deliverSubagentMessage(
+                pi,
                 {
                   customType: "subagent_result",
                   content: resolveChainResultPresentation(result, params.name),
@@ -3119,7 +3157,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             .catch((error) => {
               updateWidget();
               const message = error instanceof Error ? error.message : String(error);
-              pi.sendMessage(
+              deliverSubagentMessage(
+                pi,
                 {
                   customType: "subagent_result",
                   content:
@@ -3203,7 +3242,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
             const presentation = resolveResultPresentation(result, running.name);
 
-            pi.sendMessage(
+            deliverSubagentMessage(
+              pi,
               {
                 customType: "subagent_result",
                 content: presentation,
@@ -3231,7 +3271,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           })
           .catch((err) => {
             updateWidget();
-            pi.sendMessage(
+            deliverSubagentMessage(
+              pi,
               {
                 customType: "subagent_result",
                 content: `Sub-agent "${running.name}" error: ${err?.message ?? String(err)}`,
@@ -3634,7 +3675,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             .then((result) => {
               updateWidget();
               const presentation = resolveResultPresentation(result, name);
-              pi.sendMessage(
+              deliverSubagentMessage(
+                pi,
                 {
                   customType: "subagent_result",
                   content: presentation,
@@ -3659,7 +3701,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             })
             .catch((error) => {
               updateWidget();
-              pi.sendMessage(
+              deliverSubagentMessage(
+                pi,
                 {
                   customType: "subagent_result",
                   content: `AGY resume error: ${error instanceof Error ? error.message : String(error)}`,
@@ -3856,7 +3899,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               name,
             );
 
-            pi.sendMessage(
+            deliverSubagentMessage(
+              pi,
               {
                 customType: "subagent_result",
                 content: presentation,
@@ -3877,7 +3921,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           })
           .catch((err) => {
             updateWidget();
-            pi.sendMessage(
+            deliverSubagentMessage(
+              pi,
               {
                 customType: "subagent_result",
                 content: `Resume error: ${err?.message ?? String(err)}`,
@@ -3979,7 +4024,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (stats) {
           const segs = formatUsageSegments(stats).map((s) => theme.fg("dim", s));
           if (stats.contextTokens > 0) {
-            const window = resolveContextWindow(stats.model, stats.provider, latestCtx?.modelRegistry);
+            const window = resolveContextWindow(stats.model, stats.provider, latestModelRegistry);
             const ctxStr = formatContextUsage(stats.contextTokens, window);
             const pct = window ? (stats.contextTokens / window) * 100 : 0;
             const coloredCtx =

@@ -33,6 +33,7 @@ Repository-local planning and execution artifacts.
 | [Fix false stalled status from invalid activity snapshots](./archive/261024-1918-fix-false-stalled-status-from-invalid-activity-snapshots/plan.md) | work-item | completed | 2026-10-24 |
 | [Use model registry for subagent context window gauge](./archive/261024-1924-use-model-registry-for-subagent-context-window-gauge/plan.md) | work-item | completed | 2026-10-24 |
 | [Enable read-anywhere AGY subagents via operator permission policy](./archive/261025-0909-enable-read-anywhere-agy-subagents-via-operator-permission-policy/plan.md) | work-item | completed | 2026-10-25 |
+| [Fix stale ctx crash in subagent result renderer](./archive/261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer/plan.md) | work-item | completed | 2026-11-10 |
 <!-- spec-items:archive:end -->
 
 ## Templates

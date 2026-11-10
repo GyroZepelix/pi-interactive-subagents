@@ -22,6 +22,7 @@ Last lint date: 2026-09-09
 | `e17580a389d2157629a594c706ccadb972c213ef` | Initial full codebase ingest | Clean Git working tree | 2026-09-09 | Core pages, focused conventions, navigation, and completion records | Complete; no eligible safe project check; metadata and integration drift need review. |
 | `spec/active/260909-1230-harden-agent-profiles-and-adapt-the-fork/plan.md` | Confirmed plan plus implementation working tree | Active work item and source paths listed in `wiki/log.md` | 2026-09-09 | Profile, architecture, development, runtime safety, map, overview, and navigation pages | Durable behavior updated; no commit checkpoint advanced. |
 | `spec/active/260909-1230-harden-agent-profiles-and-adapt-the-fork/verification.md` | Focused review findings and source corrections | Active verification evidence plus corrected source and tests | 2026-09-09 | `wiki/architecture.md`, `wiki/conventions/agent-profiles.md`, `wiki/conventions/runtime-safety.md`, `wiki/log.md`, `wiki/state.md` | Review corrections reflected; no commit checkpoint advanced. |
+| `wiki/raw/2026-11-10-stale-ctx-crash-in-subagent-result-renderer.md` | Raw bug handoff (untrusted) plus implementation working tree | Raw file; claims re-verified against `pi-extension/subagents/index.ts` and pi 1.5.1 | 2026-11-10 | `wiki/conventions/runtime-safety.md`, `wiki/index.md`, `wiki/log.md` | Processed by work item `261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer`; no commit checkpoint advanced. |
 
 ## Maintenance policy
 

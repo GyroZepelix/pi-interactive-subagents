@@ -20,7 +20,7 @@ Durable current-state codebase knowledge. Read this file first when answering co
 
 - [Conventions index](./conventions/index.md): Routing for repository-specific working rules.
 - [Agent profiles](./conventions/agent-profiles.md): Validated user-managed profiles, trust-aware discovery, precedence, and nesting.
-- [Runtime safety](./conventions/runtime-safety.md): Tool isolation, resume invariants, and shell/live-input boundaries.
+- [Runtime safety](./conventions/runtime-safety.md): Tool isolation, resume invariants, stale session context, and shell/live-input boundaries.
 - [TypeScript modules](./conventions/typescript-modules.md): ESM imports, module boundaries, and test seams.
 
 ## Reflection and recall

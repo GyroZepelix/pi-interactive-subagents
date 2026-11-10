@@ -55,6 +55,14 @@ A running, exhausted, or failed chain uses a separate strict registry tag and pa
 - A `cli: claude` profile invokes `claude --dangerously-skip-permissions`. Only explicitly trusted profiles should enable this path (`pi-extension/subagents/index.ts`).
 - AGY tasks and resume messages are private files; the launch script uses escaped paths and a quoted command substitution, so prompt contents are data rather than executable shell syntax. Running AGY messages are rejected before tmux input (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/index.ts`).
 
+## Session replacement and stale context
+
+Pi invalidates an extension instance's `ExtensionContext` and `ExtensionAPI` after `/new`, `/resume`, `/fork`, and `/reload`: every getter and `pi.sendMessage` then throw. Shutdown handlers run before that invalidation, and each replacement loads a fresh module instance. An exception from a message renderer's `render()` is uncaught, so it crashes pi (`pi-extension/subagents/index.ts`, `wiki/raw/2026-11-10-stale-ctx-crash-in-subagent-result-renderer.md`).
+
+- Message renderers and async callbacks must not read a captured `ctx` or `pi` getter. Capture plain objects at `session_start` instead; for example, the `subagent_result` gauge uses the raw model registry captured there, which pi does not invalidate.
+- `session_shutdown` first marks the instance as shut down and clears `latestCtx` and `latestPi`, then runs the existing cleanup. Widget updates and question notifications then do nothing.
+- Late watcher and chain results are delivered through `deliverSubagentMessage`, which skips delivery after shutdown and contains a throw from a stale API. Results cancelled by shutdown are not re-delivered to the replacement session; child session files remain resumable.
+
 ## Runtime files
 
 Name registries, model-chain sidecars, AGY resume snapshots, and activity snapshots use temp-file rename with strict schema validation. Errors in best-effort metadata writes must not turn into an unrestricted resume; an AGY result may remain delivered but explicitly non-resumable (`pi-extension/subagents/agy.ts`, `pi-extension/subagents/session.ts`, `pi-extension/subagents/activity.ts`).

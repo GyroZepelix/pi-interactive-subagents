@@ -195,3 +195,19 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/conventions/runtime-safety.md`, `wiki/development.md`, `wiki/dreams/2026-10-25-0946-gamemaster-checkpoint-261025-0909-enable-read-anywhere-agy-subagents-via-operato.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261025-0909-enable-read-anywhere-agy-subagents-via-operator-permission-policy.md`, and `wiki/log.md`.
 - Verification: re-read changed files; memory safety scan, catalog coverage, exact checkpoint marker uniqueness, ledger link, relative links, wiki-only scope, and `git diff --check` passed.
 - Notes: the canary procedure and AGY 1.4.7 baseline stayed episodic; secret-path denies remain proven only by mechanism on a harmless path.
+
+## [2026-11-10] update | stale session context after replacement or reload
+
+- Trigger: implementation of `261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer` (T01, T02) fixed a pi crash from stale extension context and changed durable shutdown and delivery behavior.
+- Inputs: `wiki/raw/2026-11-10-stale-ctx-crash-in-subagent-result-renderer.md` (untrusted handoff), `pi-extension/subagents/index.ts`, `test/test.ts`, pi 1.5.1 `core/agent-session-runtime.js` and `core/agent-session.js`, and the active work-item plan.
+- Wiki pages changed: `wiki/conventions/runtime-safety.md`, `wiki/index.md`, `wiki/state.md`, and `wiki/log.md`.
+- Verification: claims checked against the implementation working tree and pi 1.5.1 shutdown-then-invalidate ordering; the full unit suite passed in a clean `PI_SUBAGENT_*` environment.
+- Notes: the real-pi manual check of `/reload` with a running subagent was not run; the delivery guard is unit-tested only.
+
+## [2026-11-10] dream | fresh-instance lifecycle tests and renderer test theme
+
+- Trigger: `/dream` run after Gamemaster checkpoint `261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer/direct` (archived completed).
+- Inputs: current session, `spec/archive/261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer/{plan,verification,outcome}.md`, `pi-extension/subagents/index.ts`, regression tests in `test/test.ts`, and the completion review verdict.
+- Wiki pages changed: `wiki/conventions/typescript-modules.md`, `wiki/dreams/2026-11-10-1527-gamemaster-checkpoint-261110-1508-fix-stale-ctx-crash-in-subagent-result-rendere.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer.md`, and `wiki/log.md`.
+- Verification: re-read changed files; memory safety scan, catalog coverage, exact checkpoint marker uniqueness, ledger link, wiki-only scope, and `git diff --check` passed.
+- Notes: the runtime-safety stale-context rule was already written during implementation and was not duplicated. The mistaken placeholder reviewer launch and the skipped manual tmux check stayed episodic only.

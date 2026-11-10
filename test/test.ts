@@ -7371,6 +7371,171 @@ describe("subagent status renderer", () => {
   });
 });
 
+describe("stale session context safety", () => {
+  const COUNT_KEY = Symbol.for("pi-subagents/running-children-count");
+  const POLL_KEY = Symbol.for("pi-subagents/poll-abort-controller");
+  let freshCounter = 0;
+
+  // pi loads a fresh module instance per session (moduleCache: false), so each
+  // test uses its own instance and restores the process globals it touches.
+  async function withFreshInstance(
+    run: (mod: any, mock: ReturnType<typeof createStaleSafetyApi>) => void,
+  ) {
+    const prevCount = (globalThis as any)[COUNT_KEY];
+    const url = new URL("../pi-extension/subagents/index.ts", import.meta.url);
+    url.search = `?stale-ctx-${++freshCounter}`;
+    const mod = await import(url.href);
+    const mock = createStaleSafetyApi();
+    try {
+      mod.default(mock.api);
+      run(mod, mock);
+    } finally {
+      (globalThis as any)[COUNT_KEY] = prevCount;
+      const poll = (globalThis as any)[POLL_KEY] as AbortController | undefined;
+      if (!poll || poll.signal.aborted) (globalThis as any)[POLL_KEY] = new AbortController();
+    }
+  }
+
+  function createStaleSafetyApi() {
+    const handlers = new Map<string, Array<(event: any, ctx: any) => void>>();
+    const renderers = new Map<string, any>();
+    const sent: Array<any> = [];
+    return {
+      handlers,
+      renderers,
+      sent,
+      fire(event: string, ctx: any) {
+        for (const handler of handlers.get(event) ?? []) handler({ type: event }, ctx);
+      },
+      api: {
+        on(event: string, handler: (event: any, ctx: any) => void) {
+          handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+        },
+        registerTool() {},
+        registerCommand() {},
+        registerShortcut() {},
+        registerMessageRenderer(name: string, renderer: any) {
+          renderers.set(name, renderer);
+        },
+        sendUserMessage() {},
+        sendMessage(message: any, options?: any) {
+          sent.push({ message, options });
+        },
+        getAllTools() {
+          return [];
+        },
+      } as any,
+    };
+  }
+
+  /** A ctx whose getters all throw once `stale.value` is set, like pi's invalidated ctx. */
+  function createInvalidatableCtx(registry: unknown) {
+    const stale = { value: false };
+    const guard = <T>(value: T): T => {
+      if (stale.value) throw new Error("This extension ctx is stale after session replacement or reload.");
+      return value;
+    };
+    const ctx = {
+      get hasUI() { return guard(false); },
+      get cwd() { return guard(process.cwd()); },
+      get ui() { return guard({ setWidget() {} }); },
+      get modelRegistry() { return guard(registry); },
+    };
+    return { ctx, stale };
+  }
+
+  const theme = {
+    fg(_color: string, text: string) { return text; },
+    bg(_color: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+
+  function renderResult(renderer: any, model: string) {
+    const component = renderer(
+      {
+        customType: "subagent_result",
+        content: "Sub-agent \"Worker\" completed (5s).\n\nDone.",
+        details: {
+          name: "Worker",
+          exitCode: 0,
+          elapsed: 5,
+          stats: {
+            model,
+            provider: "test-provider",
+            toolCount: 1,
+            inputTokens: 10,
+            outputTokens: 5,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            cost: 0,
+            contextTokens: 250,
+          },
+        },
+      },
+      // Expanded avoids keyHint(), which needs pi's interactive theme.
+      { expanded: true },
+      theme,
+    );
+    return component.render(80).join("\n");
+  }
+
+  it("renders subagent_result with the captured registry after ctx goes stale", async () => {
+    await withFreshInstance((_mod, mock) => {
+      const registry = {
+        find(provider: string, modelId: string) {
+          return provider === "test-provider" && modelId === "registry-model" ? { contextWindow: 1000 } : undefined;
+        },
+      };
+      const { ctx, stale } = createInvalidatableCtx(registry);
+      mock.fire("session_start", ctx);
+      const renderer = mock.renderers.get("subagent_result");
+      assert.ok(renderer, "expected subagent_result renderer to be registered");
+
+      stale.value = true;
+      assert.match(renderResult(renderer, "registry-model"), /25\.0%\/1k/);
+
+      mock.fire("session_shutdown", ctx);
+      assert.match(renderResult(renderer, "registry-model"), /25\.0%\/1k/);
+    });
+  });
+
+  it("falls back to the static context window table before session_start", async () => {
+    await withFreshInstance((_mod, mock) => {
+      const renderer = mock.renderers.get("subagent_result");
+      assert.ok(renderer, "expected subagent_result renderer to be registered");
+      // claude-* maps to 200k in the static table: 250 / 200000 = 0.1%.
+      assert.match(renderResult(renderer, "claude-test"), /0\.1%\/200k/);
+    });
+  });
+
+  it("skips async result delivery after session_shutdown and contains stale API errors", async () => {
+    await withFreshInstance((mod, mock) => {
+      const deliver = mod.__test__.deliverSubagentMessage;
+      const message = { customType: "subagent_result", content: "done", display: true, details: {} };
+      const options = { triggerTurn: true, deliverAs: "steer" };
+
+      const { ctx } = createInvalidatableCtx(undefined);
+      mock.fire("session_start", ctx);
+      deliver(mock.api, message, options);
+      assert.deepEqual(mock.sent, [{ message, options }]);
+
+      const throwingApi = {
+        sendMessage() {
+          throw new Error("This extension ctx is stale after session replacement or reload.");
+        },
+      };
+      assert.doesNotThrow(() => deliver(throwingApi, message, options));
+
+      mock.fire("session_shutdown", ctx);
+      let calls = 0;
+      deliver({ sendMessage() { calls++; } }, message, options);
+      deliver(mock.api, message, options);
+      assert.equal(calls, 0);
+      assert.equal(mock.sent.length, 1);
+    });
+  });
+});
+
 describe("subagent startup delay", () => {
   it("defaults to 500ms when no env var is set", () => {
     const testApi = (subagentsModule as any).__test__;
