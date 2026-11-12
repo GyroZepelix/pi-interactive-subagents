@@ -317,6 +317,42 @@ for (const backend of backends) {
       assert.ok(content.includes(`DISCO_${id}`), `Discovery test marker should exist`);
     });
 
+    // ── Pi defaults for omitted profile fields ──
+
+    it("auto-exits and links the session for a Pi profile that omits lifecycle fields", async () => {
+      const id = uniqueId();
+      const markerFile = `/tmp/pi-integ-defaults-${id}.txt`;
+      trackTempFile(env, markerFile);
+
+      const surface = createTrackedSurface(env, `defaults-${id}`);
+      await sleep(1000);
+
+      const task = [
+        `Call the subagent tool with these EXACT parameters:`,
+        `  name: "Defaults-${id}"`,
+        `  agent: "test-defaults"`,
+        `  task: "Run this exact bash command: echo \"DEFAULTS_${id} auto=$PI_SUBAGENT_AUTO_EXIT session=$PI_SUBAGENT_SESSION\" > '${markerFile}'"`,
+        `Do not do anything else. Just call the subagent tool once.`,
+        `After you receive the subagent result, reply with the words DEFAULTS, TEST, and DONE joined by underscores.`,
+      ].join("\n");
+
+      startPi(surface, env.dir, task);
+
+      const content = await waitForFile(markerFile, PI_TIMEOUT, /DEFAULTS_/);
+      assert.ok(content.includes(`DEFAULTS_${id}`), `Marker should contain DEFAULTS_${id}`);
+      assert.match(content, /auto=1\b/, `Omitted auto-exit should launch with PI_SUBAGENT_AUTO_EXIT=1. Got: ${content.trim()}`);
+
+      const sessionFile = content.match(/session=(\S+\.jsonl)/)?.[1];
+      assert.ok(sessionFile && existsSync(sessionFile), `Child session file should exist. Got: ${content.trim()}`);
+      const header = JSON.parse(readFileSync(sessionFile!, "utf8").split("\n")[0]);
+      assert.equal(header.type, "session");
+      assert.ok(header.parentSession, "Omitted session-mode should seed a lineage-only parentSession link");
+
+      // Without auto-exit the child would wait in its pane and the parent would never get a result.
+      const screen = await waitForScreen(surface, /DEFAULTS_TEST_DONE/, PI_TIMEOUT, 300);
+      assert.match(screen, /DEFAULTS_TEST_DONE/);
+    });
+
     // ── Subagent with custom system prompt ──
 
     it("applies the profile-defined system prompt", async () => {

@@ -6,7 +6,7 @@
 
 ## Deliverable
 
-The repository ships an ESM Pi package whose registered extension entry point is `pi-extension/subagents/index.ts`. It provides no bundled profiles; users manage global or trusted project definitions. The package includes an agent-definition reference, an optional status configuration example, a Claude Code completion-hook plugin, and unit plus live integration tests (`package.json`, `docs/agent-definitions.md`, `config.json.example`, `pi-extension/subagents/plugin/`, `test/`).
+The repository ships an ESM Pi package whose registered extension entry point is `pi-extension/subagents/index.ts`. It provides no bundled profiles; users manage global or trusted project definitions. The package includes an agent-definition reference, a `subagent-profiles` skill for creating or editing profiles (`skills/subagent-profiles/SKILL.md`), an optional status configuration example, a Claude Code completion-hook plugin, and unit plus live integration tests (`package.json`, `docs/agent-definitions.md`, `config.json.example`, `pi-extension/subagents/plugin/`, `test/`).
 
 ## Stack and runtime
 

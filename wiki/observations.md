@@ -14,10 +14,6 @@ Tentative repository-local findings retained for later comparison. This page is 
 
 - **macOS temporary paths can be absolute without being canonical** - May matter when tests construct versioned loadout fixtures because `/var` can resolve through `/private/var`; use `realpathSync` for fixtures intended to pass canonical replay, and preserve aliases only when testing refusal. Provenance: [02.02 completion evidence](../spec/archive/260909-1952-profile-extension-loading/implementation/02-02-versioned-resume.md#completion-and-handoff).
 
-## Integration checks
-
-- **Full integration runs can fail one unrelated test intermittently** - May matter when judging regressions because live-model and pane-focus tests flaked; rerun the failing test alone with `--test-name-pattern` first. Provenance: [verification](../spec/archive/261112-1059-detect-subagent-completion-without-screen-scraping-and-fix-agy-ssh-login/verification.md).
-
 ## Workflow orchestration
 
 - **Target:** `gamemaster-implement/workflow/execution-cycle.md`

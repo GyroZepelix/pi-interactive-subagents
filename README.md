@@ -62,13 +62,14 @@ mcp-servers: [project-docs]
 extensions:
   - package: npm:@example/pi-web-tools
     paths: [index.ts]
-session-mode: lineage-only
-system-prompt: append
-auto-exit: true
 ---
 
 Inspect the requested area and report concise findings with file references.
 ```
+
+Pi profiles that omit `auto-exit`, `system-prompt`, or `session-mode` now default to `auto-exit: true`, `system-prompt: append`, and `session-mode: lineage-only`: the child finishes and reports back on its own, its body is appended to Pi's system prompt, and its session nests under the parent in `/resume`. Earlier releases defaulted to a child that waited in its pane, a body inserted into the task, and a standalone session, so profiles that relied on omitted fields behave differently. Opt out per profile with `auto-exit: false`, `system-prompt: replace`, or `session-mode: standalone` (or `fork`). AGY and Claude profiles and resumes of existing children are unchanged. See [Pi defaults for omitted fields](docs/agent-definitions.md#pi-defaults-for-omitted-fields).
+
+The package also ships a `subagent-profiles` skill that guides agents when they create or edit profile files.
 
 See [Agent definitions](docs/agent-definitions.md) for the complete contract, including every field, validation, precedence, trust behavior, tool isolation, nested spawning, resume snapshots, and external-harness limitations.
 
@@ -286,7 +287,7 @@ npm pack --dry-run --json
 git diff --check
 ```
 
-The package dry run should contain runtime files, this README, `LICENSE`, `config.json.example`, and `docs/agent-definitions.md`. It should not contain `spec/`, `wiki/`, tests, or repository instructions.
+The package dry run should contain runtime files, `skills/subagent-profiles/SKILL.md`, this README, `LICENSE`, `config.json.example`, and `docs/agent-definitions.md`. It should not contain `spec/`, `wiki/`, tests, or repository instructions.
 
 The tmux-only surface test does not invoke a model. Run it in a controlled tmux session; an active Pi TUI can compete with its pane-focus assertions.
 

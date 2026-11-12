@@ -24,10 +24,14 @@
   "pi": {
     "extensions": [
       "./pi-extension/subagents/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "files": [
     "pi-extension/",
+    "skills/",
     "docs/agent-definitions.md",
     "README.md",
     "LICENSE",

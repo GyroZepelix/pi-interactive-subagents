@@ -53,10 +53,12 @@ Ambient selection is not an extension sandbox. Declared profile extensions remai
 
 ## Session and prompt behavior
 
-`session-mode` defaults to `standalone`; `lineage-only` and `fork` are profile-defined rather than public tool arguments. `system-prompt: append` or `replace` routes the body through the corresponding Pi flag; without the field, the body is part of the task wrapper.
+For the Pi harness only (flat profiles with `cli` omitted or `pi`, and `cli: pi` chain targets), omitted fields resolve to `auto-exit: true`, `system-prompt: append`, and `session-mode: lineage-only`; explicit values are kept. One helper, `applyPiProfileDefaults` in `pi-extension/subagents/index.ts`, fills them during launch preparation before interactive resolution, launch behavior, task wrapping, and loadout capture, and the `PI_SUBAGENT_AUTO_EXIT` launch variable is read from the prepared loadout. `resolveEffectiveSessionMode` and `resolveEffectiveInteractive` stay pure resolvers, so Claude and AGY launches keep their previous behavior (standalone sessions, no seeding, unchanged `interactive` handling). Resume replays the stored loadout and always auto-exits. These defaults replaced `false`, body-in-task-wrapper, and `standalone` after an omitted `auto-exit` left a child waiting in its pane forever (`docs/agent-definitions.md`, `test/test.ts`).
+
+`lineage-only` and `fork` are profile-defined rather than public tool arguments. `system-prompt: append` or `replace` routes the body through the corresponding Pi flag; a Pi profile body is no longer placed in the task wrapper.
 
 `disable-model-invocation: true` hides a definition from `subagents_list` while preserving exact direct selection when otherwise permitted.
 
 For `cli: agy`, `thinking` is passed unchanged as `--effort`; AGY reports unsupported effort or model-effort combinations. The profile body becomes the generated primary-agent system prompt.
 
-When changing profile semantics, update `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `docs/agent-definitions.md`, README setup guidance, and focused tests together.
+When changing profile semantics, update `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `docs/agent-definitions.md`, README setup guidance, the shipped `skills/subagent-profiles/SKILL.md` (published through `package.json` `pi.skills`), and focused tests together. The skill must not contradict `docs/agent-definitions.md`.

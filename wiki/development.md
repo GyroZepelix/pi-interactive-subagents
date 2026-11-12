@@ -4,7 +4,7 @@
 
 - Runtime use requires Pi 1.0 or newer and tmux; the locked development graph currently resolves Pi 1.1.x. Pi must run inside tmux, for example `tmux new -A -s pi 'pi'` (`README.md`, `package.json`, `package-lock.json`, `pi-extension/subagents/tmux.ts`).
 - `cli: agy` additionally requires an authenticated compatible Antigravity CLI on `PATH`; the verified local baseline is 1.2.11 (`README.md`, `pi-extension/subagents/agy.ts`).
-- The project is an ESM package and Pi loads `pi-extension/subagents/index.ts` through the `pi.extensions` manifest field (`package.json`).
+- The project is an ESM package and Pi loads `pi-extension/subagents/index.ts` through the `pi.extensions` manifest field and the `subagent-profiles` skill under `skills/` through `pi.skills` (`package.json`).
 - Install locked development dependencies with `npm ci`. Dependency changes require lockfile regeneration and review (`README.md`, `package.json`, `package-lock.json`).
 
 ## Verification tiers
@@ -31,12 +31,13 @@ A live subagent spawned from the current Pi session exercises the package copy t
 - `test/integration/mcp-capability.test.ts` starts isolated Pi SDK sessions without prompting a model. Its local stdio/HTTP fixtures prove selected-versus-ambient MCP process isolation, direct/indirect/hidden exposure, resources, prompt metadata, native failure diagnostics, credential-safe capability state, and process cleanup.
 - `test/integration/tmux-surface.test.ts` performs real pane operations without model calls. Its bracketed-paste fixture records framing, byte length, hash, and submission count for a 4,283-byte UTF-8 payload, accepts a short follow-up, and verifies buffer cleanup; the suite also removes a disposable pane to exercise interruption detection (`test/integration/fixtures/bracketed-paste-recorder.mjs`).
 - `test/integration/subagent-lifecycle.test.ts` performs real Pi and model interactions and writes markers under `/tmp`.
-- Integration fixtures define `session-mode`, body and `system-prompt` behavior, and `ask_question`; they do not use removed public spawn overrides.
+- **A full integration run can fail one unrelated live-model, screen-pattern, or pane-focus test intermittently** - Rerun only that test with `--test-name-pattern` before treating it as a regression, and record both results. (verification of items 261112-1059 and 261112-1435 under `spec/archive/`)
+- Integration fixtures define `session-mode`, body and `system-prompt` behavior, and `ask_question`; `test-defaults` deliberately omits `auto-exit`, `system-prompt`, and `session-mode` to cover the Pi defaults. They do not use removed public spawn overrides.
 - Integration sessions force-load the working-tree extension with `pi -ne -e <path>` to avoid testing an installed package snapshot (`test/integration/harness.ts`).
 
 ## Package shape
 
-`package.json` limits publication to runtime source, `docs/agent-definitions.md`, `README.md`, `LICENSE`, and `config.json.example`. Package dry-run output must exclude `spec/`, `wiki/`, tests, repository instructions, and repository-only `agent-examples/`.
+`package.json` limits publication to runtime source, `skills/`, `docs/agent-definitions.md`, `README.md`, `LICENSE`, and `config.json.example`. Package dry-run output must exclude `spec/`, `wiki/`, tests, repository instructions, and repository-only `agent-examples/`.
 
 ## Change workflow
 

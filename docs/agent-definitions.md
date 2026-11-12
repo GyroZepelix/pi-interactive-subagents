@@ -28,13 +28,12 @@ extensions:
     paths: [index.ts]
 skills: [review]
 thinking: medium
-session-mode: lineage-only
-system-prompt: append
-auto-exit: true
 ---
 
 Review the requested change. Report findings with exact file references.
 ```
+
+This Pi profile omits `auto-exit`, `system-prompt`, and `session-mode`, so it uses the [Pi defaults](#pi-defaults-for-omitted-fields): it auto-exits, appends its body to Pi's system prompt, and links its session to the parent.
 
 Malformed YAML, unknown keys, invalid values, and invalid field types exclude the complete definition. Diagnostics identify the file and field. Other valid project files remain available. When an invalid project definition prevents the effective name from being determined safely, global definitions are suppressed rather than risking fallback to a less restricted profile.
 
@@ -52,14 +51,32 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `skills` | Comma-delimited string or YAML string array | Empty list. Do not use together with `skill`. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | Optional. Applied with a profile model. |
 | `subagent_agents` | Comma-delimited string or YAML string array | Empty list. A non-empty list grants nested spawning and restricts targets to these effective names. |
-| `auto-exit` | YAML boolean | `false`. When true, the child shuts down and reports its final response only after Pi settles automatic retries, recovery, and queued continuation. |
-| `interactive` | YAML boolean | Inverse of `auto-exit`. Controls whether stall and recovery transitions wake the parent; the widget still updates. |
-| `system-prompt` | `append` or `replace` | When omitted, the body is inserted into the task wrapper. Otherwise the body is passed through the corresponding Pi system-prompt flag. |
-| `session-mode` | `standalone`, `lineage-only`, or `fork` | `standalone`. See [Session modes](#session-modes). |
+| `auto-exit` | YAML boolean | `true` for Pi when omitted. When true, the child shuts down and reports its final response only after Pi settles automatic retries, recovery, and queued continuation. Set `false` for a hands-on child that stays in its pane until the user exits it. |
+| `interactive` | YAML boolean | Inverse of the resolved `auto-exit` (so `false` for a Pi profile that omits both). Controls whether stall and recovery transitions wake the parent; the widget still updates. |
+| `system-prompt` | `append` or `replace` | `append` for Pi when omitted. The body is passed through the corresponding Pi system-prompt flag. See [Body routing](#body-routing). |
+| `session-mode` | `standalone`, `lineage-only`, or `fork` | `lineage-only` for Pi when omitted. See [Session modes](#session-modes). |
 | `cwd` | Non-empty string | Active context cwd. Absolute values are used directly. Relative profile values resolve from the global Pi agent directory; a runtime `cwd` override resolves from the active context cwd. |
 | `cli` | `pi`, `claude`, or `agy` | `pi`. See [Antigravity CLI](#antigravity-cli) and [Claude CLI limitations](#claude-cli-limitations). |
 | `disable-model-invocation` | YAML boolean | `false`. When true, hides the profile from `subagents_list`; an exact permitted name remains directly spawnable. |
 | `model-chain` | YAML array of at least two target mappings | Optional ordered AGY/Pi fallback targets. When present, all flat target/lifecycle fields are forbidden. See [Model chains](#model-chains). |
+
+## Pi defaults for omitted fields
+
+For the Pi harness (flat profiles with `cli` omitted or `pi`, and `cli: pi` model-chain targets), an omitted field resolves to:
+
+| Field | Pi default |
+| --- | --- |
+| `auto-exit` | `true` |
+| `system-prompt` | `append` |
+| `session-mode` | `lineage-only` |
+
+Explicit values are honored unchanged. `interactive` keeps following the resolved `auto-exit` unless it is set explicitly. AGY and Claude launches are unaffected: they do not use these fields, and their sessions stay `standalone`. Resuming an existing child replays its stored snapshot and always auto-exits, so children launched before this change resume as before.
+
+These defaults changed. Earlier releases treated an omitted `auto-exit` as `false` (the child answered and then waited in its pane until the user exited it), an omitted `system-prompt` as "insert the body into the task wrapper", and an omitted `session-mode` as `standalone`. A Pi profile that relied on those omitted values now behaves differently. To keep the old behavior, set the field explicitly:
+
+- `auto-exit: false` for a hands-on child that waits for the user (it is then interactive by default).
+- `session-mode: standalone` for a child session without a parent link.
+- `system-prompt: replace` when the body should replace Pi's system prompt. Routing a Pi profile body into the task wrapper is no longer available.
 
 Only actual YAML booleans are accepted. For example, `auto-exit: true` is valid and `auto-exit: "true"` is not.
 
@@ -195,17 +212,17 @@ New Pi capability snapshots store only each server's ordered name, canonical sou
 
 ## Body routing
 
-- With `system-prompt: append`, the body is written to a private launch artifact and passed with `--append-system-prompt`.
-- With `system-prompt: replace`, it is passed with `--system-prompt`.
-- Without `system-prompt`, the body is prepended to the wrapped task for Pi `standalone` and `lineage-only` modes, and to the direct task for Pi `fork` mode.
-- In Pi `fork` mode, inherited conversation context supplies the surrounding context and the body plus task are delivered directly.
+- With `system-prompt: append` (the Pi default when omitted), the body is written to a private launch artifact and passed with `--append-system-prompt`, keeping Pi's own system prompt.
+- With `system-prompt: replace`, it is passed with `--system-prompt` and replaces Pi's system prompt.
+- In Pi `standalone` and `lineage-only` modes, the task is wrapped with lifecycle instructions and delivered through a private task artifact. In Pi `fork` mode, inherited conversation context supplies the surrounding context and the task is delivered directly.
+- For `cli: claude`, the body is passed to Claude Code as an appended system prompt.
 - For `cli: agy`, the body is always the generated primary agent's system prompt. `system-prompt` is unsupported.
 
 ## Session modes
 
-- `standalone` starts a fresh child session without a parent-session link.
-- `lineage-only` starts a fresh child session with a `parentSession` link but no copied conversation turns.
-- `fork` creates a linked child session seeded with the caller's conversation before the triggering user turn.
+- `lineage-only` (the Pi default when omitted) starts a fresh child session with a `parentSession` link but no copied conversation turns. It costs no extra tokens; Pi uses the link only to list and nest the child under its parent in `/resume`.
+- `standalone` starts a fresh child session without a parent-session link. AGY and Claude children are always standalone.
+- `fork` creates a linked child session seeded with the caller's conversation before the triggering user turn. The child pays for the copied context on every model request, so use it only when the child truly needs the conversation.
 
 ## Tool isolation
 

@@ -228,3 +228,22 @@ Use this shape for new entries:
 - Disposition: DISCARD `wiki/observations.md` "Read-only reviewers may still alter the Git index while trying to include untracked files" - aged 13 work items without recurrence; this session's read-only review over untracked files left the index unchanged.
 - Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, and ran the memory safety scan.
 - Notes: completion-signal and AGY SSH guidance was already written during implementation and was not duplicated.
+
+## [2026-11-12] update | Pi profile defaults and shipped profile skill
+
+- Trigger: implementation of `261112-1435-default-pi-subagents-to-auto-exit-append-and-lineage-only-and-ship-a-profile-ski` after a profile that omitted `auto-exit` left its child waiting in its pane.
+- Inputs: `pi-extension/subagents/index.ts`, `test/test.ts`, `test/integration/subagent-lifecycle.test.ts`, `docs/agent-definitions.md`, `README.md`, `package.json`, `skills/subagent-profiles/SKILL.md`, and the active work-item plan.
+- Wiki pages changed: `wiki/conventions/agent-profiles.md`, `wiki/development.md`, `wiki/overview.md`, and `wiki/log.md`.
+- Verification: unit suite and full integration suite passed (one unrelated screen-scraping flake passed on isolated rerun); package skill discovery confirmed through Pi's package manager.
+- Notes: Pi-only omitted-field defaults are now `auto-exit: true`, `system-prompt: append`, and `session-mode: lineage-only`; Claude, AGY, and resume behavior are unchanged.
+
+## [2026-11-12] dream | Pi profile defaults checkpoint
+
+- Trigger: `/dream` run after Gamemaster checkpoint `261112-1435-default-pi-subagents-to-auto-exit-append-and-lineage-only-and-ship-a-profile-ski/direct` (archived completed).
+- Inputs: current session, `spec/archive/261112-1435-default-pi-subagents-to-auto-exit-append-and-lineage-only-and-ship-a-profile-ski/{plan,verification,outcome}.md`, `package.json`, `test/integration/agents/test-defaults.md`, integration run logs, and `wiki/observations.md`.
+- Wiki pages changed: `wiki/development.md`, `wiki/observations.md`, and `wiki/log.md`. The run's episode is discoverable through `wiki/dreams/episodes.jsonl`.
+- Disposition: MOVE `wiki/observations.md` "Full integration runs can fail one unrelated test intermittently" - promoted to `wiki/development.md` after a second independent item needed the isolated rerun.
+- Disposition: SUPERSEDE `wiki/development.md` "Integration fixtures define `session-mode`, body and `system-prompt` behavior" - the new `test-defaults` fixture omits those fields.
+- Disposition: SUPERSEDE `wiki/development.md` "limits publication to runtime source" - `package.json` `files` now includes `skills/`.
+- Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, and ran the memory safety scan.
+- Notes: Pi default semantics were written to `wiki/conventions/agent-profiles.md` during implementation and were not duplicated.

@@ -338,6 +338,24 @@ function resolveEffectiveInteractive(
   return !(agentDefs?.autoExit ?? false);
 }
 
+/**
+ * Fill omitted Pi-harness profile fields with their Pi defaults:
+ * `auto-exit: true`, `system-prompt: append`, and `session-mode: lineage-only`.
+ * Explicit values are kept unchanged. Claude and AGY definitions are returned
+ * as-is because those harnesses do not use these fields.
+ */
+function applyPiProfileDefaults(agent: AgentDefinition): AgentDefinition {
+  if ((agent.cli ?? "pi") !== "pi") return agent;
+  return {
+    ...agent,
+    autoExit: agent.autoExit ?? true,
+    // A Pi profile body is required; keep the loadout invariant (mode set only
+    // with identity text) for any body-less definition built in code.
+    systemPromptMode: agent.systemPromptMode ?? (agent.body ? "append" : undefined),
+    sessionMode: agent.sessionMode ?? "lineage-only",
+  };
+}
+
 function buildSubagentTask(params: {
   task: string;
   body?: string;
@@ -1053,7 +1071,7 @@ function prepareAgentLaunch(
   if (agent.modelChain) {
     const chainTargets: PreparedChainTarget[] = [];
     for (const target of agent.modelChain) {
-      const definition: AgentDefinition = {
+      const definition: AgentDefinition = applyPiProfileDefaults({
         ...agent,
         modelChain: undefined,
         cli: target.cli,
@@ -1067,7 +1085,7 @@ function prepareAgentLaunch(
         interactive: false,
         systemPromptMode: target.systemPromptMode,
         sessionMode: target.sessionMode,
-      };
+      });
       const targetSandbox = prepareAgentSandbox(definition);
       if ("error" in targetSandbox) return targetSandbox;
       const preparedTarget = prepareAgentLaunch(
@@ -1085,6 +1103,7 @@ function prepareAgentLaunch(
     return { launch: { chainTargets } };
   }
 
+  agent = applyPiProfileDefaults(agent);
   const effectiveModel = normalizedParams.model ?? agent.model;
   const effectiveSkills = agent.skills;
   const effectiveThinking = agent.thinking;
@@ -1929,6 +1948,7 @@ export const __test__ = {
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
+  applyPiProfileDefaults,
   buildProfileCapabilityEnvironment,
   parseSubagentAllowlist,
   buildSubagentTask,
@@ -2248,7 +2268,8 @@ async function launchSubagent(
   if (params.agent) {
     envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
   }
-  if (agentDefs?.autoExit) {
+  // The prepared snapshot carries the resolved auto-exit (Pi defaults applied).
+  if (loadout.autoExit) {
     envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
   }
   envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(subagentSessionFile)}`);

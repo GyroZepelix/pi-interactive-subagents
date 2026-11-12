@@ -3326,7 +3326,8 @@ describe("subagent discovery", () => {
         systemPromptMode: "replace",
         identity: "Canonical body.",
         spawnable: ["child-agent"],
-        autoExit: false,
+        // auto-exit is omitted in this profile, so the Pi default applies.
+        autoExit: true,
         cwd: join(globalDir, "profile-workspace"),
         agentDir: globalDir,
       });
@@ -3384,6 +3385,148 @@ describe("subagent discovery", () => {
     ]);
     assert.equal(prepared.launch.effectiveModel, "gemini-3.8-flash");
     assert.equal(prepared.launch.effectiveThinking, "high");
+    assert.equal(prepared.launch.launchBehavior.sessionMode, "standalone");
+    assert.equal(prepared.launch.launchBehavior.seededSessionMode, null);
+    assert.equal(prepared.launch.systemPromptMode, undefined);
+  });
+
+  describe("Pi profile defaults for omitted fields", () => {
+    function prepareFromMarkdown(markdown: string, params: Record<string, unknown> = {}) {
+      const parsed = parseAgentDefinition(markdown, "/tmp/defaults-agent.md", "global");
+      assert.ok(parsed.agent, JSON.stringify(parsed.diagnostics));
+      const agent = {
+        ...parsed.agent!,
+        extensionPaths: [],
+        ...(parsed.agent!.modelChain
+          ? { modelChain: parsed.agent!.modelChain.map((target) => ({ ...target, extensionPaths: [] })) }
+          : {}),
+      } as any;
+      const sandbox = testApi.prepareAgentSandbox(agent);
+      assert.ok("sandbox" in sandbox);
+      const prepared = testApi.prepareAgentLaunch(
+        { agent: agent.name, name: "Runtime", task: "Do the work", ...params },
+        agent,
+        sandbox.sandbox,
+        "/tmp",
+      );
+      assert.ok("launch" in prepared, (prepared as any).error);
+      return prepared.launch;
+    }
+
+    it("applyPiProfileDefaults fills only omitted Pi fields and leaves other harnesses untouched", () => {
+      const base = { name: "x", body: "Role." } as any;
+      assert.deepEqual(
+        (({ autoExit, systemPromptMode, sessionMode }) => ({ autoExit, systemPromptMode, sessionMode }))(
+          testApi.applyPiProfileDefaults(base),
+        ),
+        { autoExit: true, systemPromptMode: "append", sessionMode: "lineage-only" },
+      );
+      const explicit = testApi.applyPiProfileDefaults({
+        ...base,
+        cli: "pi",
+        autoExit: false,
+        systemPromptMode: "replace",
+        sessionMode: "fork",
+      });
+      assert.equal(explicit.autoExit, false);
+      assert.equal(explicit.systemPromptMode, "replace");
+      assert.equal(explicit.sessionMode, "fork");
+      for (const cli of ["claude", "agy"]) {
+        const other = { ...base, cli };
+        assert.equal(testApi.applyPiProfileDefaults(other), other);
+      }
+    });
+
+    it("defaults an omitted Pi profile to auto-exit, append, and lineage-only", () => {
+      const launch = prepareFromMarkdown(
+        "---\nname: defaults-agent\nbuiltin-tools: [read]\n---\nRole body.",
+      );
+      assert.equal(launch.harness, "pi");
+      assert.equal(launch.effectiveInteractive, false);
+      assert.equal(launch.systemPromptMode, "append");
+      assert.deepEqual(launch.launchBehavior, {
+        sessionMode: "lineage-only",
+        seededSessionMode: "lineage-only",
+        inheritsConversationContext: false,
+        taskDelivery: "artifact",
+      });
+      assert.match(launch.fullTask, /Complete your task autonomously/);
+      assert.doesNotMatch(launch.fullTask, /Role body/);
+      assert.equal(launch.loadout?.autoExit, true);
+      assert.equal(launch.loadout?.systemPromptMode, "append");
+      assert.equal(launch.loadout?.identity, "Role body.");
+
+      const artifactDir = createTestDir();
+      try {
+        const parts: string[] = [];
+        testApi.applySandboxToParts(parts, launch.loadout, {
+          artifactDir,
+          name: "Runtime",
+          artifactId: "defaults-launch",
+        });
+        assert.ok(parts.includes("--append-system-prompt"));
+        assert.equal(parts.includes("--system-prompt"), false);
+      } finally {
+        rmSync(artifactDir, { recursive: true, force: true });
+      }
+    });
+
+    it("honors explicit Pi opt-outs unchanged", () => {
+      const launch = prepareFromMarkdown(
+        "---\nname: hands-on\nbuiltin-tools: [read]\nauto-exit: false\nsystem-prompt: replace\nsession-mode: standalone\n---\nRole body.",
+      );
+      assert.equal(launch.effectiveInteractive, true);
+      assert.equal(launch.systemPromptMode, "replace");
+      assert.equal(launch.launchBehavior.sessionMode, "standalone");
+      assert.equal(launch.launchBehavior.seededSessionMode, null);
+      assert.match(launch.fullTask, /The user can interact with you at any time/);
+      assert.equal(launch.loadout?.autoExit, false);
+      assert.equal(launch.loadout?.systemPromptMode, "replace");
+
+      const fork = prepareFromMarkdown(
+        "---\nname: forked\nbuiltin-tools: [read]\nsession-mode: fork\n---\nRole body.",
+      );
+      assert.equal(fork.launchBehavior.sessionMode, "fork");
+      assert.equal(fork.launchBehavior.taskDelivery, "direct");
+      assert.equal(fork.loadout?.autoExit, true);
+
+      const explicitInteractive = prepareFromMarkdown(
+        "---\nname: pinged\nbuiltin-tools: [read]\ninteractive: true\n---\nRole body.",
+      );
+      assert.equal(explicitInteractive.effectiveInteractive, true);
+      assert.equal(explicitInteractive.loadout?.autoExit, true);
+    });
+
+    it("defaults Pi model-chain targets and leaves AGY targets standalone", () => {
+      const prepared = prepareFromMarkdown(
+        "---\nname: chain-defaults\nbuiltin-tools: [read]\nmodel-chain:\n  - { cli: agy, model: gemini }\n  - { cli: pi, model: openai/one }\n  - { cli: pi, model: openai/two, session-mode: standalone, system-prompt: replace }\n---\nShared role",
+      ) as any;
+      assert.deepEqual(prepared.chainTargets.map((entry: any) => ({
+        harness: entry.launch.harness,
+        sessionMode: entry.launch.launchBehavior.sessionMode,
+        systemPromptMode: entry.launch.loadout?.systemPromptMode ?? null,
+        autoExit: entry.launch.loadout?.autoExit ?? null,
+        interactive: entry.launch.effectiveInteractive,
+      })), [
+        { harness: "agy", sessionMode: "standalone", systemPromptMode: null, autoExit: null, interactive: false },
+        { harness: "pi", sessionMode: "lineage-only", systemPromptMode: "append", autoExit: true, interactive: false },
+        { harness: "pi", sessionMode: "standalone", systemPromptMode: "replace", autoExit: true, interactive: false },
+      ]);
+    });
+
+    it("leaves Claude launches on their existing defaults", () => {
+      const launch = prepareFromMarkdown(
+        "---\nname: claude-defaults\ncli: claude\n---\nClaude role.",
+      );
+      assert.equal(launch.harness, "claude");
+      assert.equal(launch.loadout, null);
+      assert.equal(launch.systemPromptMode, undefined);
+      assert.equal(launch.effectiveInteractive, true);
+      assert.equal(launch.launchBehavior.sessionMode, "standalone");
+      assert.equal(launch.launchBehavior.seededSessionMode, null);
+      assert.match(launch.fullTask, /Claude role\./);
+      assert.match(launch.fullTask, /The user can interact with you at any time/);
+    });
   });
 
   it("fails launch preparation when a resolved profile extension disappears", () => {
