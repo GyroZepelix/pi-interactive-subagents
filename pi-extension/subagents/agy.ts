@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { shellEscape } from "./tmux.ts";
+import { completionSuffix, shellEscape } from "./tmux.ts";
 
 // Operator-managed AGY permission policy. The extension only reads and warns;
 // it never writes AGY settings.
@@ -177,6 +177,14 @@ function boundedDiagnostic(value: string, max = 4000): string {
   return normalized.length <= max ? normalized : `${normalized.slice(0, max)}…`;
 }
 
+export const AGY_NOT_LOGGED_IN =
+  "AGY is not logged in. Run `agy` in a terminal to sign in, then retry.";
+
+function isAgyAuthenticationFailure(structuredError: string, stderr: string): boolean {
+  return /\bauthentication (?:failed|timed out|required)\b/i.test(structuredError) ||
+    /\bauthentication required\b/i.test(stderr);
+}
+
 export function parseAgyResult(
   raw: string,
   stderr = "",
@@ -246,6 +254,14 @@ export function parseAgyResult(
 
   const structured = typeof result.error === "string" ? boundedDiagnostic(result.error) : "";
   const stderrDetail = boundedDiagnostic(stderr);
+  if (status === "ERROR" && isAgyAuthenticationFailure(structured, stderr)) {
+    return {
+      ok: false,
+      status,
+      error: `${AGY_NOT_LOGGED_IN}${structured ? ` (AGY: ${structured})` : ""}`,
+      ...(structured ? { providerError: structured } : {}),
+    };
+  }
   const terminalStatuses = new Set(["ERROR", "CANCELLED", "CANCELED", "INTERRUPTED"]);
   const state = terminalStatuses.has(status) ? `AGY ${status.toLowerCase()}` : `AGY returned non-terminal or unknown status ${JSON.stringify(status)}`;
   return {
@@ -391,6 +407,7 @@ export function buildAgyCommand(params: {
   taskFile: string;
   stdoutFile: string;
   stderrFile: string;
+  doneFile: string;
   model: string | null;
   effort: string | null;
   conversationId?: string | null;
@@ -406,7 +423,11 @@ export function buildAgyCommand(params: {
       additionalWorkspaceRoots.push(root);
     }
   }
+  // AGY switches to file-based token storage whenever these variables are set,
+  // ignoring the keychain login. tmux copies SSH_CONNECTION into new panes when
+  // an SSH client attaches, so strip them for every AGY run.
   const parts = [
+    "env", "-u", "SSH_CONNECTION", "-u", "SSH_CLIENT", "-u", "SSH_TTY",
     "agy",
     "--output-format", "json",
     "--add-dir", shellEscape(params.agentRoot),
@@ -417,6 +438,6 @@ export function buildAgyCommand(params: {
   if (params.effort) parts.push("--effort", shellEscape(params.effort));
   if (params.conversationId) parts.push("--conversation", shellEscape(params.conversationId));
   parts.push("--print", `\"$(cat -- ${shellEscape(params.taskFile)})\"`);
-  return `${parts.join(" ")} > ${shellEscape(params.stdoutFile)} 2> ${shellEscape(params.stderrFile)}; ` +
-    `agy_exit=$?; echo '__SUBAGENT_DONE_'$agy_exit'__'`;
+  return `${parts.join(" ")} > ${shellEscape(params.stdoutFile)} 2> ${shellEscape(params.stderrFile)}` +
+    completionSuffix(params.doneFile);
 }

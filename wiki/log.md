@@ -211,3 +211,20 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/conventions/typescript-modules.md`, `wiki/dreams/2026-11-10-1527-gamemaster-checkpoint-261110-1508-fix-stale-ctx-crash-in-subagent-result-rendere.md`, `wiki/dreams/episodes.jsonl`, `wiki/dreams/by-spec/261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer.md`, and `wiki/log.md`.
 - Verification: re-read changed files; memory safety scan, catalog coverage, exact checkpoint marker uniqueness, ledger link, wiki-only scope, and `git diff --check` passed.
 - Notes: the runtime-safety stale-context rule was already written during implementation and was not duplicated. The mistaken placeholder reviewer launch and the skipped manual tmux check stayed episodic only.
+
+## [2026-11-12] update | file-based subagent completion and AGY SSH login
+
+- Trigger: implementation of `261112-1059-detect-subagent-completion-without-screen-scraping-and-fix-agy-ssh-login` after children in narrow tmux panes never reported back and AGY children failed login when tmux had been attached over SSH.
+- Inputs: session `17fabee1` artifacts and AGY CLI logs, isolated tmux reproductions, `pi-extension/subagents/{tmux,agy,index}.ts`, `test/test.ts`, `test/integration/tmux-surface.test.ts`, and the active work-item plan.
+- Wiki pages changed: `wiki/architecture.md`, `wiki/conventions/runtime-safety.md`, and `wiki/log.md`.
+- Verification: unit suite passed; full integration runs passed except one intermittent unrelated failure per run (live model output, operator pane focus), each passing on isolated reruns; a negative control confirmed the narrow-pane test hangs without `capture-pane -J`.
+- Notes: AGY `/dev/null` stdin does not shorten its 60-second login wait; no early-kill path was added by user choice.
+
+## [2026-11-12] dream | integration flake triage observation
+
+- Trigger: `/dream` run after Gamemaster checkpoint `261112-1059-detect-subagent-completion-without-screen-scraping-and-fix-agy-ssh-login/direct` (archived completed).
+- Inputs: current session, `spec/archive/261112-1059-detect-subagent-completion-without-screen-scraping-and-fix-agy-ssh-login/{plan,verification,outcome}.md`, `pi-extension/subagents/{tmux,agy,index}.ts`, the tests, integration run logs, and the contract-quality review verdict.
+- Wiki pages changed: `wiki/observations.md` and `wiki/log.md`. The run's episode is discoverable through `wiki/dreams/episodes.jsonl`.
+- Disposition: DISCARD `wiki/observations.md` "Read-only reviewers may still alter the Git index while trying to include untracked files" - aged 13 work items without recurrence; this session's read-only review over untracked files left the index unchanged.
+- Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, and ran the memory safety scan.
+- Notes: completion-signal and AGY SSH guidance was already written during implementation and was not duplicated.

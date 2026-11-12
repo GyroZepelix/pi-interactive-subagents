@@ -255,6 +255,19 @@ export function sendLongCommand(
 }
 
 /**
+ * Shell suffix appended to every child launch command. After the child exits it
+ * records the exit code in `doneFile` (temp file + rename, so a reader never
+ * sees a partial write) and then prints the legacy terminal sentinel. The file
+ * is the primary completion signal; the sentinel is a fallback that depends on
+ * the pane screen and can wrap in narrow panes or be erased by prompt redraws.
+ */
+export function completionSuffix(doneFile: string): string {
+  const tmp = shellEscape(`${doneFile}.tmp`);
+  return `; subagent_exit=$?; printf '%s\\n' "$subagent_exit" > ${tmp} && mv -f ${tmp} ${shellEscape(doneFile)}; ` +
+    `echo '__SUBAGENT_DONE_'$subagent_exit'__'`;
+}
+
+/**
  * Read the screen contents of a pane (sync).
  */
 export function readScreen(surface: string, lines = 50): string {
@@ -271,11 +284,23 @@ export function readScreen(surface: string, lines = 50): string {
 /**
  * Read the screen contents of a pane (async).
  */
-export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
+export async function readScreenAsync(
+  surface: string,
+  lines = 50,
+  options?: { joinWrapped?: boolean },
+): Promise<string> {
   requireTmux();
   const { stdout } = await execFileAsync(
     "tmux",
-    ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
+    [
+      "capture-pane",
+      "-p",
+      ...(options?.joinWrapped ? ["-J"] : []),
+      "-t",
+      surface,
+      "-S",
+      `-${Math.max(1, lines)}`,
+    ],
     { encoding: "utf8" },
   );
   return stdout;
@@ -333,7 +358,27 @@ async function surfaceExists(surface: string): Promise<boolean | null> {
   }
 }
 
-export const __pollForExitTest__ = { interpretExitSidecar, surfaceExists };
+/**
+ * Read and remove a completion file written by `completionSuffix`. Returns
+ * null when absent or unreadable; unparsable content reports exit code 1.
+ */
+function consumeDoneFile(doneFile: string): number | null {
+  let raw: string;
+  try {
+    raw = readFileSync(doneFile, "utf-8");
+  } catch {
+    return null;
+  }
+  rmSync(doneFile, { force: true });
+  const code = /^\d+$/.test(raw.trim()) ? parseInt(raw.trim(), 10) : NaN;
+  return Number.isFinite(code) ? code : 1;
+}
+
+function readScreenForSentinel(surface: string, lines: number): Promise<string> {
+  return readScreenAsync(surface, lines, { joinWrapped: true });
+}
+
+export const __pollForExitTest__ = { interpretExitSidecar, surfaceExists, consumeDoneFile };
 
 /**
  * Poll until the subagent exits. Checks for a `.exit` sidecar file first
@@ -347,6 +392,8 @@ export async function pollForExit(
     interval: number;
     sessionFile?: string;
     sentinelFile?: string;
+    /** Exit-code file written by `completionSuffix` after the child exits. */
+    doneFile?: string;
     onTick?: (elapsed: number) => void;
     readSurface?: (surface: string, lines: number) => Promise<string>;
     probeSurface?: (surface: string) => Promise<boolean | null>;
@@ -357,6 +404,16 @@ export async function pollForExit(
   for (;;) {
     if (signal.aborted) {
       throw new Error("Aborted while waiting for subagent to finish");
+    }
+
+    // Sample the completion file first. The `.exit` sidecar and the Claude
+    // sentinel are always written before the child exits, so checking them
+    // after this sample guarantees they win over the plain exit code.
+    let doneSeen = false;
+    if (options.doneFile) {
+      try {
+        doneSeen = existsSync(options.doneFile);
+      } catch {}
     }
 
     // Fast path: check for .exit sidecar file (written by the error path)
@@ -380,9 +437,19 @@ export async function pollForExit(
       } catch {}
     }
 
-    // Slow path: read terminal screen for sentinel (crash detection)
+    // Completion file written by the launch script after the child exited.
+    if (doneSeen && options.doneFile) {
+      const exitCode = consumeDoneFile(options.doneFile);
+      if (exitCode !== null) {
+        return { reason: "sentinel", exitCode };
+      }
+    }
+
+    // Slow path: read terminal screen for sentinel (fallback for launches
+    // without a completion file, and crash detection). Wrapped lines are
+    // joined so a narrow pane cannot split the sentinel.
     try {
-      const screen = await (options.readSurface ?? readScreenAsync)(surface, 5);
+      const screen = await (options.readSurface ?? readScreenForSentinel)(surface, 5);
       const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
       if (match) {
         return { reason: "sentinel", exitCode: parseInt(match[1], 10) };

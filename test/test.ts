@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createAgentSession,
@@ -58,7 +59,7 @@ import {
   summarizeSessionStats,
 } from "../pi-extension/subagents/session.ts";
 
-import { pollForExit, shellEscape, submitText } from "../pi-extension/subagents/tmux.ts";
+import { completionSuffix, pollForExit, shellEscape, submitText } from "../pi-extension/subagents/tmux.ts";
 import {
   agyAdditionalWorkspaceRoots,
   agyAgentDefinitionPath,
@@ -69,6 +70,7 @@ import {
   evaluateAgyPermissionPolicy,
   agyPermissionSettingsPath,
   agyWorkspaceRoots,
+  AGY_NOT_LOGGED_IN,
   isAgyResumeState,
   parseAgyResult,
   readAgyResumeState,
@@ -4647,11 +4649,16 @@ describe("AGY harness helpers", () => {
       taskFile: "/tmp/task'file.txt",
       stdoutFile: "/tmp/result.json",
       stderrFile: "/tmp/result.stderr",
+      doneFile: "/tmp/done dir/id.code",
       model: "gemini-3.8-flash",
       effort: "high",
       conversationId: "conversation-123",
     });
-    assert.match(command, /^agy --output-format json /);
+    assert.match(command, /^env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY agy --output-format json /);
+    assert.ok(
+      command.endsWith(`2> '/tmp/result.stderr'${completionSuffix("/tmp/done dir/id.code")}`),
+      "AGY command must end with the shared completion suffix",
+    );
     assert.match(command, /--add-dir '\/tmp\/agent root' --add-dir '\/tmp\/control root' --agent 'pi-scout-123'/);
     assert.equal([...command.matchAll(/--add-dir/g)].length, 2);
     assert.match(command, /--agent 'pi-scout-123'/);
@@ -4667,6 +4674,7 @@ describe("AGY harness helpers", () => {
       taskFile: "/tmp/task.txt",
       stdoutFile: "/tmp/result.json",
       stderrFile: "/tmp/result.stderr",
+      doneFile: "/tmp/done.code",
       model: null,
       effort: null,
     }), /absolute resolved path/);
@@ -4731,6 +4739,28 @@ describe("AGY harness helpers", () => {
     assert.equal(deniedError.providerError, undefined);
     assert.match((parseAgyResult(JSON.stringify({ status: "WAITING" })) as any).error, /non-terminal/);
     assert.match((parseAgyResult(JSON.stringify({ status: "CANCELLED", error: "cancelled" })) as any).error, /cancelled/);
+  });
+
+  it("reports AGY authentication failures as not logged in and keeps the raw provider error", () => {
+    const authStderr = "Authentication required. Please visit the URL to log in:\n  https://accounts.google.com/o/oauth2/auth?x=1\nError: authentication timed out.";
+    const timedOut = parseAgyResult(JSON.stringify({
+      conversation_id: "",
+      status: "ERROR",
+      response: "",
+      error: "authentication failed or timed out",
+    }), authStderr) as any;
+    assert.equal(timedOut.ok, false);
+    assert.ok(timedOut.error.startsWith(AGY_NOT_LOGGED_IN));
+    assert.match(timedOut.error, /\(AGY: authentication failed or timed out\)$/);
+    assert.doesNotMatch(timedOut.error, /accounts\.google\.com/);
+    assert.equal(timedOut.providerError, "authentication failed or timed out");
+
+    const stderrOnly = parseAgyResult(JSON.stringify({ status: "ERROR" }), authStderr) as any;
+    assert.equal(stderrOnly.error, AGY_NOT_LOGGED_IN);
+    assert.equal(stderrOnly.providerError, undefined);
+
+    const other = parseAgyResult(JSON.stringify({ status: "ERROR", error: "RESOURCE_EXHAUSTED" }), "boom") as any;
+    assert.doesNotMatch(other.error, /not logged in/);
   });
 
   it("evaluates the operator AGY permission policy with bounded warnings", () => {
@@ -5869,6 +5899,81 @@ describe("tmux text submission and exit polling", () => {
     assert.equal(result.reason, "interrupted");
     assert.equal(result.exitCode, 1);
     assert.match(result.errorMessage ?? "", /no longer exists/);
+  });
+
+  it("finishes from the completion file without reading the screen and removes it", async () => {
+    const dir = createTestDir();
+    try {
+      const doneFile = join(dir, "subagent-done", "id.code");
+      mkdirSync(dirname(doneFile), { recursive: true });
+      writeFileSync(doneFile, "3\n");
+      let reads = 0;
+      const result = await pollForExit("%9", new AbortController().signal, {
+        interval: 1,
+        doneFile,
+        async readSurface() { reads += 1; return ""; },
+        async probeSurface() { return true; },
+      });
+      assert.deepEqual(result, { reason: "sentinel", exitCode: 3 });
+      assert.equal(reads, 0);
+      assert.equal(existsSync(doneFile), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers the .exit error sidecar over a completion file in the same tick", async () => {
+    const dir = createTestDir();
+    try {
+      const sessionFile = join(dir, "child.jsonl");
+      const doneFile = join(dir, "id.code");
+      writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "error", errorMessage: "overloaded" }));
+      writeFileSync(doneFile, "0\n");
+      const result = await pollForExit("%9", new AbortController().signal, {
+        interval: 1,
+        sessionFile,
+        doneFile,
+        async readSurface() { return ""; },
+      });
+      assert.deepEqual(result, { reason: "error", exitCode: 1, errorMessage: "overloaded" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports exit code 1 for unparsable completion file content", () => {
+    const dir = createTestDir();
+    try {
+      const doneFile = join(dir, "id.code");
+      writeFileSync(doneFile, "garbage");
+      assert.equal(__pollForExitTest__.consumeDoneFile(doneFile), 1);
+      assert.equal(existsSync(doneFile), false);
+      assert.equal(__pollForExitTest__.consumeDoneFile(doneFile), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds a completion suffix that records the exit code atomically before the sentinel", () => {
+    const suffix = completionSuffix("/tmp/done dir/id.code");
+    assert.equal(
+      suffix,
+      "; subagent_exit=$?; printf '%s\\n' \"$subagent_exit\" > '/tmp/done dir/id.code.tmp' && " +
+        "mv -f '/tmp/done dir/id.code.tmp' '/tmp/done dir/id.code'; echo '__SUBAGENT_DONE_'$subagent_exit'__'",
+    );
+  });
+
+  it("records the real exit code when run by bash", () => {
+    const dir = createTestDir();
+    try {
+      const doneFile = join(dir, "id.code");
+      const output = execFileSync("bash", ["-c", `(exit 7)${completionSuffix(doneFile)}`], { encoding: "utf8" });
+      assert.equal(output.trim(), "__SUBAGENT_DONE_7__");
+      assert.equal(readFileSync(doneFile, "utf8"), "7\n");
+      assert.equal(existsSync(`${doneFile}.tmp`), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

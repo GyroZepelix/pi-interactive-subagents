@@ -2,10 +2,6 @@
 
 Tentative repository-local findings retained for later comparison. This page is used by Dream and memory maintenance, not normal task context.
 
-## Review evidence
-
-- **Read-only reviewers may still alter the Git index while trying to include untracked files** - May matter when review coverage includes untracked work because future review prompts should prohibit intent-to-add and the orchestrator should compare staged state before and after review. Provenance: [profile-hardening verification](../spec/archive/260909-1230-harden-agent-profiles-and-adapt-the-fork/verification.md).
-
 ## Markdown checks
 
 - **Literal link placeholders inside agent prompt examples can look like broken repository links** - May matter when ad hoc Markdown checks scan profile bodies because placeholder targets such as `url` should be distinguished from actual relative documentation links. Provenance: [profile-hardening verification](../spec/archive/260909-1230-harden-agent-profiles-and-adapt-the-fork/verification.md).
@@ -17,6 +13,10 @@ Tentative repository-local findings retained for later comparison. This page is 
 ## Path fixtures
 
 - **macOS temporary paths can be absolute without being canonical** - May matter when tests construct versioned loadout fixtures because `/var` can resolve through `/private/var`; use `realpathSync` for fixtures intended to pass canonical replay, and preserve aliases only when testing refusal. Provenance: [02.02 completion evidence](../spec/archive/260909-1952-profile-extension-loading/implementation/02-02-versioned-resume.md#completion-and-handoff).
+
+## Integration checks
+
+- **Full integration runs can fail one unrelated test intermittently** - May matter when judging regressions because live-model and pane-focus tests flaked; rerun the failing test alone with `--test-name-pattern` first. Provenance: [verification](../spec/archive/261112-1059-detect-subagent-completion-without-screen-scraping-and-fix-agy-ssh-login/verification.md).
 
 ## Workflow orchestration
 

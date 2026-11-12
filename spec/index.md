@@ -34,6 +34,7 @@ Repository-local planning and execution artifacts.
 | [Use model registry for subagent context window gauge](./archive/261024-1924-use-model-registry-for-subagent-context-window-gauge/plan.md) | work-item | completed | 2026-10-24 |
 | [Enable read-anywhere AGY subagents via operator permission policy](./archive/261025-0909-enable-read-anywhere-agy-subagents-via-operator-permission-policy/plan.md) | work-item | completed | 2026-10-25 |
 | [Fix stale ctx crash in subagent result renderer](./archive/261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer/plan.md) | work-item | completed | 2026-11-10 |
+| [Detect subagent completion without screen scraping and fix AGY SSH login](./archive/261112-1059-detect-subagent-completion-without-screen-scraping-and-fix-agy-ssh-login/plan.md) | work-item | completed | 2026-11-12 |
 <!-- spec-items:archive:end -->
 
 ## Templates

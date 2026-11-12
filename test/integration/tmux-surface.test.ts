@@ -12,10 +12,11 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { pollForExit, submitText } from "../../pi-extension/subagents/tmux.ts";
+import { completionSuffix, pollForExit, submitText } from "../../pi-extension/subagents/tmux.ts";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -231,6 +232,34 @@ for (const backend of backends) {
       assert.equal(result.reason, "interrupted");
       assert.equal(result.exitCode, 1);
       assert.match(result.errorMessage ?? "", /no longer exists/);
+    });
+
+    it("detects a sentinel that wraps in a pane narrower than the marker", async () => {
+      const surface = createTrackedSurface(env, "narrow-sentinel-test");
+      await sleep(1000);
+      execFileSync("tmux", ["resize-pane", "-t", surface, "-x", "12"]);
+      const width = Number(execFileSync("tmux", ["display", "-p", "-t", surface, "#{pane_width}"], { encoding: "utf8" }).trim());
+      assert.ok(width < "__SUBAGENT_DONE_5__".length, `pane must be narrower than the marker, got ${width}`);
+
+      sendCommand(surface, "clear; (exit 5); echo '__SUBAGENT_DONE_'$?'__'");
+      const result = await pollForExit(surface, new AbortController().signal, { interval: 100 });
+      assert.deepEqual(result, { reason: "sentinel", exitCode: 5 });
+    });
+
+    it("finishes from the completion file even after the screen is cleared", async () => {
+      const surface = createTrackedSurface(env, "done-file-test");
+      await sleep(1000);
+      const dir = mkdtempSync(join(tmpdir(), "subagent-done-"));
+      try {
+        const doneFile = join(dir, "id.code");
+        sendLongCommand(surface, `(exit 4)${completionSuffix(doneFile)}; clear`);
+        await waitForFile(doneFile, 10_000);
+        const result = await pollForExit(surface, new AbortController().signal, { interval: 100, doneFile });
+        assert.deepEqual(result, { reason: "sentinel", exitCode: 4 });
+        assert.equal(existsSync(doneFile), false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("reads screen asynchronously", async () => {

@@ -27,6 +27,7 @@ import {
   closeSurface,
   shellEscape,
   readScreen,
+  completionSuffix,
 } from "./tmux.ts";
 
 import {
@@ -516,6 +517,17 @@ function getArtifactDir(sessionDir: string, sessionId: string): string {
   return join(sessionDir, "artifacts", sessionId);
 }
 
+/**
+ * Per-launch exit-code file written by the launch script (`completionSuffix`)
+ * and consumed by `pollForExit`. Every launch and resume uses a fresh id, so a
+ * leftover file can never finish a later run. Creates the parent directory.
+ */
+function prepareSubagentDoneFile(artifactDir: string, launchId: string): string {
+  const doneFile = join(artifactDir, "subagent-done", `${launchId}.code`);
+  mkdirSync(dirname(doneFile), { recursive: true });
+  return doneFile;
+}
+
 const statusConfig = loadStatusConfig();
 
 function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
@@ -660,6 +672,8 @@ interface RunningSubagent {
   abortController?: AbortController;
   cli?: "pi" | "claude" | "agy";
   sentinelFile?: string;
+  /** Exit-code file written by the launch script after the child exits. */
+  doneFile?: string;
   agyStdoutFile?: string;
   agyStderrFile?: string;
   agyStateFile?: string;
@@ -2058,6 +2072,7 @@ async function launchSubagent(
     if (!surfacePreCreated) {
       await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
     }
+    const doneFile = prepareSubagentDoneFile(artifactDir, id);
     const agyCommand = buildAgyCommand({
       agentRoot: agyState.agentRoot,
       additionalWorkspaceRoots: agyAdditionalWorkspaceRoots(agyState),
@@ -2065,6 +2080,7 @@ async function launchSubagent(
       taskFile,
       stdoutFile,
       stderrFile,
+      doneFile,
       model: effectiveModel ?? null,
       effort: prepared.effectiveThinking ?? null,
     });
@@ -2088,6 +2104,7 @@ async function launchSubagent(
       sessionFile: stdoutFile,
       launchScriptFile,
       cli: "agy",
+      doneFile,
       agyStdoutFile: stdoutFile,
       agyStderrFile: stderrFile,
       agyStateFile: stateFile,
@@ -2157,7 +2174,8 @@ async function launchSubagent(
     cmdParts.push(shellEscape(params.task));
 
     const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
-    const command = `${cdPrefix}${cmdParts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
+    const doneFile = prepareSubagentDoneFile(artifactDir, id);
+    const command = `${cdPrefix}${cmdParts.join(" ")}${completionSuffix(doneFile)}`;
 
     const launchScriptName = `${(params.name || "subagent")
       .toLowerCase()
@@ -2187,6 +2205,7 @@ async function launchSubagent(
       launchScriptFile,
       cli: "claude",
       sentinelFile,
+      doneFile,
       interactive: effectiveInteractive,
       statusState: createStatusState({
         source: "claude",
@@ -2272,7 +2291,8 @@ async function launchSubagent(
   const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
 
   const piCommand = cdPrefix + envPrefix + parts.join(" ");
-  const command = `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
+  const doneFile = prepareSubagentDoneFile(artifactDir, id);
+  const command = `${piCommand}${completionSuffix(doneFile)}`;
   const launchScriptName = `${(params.name || "subagent")
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, "")
@@ -2300,6 +2320,7 @@ async function launchSubagent(
     sessionFile: subagentSessionFile,
     launchScriptFile,
     activityFile,
+    doneFile,
     interactive: effectiveInteractive,
     statusState: createStatusState({
       source: "pi",
@@ -2455,6 +2476,7 @@ async function watchSubagent(
       interval: 1000,
       sessionFile,
       sentinelFile: running.sentinelFile,
+      doneFile: running.doneFile,
       onTick() {
         observeRunningSubagent(running);
         deliverPendingQuestion(running);
@@ -3620,6 +3642,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           try {
             surface = createSurface(name);
             await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
+            const doneFile = prepareSubagentDoneFile(artifactDir, id);
             const command = `cd ${shellEscape(state.cwd)} && ${buildAgyCommand({
               agentRoot: state.agentRoot,
               additionalWorkspaceRoots: agyAdditionalWorkspaceRoots(state),
@@ -3627,6 +3650,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               taskFile,
               stdoutFile,
               stderrFile,
+              doneFile,
               model: state.model,
               effort: state.effort,
               conversationId: state.conversationId,
@@ -3651,6 +3675,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               sessionFile: stdoutFile,
               launchScriptFile,
               cli: "agy",
+              doneFile,
               agyStdoutFile: stdoutFile,
               agyStderrFile: stderrFile,
               agyStateFile: entry.stateFile,
@@ -3826,7 +3851,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // where they did before.
         const resumeCdPrefix = loadout.cwd ? `cd ${shellEscape(loadout.cwd)} && ` : "";
 
-        const command = `${resumeCdPrefix}${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
+        const doneFile = prepareSubagentDoneFile(artifactDir, id);
+        const command = `${resumeCdPrefix}${resumeEnvPrefix}${parts.join(" ")}${completionSuffix(doneFile)}`;
         launchScriptFile = join(
           artifactDir,
           "subagent-scripts",
@@ -3859,6 +3885,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           sessionFile: sessionPath,
           launchScriptFile,
           activityFile,
+          doneFile,
           interactive,
           statusState: createStatusState({
             source: "pi",
