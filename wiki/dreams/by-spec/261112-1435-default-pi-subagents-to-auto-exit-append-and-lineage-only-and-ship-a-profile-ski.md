@@ -59,3 +59,13 @@ Outcome: retained learning
 - **Expected future benefit:** Agents comparing dry-run contents with the allowlist do not flag the shipped skill as unexpected.
 - **Why this tier:** Corrects an existing current-state statement on the page that owns package shape.
 - **Review status:** review pending
+
+## Gamemaster review reconciliation: 261112-1435-default-pi-subagents-to-auto-exit-append-and-lineage-only-and-ship-a-profile-ski
+
+Date: 2026-11-12
+
+Review results:
+
+- `direct` "Promote isolated rerun triage for integration flakes" - kept - flash-reviewer keep (none): recurrence across items 261112-1059 and 261112-1435 holds at `wiki/development.md:34`; alt-reviewer keep (none): both archived verification files record passing isolated reruns. Reviewers were flash-reviewer and alt-reviewer (a read-only DeepSeek profile used instead of the writing `worker` profile).
+- `direct` "Integration fixture list includes the defaults fixture" - kept - flash-reviewer keep (none): stale-fact correction confirmed by `test-defaults.md` omitting the three fields; alt-reviewer keep (none): other fixtures set them and the defaults test exercises the omission. Reviewers were flash-reviewer and alt-reviewer (read-only DeepSeek profile in place of `worker`).
+- `direct` "Package shape includes skills" - kept - flash-reviewer keep (none): `package.json` `files` adds `skills/`; alt-reviewer keep (none): `files` contains `skills/` and `pi.skills` points at `./skills`, so `wiki/development.md:40` was incomplete before. Reviewers were flash-reviewer and alt-reviewer (read-only DeepSeek profile in place of `worker`).
