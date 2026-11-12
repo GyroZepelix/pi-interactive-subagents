@@ -247,3 +247,11 @@ Use this shape for new entries:
 - Disposition: SUPERSEDE `wiki/development.md` "limits publication to runtime source" - `package.json` `files` now includes `skills/`.
 - Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, and ran the memory safety scan.
 - Notes: Pi default semantics were written to `wiki/conventions/agent-profiles.md` during implementation and were not duplicated.
+
+## [2026-11-12] update | Pi system-prompt task opt-in
+
+- Trigger: implementation of `261112-1521-add-system-prompt-task-option-for-pi-profiles` added `system-prompt: task`.
+- Inputs: `pi-extension/subagents/agents.ts`, `pi-extension/subagents/index.ts`, `test/test.ts`, `docs/agent-definitions.md`, and the active work-item plan.
+- Wiki pages changed: `wiki/conventions/agent-profiles.md` and `wiki/log.md`.
+- Verification: `npm test` passed 304 tests; claims checked against the implementation working tree.
+- Notes: replaces the earlier statement that body-in-task routing was no longer available; omitted `system-prompt` still means `append`.

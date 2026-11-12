@@ -53,7 +53,7 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `subagent_agents` | Comma-delimited string or YAML string array | Empty list. A non-empty list grants nested spawning and restricts targets to these effective names. |
 | `auto-exit` | YAML boolean | `true` for Pi when omitted. When true, the child shuts down and reports its final response only after Pi settles automatic retries, recovery, and queued continuation. Set `false` for a hands-on child that stays in its pane until the user exits it. |
 | `interactive` | YAML boolean | Inverse of the resolved `auto-exit` (so `false` for a Pi profile that omits both). Controls whether stall and recovery transitions wake the parent; the widget still updates. |
-| `system-prompt` | `append` or `replace` | `append` for Pi when omitted. The body is passed through the corresponding Pi system-prompt flag. See [Body routing](#body-routing). |
+| `system-prompt` | `append`, `replace`, or `task` | `append` for Pi when omitted. `append` and `replace` pass the body through the corresponding Pi system-prompt flag; `task` places it in the child's first message ahead of the task. See [Body routing](#body-routing). |
 | `session-mode` | `standalone`, `lineage-only`, or `fork` | `lineage-only` for Pi when omitted. See [Session modes](#session-modes). |
 | `cwd` | Non-empty string | Active context cwd. Absolute values are used directly. Relative profile values resolve from the global Pi agent directory; a runtime `cwd` override resolves from the active context cwd. |
 | `cli` | `pi`, `claude`, or `agy` | `pi`. See [Antigravity CLI](#antigravity-cli) and [Claude CLI limitations](#claude-cli-limitations). |
@@ -76,7 +76,7 @@ These defaults changed. Earlier releases treated an omitted `auto-exit` as `fals
 
 - `auto-exit: false` for a hands-on child that waits for the user (it is then interactive by default).
 - `session-mode: standalone` for a child session without a parent link.
-- `system-prompt: replace` when the body should replace Pi's system prompt. Routing a Pi profile body into the task wrapper is no longer available.
+- `system-prompt: task` to place the body in the task wrapper (the old omitted behavior), or `system-prompt: replace` when the body should replace Pi's system prompt.
 
 Only actual YAML booleans are accepted. For example, `auto-exit: true` is valid and `auto-exit: "true"` is not.
 
@@ -214,6 +214,7 @@ New Pi capability snapshots store only each server's ordered name, canonical sou
 
 - With `system-prompt: append` (the Pi default when omitted), the body is written to a private launch artifact and passed with `--append-system-prompt`, keeping Pi's own system prompt.
 - With `system-prompt: replace`, it is passed with `--system-prompt` and replaces Pi's system prompt.
+- With `system-prompt: task`, no system-prompt flag is passed. The body is prepended to the child's first user message, ahead of the task: inside the task wrapper in `standalone` and `lineage-only` modes, and before the direct task in `fork` mode. Use it when the role text must survive a provider or extension that rewrites or replaces the system prompt, or when the body is task framing rather than standing identity. The snapshot stores no separate identity; a resumed child keeps the body through its existing conversation.
 - In Pi `standalone` and `lineage-only` modes, the task is wrapped with lifecycle instructions and delivered through a private task artifact. In Pi `fork` mode, inherited conversation context supplies the surrounding context and the task is delivered directly.
 - For `cli: claude`, the body is passed to Claude Code as an appended system prompt.
 - For `cli: agy`, the body is always the generated primary agent's system prompt. `system-prompt` is unsupported.

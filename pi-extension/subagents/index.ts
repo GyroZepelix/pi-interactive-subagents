@@ -71,6 +71,7 @@ import {
   formatAgentDiagnostic,
   type AgentDefinition,
   type AgentModelChainTarget,
+  type IdentitySystemPromptMode,
   type SubagentSessionMode,
 } from "./agents.ts";
 import {
@@ -359,7 +360,7 @@ function applyPiProfileDefaults(agent: AgentDefinition): AgentDefinition {
 function buildSubagentTask(params: {
   task: string;
   body?: string;
-  systemPromptMode?: "append" | "replace";
+  systemPromptMode?: IdentitySystemPromptMode;
   autoExit: boolean;
   inheritsConversationContext: boolean;
 }): string {
@@ -982,7 +983,8 @@ interface PreparedSingleAgentLaunch {
   launchBehavior: ReturnType<typeof resolveLaunchBehavior>;
   grantSpawning: boolean;
   identity: string | null;
-  systemPromptMode?: AgentDefinition["systemPromptMode"];
+  /** System-prompt placement of the body; undefined when it rides in the task. */
+  systemPromptMode?: IdentitySystemPromptMode;
   fullTask: string;
   loadout: SubagentLoadout | null;
   capabilities: PreparedAgentSandbox;
@@ -1117,7 +1119,10 @@ function prepareAgentLaunch(
   const launchBehavior = resolveLaunchBehavior(normalizedParams, agent);
   const grantSpawning = sandbox.grantSpawning;
   const identity = agent.body ?? null;
-  const systemPromptMode = agent.systemPromptMode;
+  // `task` routes the body into the first user message, exactly like an unset
+  // mode: no system-prompt flag and a null loadout identity.
+  const systemPromptMode: IdentitySystemPromptMode | undefined =
+    agent.systemPromptMode === "task" ? undefined : agent.systemPromptMode;
   const fullTask = buildSubagentTask({
     task: normalizedParams.task,
     body: agent.body,

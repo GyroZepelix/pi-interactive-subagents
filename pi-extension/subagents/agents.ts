@@ -35,7 +35,9 @@ import {
 
 export type AgentSource = "global" | "project";
 export type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
-export type SystemPromptMode = "append" | "replace";
+export type SystemPromptMode = "append" | "replace" | "task";
+/** Modes that place the profile body in the child system prompt. */
+export type IdentitySystemPromptMode = Exclude<SystemPromptMode, "task">;
 export type AgentCli = "pi" | "claude" | "agy";
 
 export interface AgentExtensionSelector {
@@ -144,7 +146,7 @@ const THINKING_VALUES = new Set([
   "xhigh",
   "max",
 ]);
-const SYSTEM_PROMPT_VALUES = new Set(["append", "replace"]);
+const SYSTEM_PROMPT_VALUES = new Set(["append", "replace", "task"]);
 const SESSION_MODE_VALUES = new Set(["standalone", "lineage-only", "fork"]);
 const CLI_VALUES = new Set(["pi", "claude", "agy"]);
 const BUILTIN_TOOL_VALUES = new Set([

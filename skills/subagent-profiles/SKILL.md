@@ -37,7 +37,7 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 | `subagent_agents` | empty (no nesting) | The child may spawn other profiles; lists the exact names it may spawn. Never put spawning tools in `builtin-tools`. |
 | `auto-exit` | `true` for Pi | Set `false` only for a hands-on child the user works in directly; it then waits in its pane until the user exits. |
 | `interactive` | inverse of resolved `auto-exit` | Rarely. It only controls whether stall and recovery transitions wake the parent. |
-| `system-prompt` | `append` for Pi | `append` adds the body to Pi's system prompt and keeps Pi's own rules. Use `replace` only when the body must fully replace Pi's system prompt. |
+| `system-prompt` | `append` for Pi | `append` adds the body to Pi's system prompt and keeps Pi's own rules. Use `replace` only when the body must fully replace Pi's system prompt. Use `task` to put the body in the child's first message ahead of the task (no system-prompt flag), for example when a provider or extension may replace the system prompt. |
 | `session-mode` | `lineage-only` for Pi | `lineage-only` costs nothing and nests the child under the parent in `/resume`. Use `standalone` for an unlinked session. Use `fork` only when the child truly needs the parent conversation; it pays for that copied context on every request. |
 | `cwd` | active context cwd | The child should start elsewhere. Relative profile values resolve from the global Pi agent directory. |
 | `cli` | `pi` | Use `agy` or `claude` for those harnesses (see restrictions). |
@@ -46,7 +46,7 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 
 ### Pi defaults changed
 
-For Pi profiles and `cli: pi` chain targets, omitted `auto-exit`, `system-prompt`, and `session-mode` now mean `true`, `append`, and `lineage-only`. Earlier releases meant `false` (child waits forever after answering), "body in the task", and `standalone`. Do not add these three lines just to restate the defaults; add them only to opt out. Routing a Pi body into the task is no longer available.
+For Pi profiles and `cli: pi` chain targets, omitted `auto-exit`, `system-prompt`, and `session-mode` now mean `true`, `append`, and `lineage-only`. Earlier releases meant `false` (child waits forever after answering), "body in the task", and `standalone`. Do not add these three lines just to restate the defaults; add them only to opt out. Set `system-prompt: task` to keep the old body-in-task routing.
 
 ## Harness restrictions
 

@@ -3497,6 +3497,81 @@ describe("subagent discovery", () => {
       assert.equal(explicitInteractive.loadout?.autoExit, true);
     });
 
+    it("routes a system-prompt: task body into the first message without a system-prompt flag", () => {
+      const parsed = parseAgentDefinition(
+        "---\nname: task-routed\nbuiltin-tools: [read]\nsystem-prompt: task\n---\nRole body.",
+        "/tmp/task-routed.md",
+        "global",
+      );
+      assert.deepEqual(parsed.diagnostics, []);
+      assert.equal(parsed.agent?.systemPromptMode, "task");
+      assert.equal(testApi.applyPiProfileDefaults(parsed.agent as any).systemPromptMode, "task");
+
+      const launch = prepareFromMarkdown(
+        "---\nname: task-routed\nbuiltin-tools: [read]\nsystem-prompt: task\n---\nRole body.",
+      );
+      assert.equal(launch.systemPromptMode, undefined);
+      assert.equal(launch.launchBehavior.sessionMode, "lineage-only");
+      assert.ok(launch.fullTask.startsWith("\n\nRole body.\n\nComplete your task autonomously"));
+      assert.ok(launch.fullTask.indexOf("Role body.") < launch.fullTask.indexOf("Do the work"));
+      assert.equal(launch.loadout?.systemPromptMode, null);
+      assert.equal(launch.loadout?.identity, null);
+
+      const artifactDir = createTestDir();
+      try {
+        const parts: string[] = [];
+        testApi.applySandboxToParts(parts, launch.loadout, {
+          artifactDir,
+          name: "Runtime",
+          artifactId: "task-routed-launch",
+        });
+        assert.equal(parts.includes("--append-system-prompt"), false);
+        assert.equal(parts.includes("--system-prompt"), false);
+      } finally {
+        rmSync(artifactDir, { recursive: true, force: true });
+      }
+
+      const standalone = prepareFromMarkdown(
+        "---\nname: task-standalone\nbuiltin-tools: [read]\nsystem-prompt: task\nsession-mode: standalone\n---\nRole body.",
+      );
+      assert.match(standalone.fullTask, /^\n\nRole body\.\n\nComplete your task autonomously/);
+      assert.equal(standalone.loadout?.identity, null);
+
+      const fork = prepareFromMarkdown(
+        "---\nname: task-fork\nbuiltin-tools: [read]\nsystem-prompt: task\nsession-mode: fork\n---\nRole body.",
+      );
+      assert.equal(fork.launchBehavior.taskDelivery, "direct");
+      assert.equal(fork.fullTask, "Role body.\n\nDo the work");
+      assert.equal(fork.loadout?.systemPromptMode, null);
+      assert.equal(fork.loadout?.identity, null);
+    });
+
+    it("accepts system-prompt: task on Pi model-chain targets", () => {
+      const markdown =
+        "---\nname: chain-task\nbuiltin-tools: [read]\nmodel-chain:\n  - { cli: pi, model: openai/one, system-prompt: task }\n  - { cli: pi, model: openai/two }\n---\nShared role";
+      const parsed = parseAgentDefinition(markdown, "/tmp/chain-task.md", "global");
+      assert.deepEqual(parsed.diagnostics, []);
+      assert.deepEqual(parsed.agent?.modelChain?.map((target) => target.systemPromptMode), ["task", undefined]);
+      const prepared = prepareFromMarkdown(markdown) as any;
+      assert.deepEqual(prepared.chainTargets.map((entry: any) => ({
+        systemPromptMode: entry.launch.loadout?.systemPromptMode,
+        identity: entry.launch.loadout?.identity,
+        bodyInTask: entry.launch.fullTask.includes("Shared role"),
+      })), [
+        { systemPromptMode: null, identity: null, bodyInTask: true },
+        { systemPromptMode: "append", identity: "Shared role", bodyInTask: false },
+      ]);
+    });
+
+    it("still rejects unknown system-prompt values", () => {
+      const parsed = parseAgentDefinition(
+        "---\nname: bad-mode\nsystem-prompt: prepend\n---\nRole body.",
+        "/tmp/bad-mode.md",
+        "global",
+      );
+      assert.ok(parsed.diagnostics.some((entry) => entry.field === "system-prompt"));
+    });
+
     it("defaults Pi model-chain targets and leaves AGY targets standalone", () => {
       const prepared = prepareFromMarkdown(
         "---\nname: chain-defaults\nbuiltin-tools: [read]\nmodel-chain:\n  - { cli: agy, model: gemini }\n  - { cli: pi, model: openai/one }\n  - { cli: pi, model: openai/two, session-mode: standalone, system-prompt: replace }\n---\nShared role",

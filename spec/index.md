@@ -36,6 +36,7 @@ Repository-local planning and execution artifacts.
 | [Fix stale ctx crash in subagent result renderer](./archive/261110-1508-fix-stale-ctx-crash-in-subagent-result-renderer/plan.md) | work-item | completed | 2026-11-10 |
 | [Detect subagent completion without screen scraping and fix AGY SSH login](./archive/261112-1059-detect-subagent-completion-without-screen-scraping-and-fix-agy-ssh-login/plan.md) | work-item | completed | 2026-11-12 |
 | [Default Pi subagents to auto-exit, append, and lineage-only, and ship a profile skill](./archive/261112-1435-default-pi-subagents-to-auto-exit-append-and-lineage-only-and-ship-a-profile-ski/plan.md) | work-item | completed | 2026-11-12 |
+| [Add system-prompt task option for Pi profiles](./archive/261112-1521-add-system-prompt-task-option-for-pi-profiles/plan.md) | work-item | completed | 2026-11-12 |
 <!-- spec-items:archive:end -->
 
 ## Templates
