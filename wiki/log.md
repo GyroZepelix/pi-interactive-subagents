@@ -255,3 +255,20 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/conventions/agent-profiles.md` and `wiki/log.md`.
 - Verification: `npm test` passed 304 tests; claims checked against the implementation working tree.
 - Notes: replaces the earlier statement that body-in-task routing was no longer available; omitted `system-prompt` still means `append`.
+
+## [2026-11-18] update | Subagent capability registries and skill semantics
+
+- Trigger: implementation of `261118-1208-subagent-only-capability-registry-for-mcp-extensions-and-skills`.
+- Inputs: `pi-extension/subagents/{agents,index,mcp-config,session}.ts`, `docs/agent-definitions.md`, the active plan and verification.
+- Wiki pages changed: `wiki/conventions/agent-profiles.md`, `wiki/architecture.md`, and `wiki/log.md`.
+- Verification: `npm test` 311/311, MCP capability integration 4/4, lifecycle integration 8/8; claims checked against the implementation working tree.
+- Notes: replaces ambient-only package/MCP lookup statements and the startup `/skill:` skill meaning.
+
+## [2026-11-18] dream | Gamemaster checkpoint 261118-1208 direct
+
+- Trigger: `/dream` run after Gamemaster checkpoint: 261118-1208-subagent-only-capability-registry-for-mcp-extensions-and-skills/direct.
+- Inputs: current conversation, `test/integration/mcp-capability.test.ts`, Pi `extensions/mcp/oauth.js`, archived plan, verification, and outcome of the item, `wiki/development.md`.
+- Wiki pages changed: `wiki/development.md`. The run's episode is discoverable through `wiki/dreams/episodes.jsonl`.
+- Disposition: MERGE `wiki/development.md` "starts isolated Pi SDK sessions without prompting a model" - added registry-server coverage and the seeded OAuth store key shape.
+- Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, ran memory safety scan.
+- Notes: registry and skill semantics were written to `wiki/conventions/agent-profiles.md` during implementation and were not duplicated; no lint-queue entries.

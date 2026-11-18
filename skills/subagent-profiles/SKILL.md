@@ -22,6 +22,13 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 - There is no way yet to make a project use only its own profiles: global profiles stay visible unless overridden by name.
 - Malformed YAML, unknown keys, wrong types, or invalid values exclude the whole profile. Booleans must be real YAML booleans (`true`, not `"true"`).
 
+## Subagent-only registries
+
+- A registry holds packages, MCP servers, and skills that only subagents use; the parent session never reads it. Global: `<global agents dir>/.pi/` (always trusted). Project: `<project>/.pi/agents/.pi/` (trusted projects only).
+- It uses Pi's project layout (`settings.json`, `mcp.json`, `skills/`). Manage it from the agents directory with `pi install -l`, `pi config --local`, `pi mcp add -l`, `pi mcp login`, and `pi update`, after starting `pi` there once and trusting the directory.
+- Name registry entries in the normal `extensions`, `mcp-servers`, and `skills` fields. A project profile checks its project registry, then the global registry; a global profile checks the global registry. The first registry hit wins over ambient settings; otherwise ambient rules apply unchanged.
+- Registry `mcp.json` entries cannot use `auth: { provider }`. A disabled registry entry invalidates the profile rather than falling back.
+
 ## Fields
 
 | Field | Default | Use it when |
@@ -33,7 +40,8 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 | `builtin-tools` | empty (no tools) | Always list the needed tools. Pi: `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, `ls`, `codemode`. Omitted means no built-ins, not Pi's default set. |
 | `mcp-servers` | empty | A flat Pi profile needs exact configured MCP servers; each grants the complete server. |
 | `extensions` | empty | The role needs tools from a configured Pi package: `- package: <exact source>` with optional `paths: [...]`. Extensions run as trusted code. |
-| `skills` (alias `skill`) | empty | The child should get specific skills. Use one alias, not both. |
+| `skills` (alias `skill`) | empty | The child should be able to discover specific skills (registry first, then ambient). Each is passed with `--skill`; nothing is invoked at startup. Unknown names invalidate the profile. Use one alias, not both. |
+| `inherit-skills` | `true` | Set `false` so a Pi child loads only the listed skills (`--no-skills`). With `true`, a same-named ambient skill wins over a registry skill. Flat Pi profiles only. |
 | `subagent_agents` | empty (no nesting) | The child may spawn other profiles; lists the exact names it may spawn. Never put spawning tools in `builtin-tools`. |
 | `auto-exit` | `true` for Pi | Set `false` only for a hands-on child the user works in directly; it then waits in its pane until the user exits. |
 | `interactive` | inverse of resolved `auto-exit` | Rarely. It only controls whether stall and recovery transitions wake the parent. |
@@ -44,15 +52,19 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 | `disable-model-invocation` | `false` | Set `true` to hide the profile from `subagents_list`; an exact permitted name can still be spawned directly. |
 | `model-chain` | none | A read-only role should fall back across ordered AGY/Pi targets on provider exhaustion. |
 
+### Skills changed
+
+`skills` used to send `/skill:<name>` startup prompts that invoked each skill. It now only makes the skills discoverable. If a child must always follow a skill, say so in the body.
+
 ### Pi defaults changed
 
 For Pi profiles and `cli: pi` chain targets, omitted `auto-exit`, `system-prompt`, and `session-mode` now mean `true`, `append`, and `lineage-only`. Earlier releases meant `false` (child waits forever after answering), "body in the task", and `standalone`. Do not add these three lines just to restate the defaults; add them only to opt out. Set `system-prompt: task` to keep the old body-in-task routing.
 
 ## Harness restrictions
 
-- `cli: agy`: only `name`, `description`, `model`, `thinking`, `cwd`, `disable-model-invocation`, `cli`, `builtin-tools`, and the body. `builtin-tools` only `read`, `grep`, `find`, `ls`. Any other field, even empty, is invalid. Sessions are standalone and one-shot.
-- `cli: claude`: `builtin-tools`, `mcp-servers`, and `extensions` are invalid, even when empty. Pi-specific fields (`skills`, `thinking`, `session-mode`, `system-prompt`, `subagent_agents`) do not configure Claude Code, and the Pi defaults above do not apply. Finished Claude children cannot be resumed.
-- `model-chain`: shared top-level fields are only `name`, `description`, `builtin-tools` (`read`, `grep`, `find`, `ls`), `cwd`, `disable-model-invocation`, and the body. Each target has `cli` (`agy` or `pi`) and `model`; AGY targets may add `thinking`; Pi targets may add `thinking`, `extensions`, `session-mode`, and `system-prompt`. Targets always auto-exit.
+- `cli: agy`: only `name`, `description`, `model`, `thinking`, `cwd`, `disable-model-invocation`, `cli`, `builtin-tools`, and the body (no `skills` or `inherit-skills`). `builtin-tools` only `read`, `grep`, `find`, `ls`. Any other field, even empty, is invalid. Sessions are standalone and one-shot.
+- `cli: claude`: `builtin-tools`, `mcp-servers`, `extensions`, and `inherit-skills` are invalid, even when empty. Pi-specific fields (`skills`, `thinking`, `session-mode`, `system-prompt`, `subagent_agents`) do not configure Claude Code, and the Pi defaults above do not apply. Finished Claude children cannot be resumed.
+- `model-chain`: shared top-level fields are only `name`, `description`, `builtin-tools` (`read`, `grep`, `find`, `ls`), `cwd`, `disable-model-invocation`, and the body. Each target has `cli` (`agy` or `pi`) and `model`; AGY targets may add `thinking`; Pi targets may add `thinking`, `extensions`, `session-mode`, and `system-prompt`. `skills` and `inherit-skills` are invalid. Targets always auto-exit.
 
 ## Example
 

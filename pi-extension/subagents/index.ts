@@ -902,18 +902,6 @@ function updateWidget() {
   );
 }
 
-/**
- * Build the positional prompt args for a Pi CLI subagent launch.
- *
- * In artifact-backed launches (lineage-only, standalone), Pi's buildInitialMessage()
- * concatenates @file content with messages[0] into one initial prompt. That breaks
- * /skill: expansion because the message no longer starts with "/skill:". Only
- * messages[1..] are sent as separate follow-up prompts where /skill: is recognized.
- *
- * When there are skill prompts AND artifact-backed delivery, we prepend an empty
- * first positional message so that /skill: args land in messages[1..] and arrive
- * as standalone prompts in the child session.
- */
 const SUBAGENT_CONTROL_TOOLS = ["ask_question"] as const;
 
 function buildVersionedCapabilityEnvironment(
@@ -924,6 +912,8 @@ function buildVersionedCapabilityEnvironment(
 ): string[] {
   return [
     `${SUBAGENT_BUILTIN_TOOLS_ENV}=${shellEscape(builtinTools.join(","))}`,
+    // Versions 2 and 3 loadouts share capability protocol 2: registry scopes
+    // only extend the canonical MCP reference shape the child re-verifies.
     `${SUBAGENT_CAPABILITY_VERSION_ENV}=${mcpServerReferences === undefined ? "1" : "2"}`,
     `PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`,
     ...(mcpServerReferences === undefined
@@ -956,8 +946,8 @@ function buildResumeCapabilityEnvironment(loadout: SubagentLoadout): string[] {
     return buildVersionedCapabilityEnvironment(
       loadout.builtinTools,
       allowedAgents,
-      loadout.version === 2 ? loadout.mcpServerReferences : undefined,
-      loadout.version === 2 ? loadout.mcpSupportTools : undefined,
+      loadout.version === 1 ? undefined : loadout.mcpServerReferences,
+      loadout.version === 1 ? undefined : loadout.mcpSupportTools,
     );
   }
   return [`PI_SUBAGENT_ALLOWED=${shellEscape(allowedAgents.join(","))}`];
@@ -969,12 +959,15 @@ interface PreparedAgentSandbox {
   grantSpawning: boolean;
   mcpServerReferences: McpServerReference[];
   mcpSupportTools: McpSupportTool[];
+  /** Exact profile skill files passed to a Pi child with `--skill`. */
+  skillPaths: string[];
+  /** False adds `--no-skills` so only `skillPaths` load. */
+  inheritSkills: boolean;
 }
 
 interface PreparedSingleAgentLaunch {
   harness: "pi" | "claude" | "agy";
   effectiveModel?: string;
-  effectiveSkills: readonly string[];
   effectiveThinking?: AgentDefinition["thinking"];
   effectiveInteractive: boolean;
   effectiveCwd: string | null;
@@ -1017,6 +1010,16 @@ function prepareAgentSandbox(
     };
   }
 
+  const skillPaths = [...(agent.skillPaths ?? [])];
+  const missingSkill = skillPaths.find((skillPath) => !isExistingFile(skillPath));
+  if (missingSkill) {
+    return {
+      error:
+        `Agent "${agent.name}" resolves skill "${missingSkill}", but that file is no longer available. ` +
+        `Restore the skill, or update skills in ${agent.filePath}.`,
+    };
+  }
+
   const grantSpawning = agent.subagentAgents.length > 0;
   const selectsSpawningExtension = requestedExtensionPaths.some(
     (extensionPath) => resolve(extensionPath) === SPAWNING_EXTENSION_PATH,
@@ -1038,6 +1041,8 @@ function prepareAgentSandbox(
       grantSpawning,
       mcpServerReferences: [...(agent.mcpServerReferences ?? [])],
       mcpSupportTools: [...(agent.mcpSupportTools ?? [])],
+      skillPaths,
+      inheritSkills: agent.inheritSkills ?? true,
     },
   };
 }
@@ -1082,6 +1087,8 @@ function prepareAgentLaunch(
         extensions: target.extensions,
         extensionPaths: target.extensionPaths,
         skills: [],
+        skillPaths: [],
+        inheritSkills: undefined,
         subagentAgents: [],
         autoExit: true,
         interactive: false,
@@ -1107,7 +1114,6 @@ function prepareAgentLaunch(
 
   agent = applyPiProfileDefaults(agent);
   const effectiveModel = normalizedParams.model ?? agent.model;
-  const effectiveSkills = agent.skills;
   const effectiveThinking = agent.thinking;
   const effectiveInteractive = resolveEffectiveInteractive(normalizedParams, agent);
   const { effectiveCwd, effectiveAgentDir } = resolveSubagentPaths(
@@ -1144,9 +1150,7 @@ function prepareAgentLaunch(
       return { error: error instanceof Error ? error.message : String(error) };
     }
   }
-  const loadout: SubagentLoadout | null = harness !== "pi" ? null : {
-    version: 2,
-    capabilityMode: "mcp-capabilities",
+  const loadoutBase = {
     agent: normalizedParams.agent ?? null,
     builtinTools: [...sandbox.builtinTools],
     extensionPaths: [...sandbox.extensionPaths],
@@ -1162,6 +1166,25 @@ function prepareAgentLaunch(
     cwd: targetCwdForSession,
     agentDir: effectiveAgentDir,
   };
+  // Version 3 is written only when registry or skill state must be replayed,
+  // so profiles without it keep byte-identical version 2 snapshots.
+  const needsRegistryLoadout =
+    sandbox.skillPaths.length > 0 ||
+    !sandbox.inheritSkills ||
+    sandbox.mcpServerReferences.some((reference) =>
+      reference.scope === "global-registry" || reference.scope === "project-registry"
+    );
+  const loadout: SubagentLoadout | null = harness !== "pi"
+    ? null
+    : needsRegistryLoadout
+      ? {
+        version: 3,
+        capabilityMode: "registry-capabilities",
+        ...loadoutBase,
+        skillPaths: [...sandbox.skillPaths],
+        inheritSkills: sandbox.inheritSkills,
+      }
+      : { version: 2, capabilityMode: "mcp-capabilities", ...loadoutBase };
   if (loadout && !isSubagentLoadout(loadout)) {
     return {
       error:
@@ -1184,7 +1207,6 @@ function prepareAgentLaunch(
     launch: {
       harness,
       effectiveModel,
-      effectiveSkills,
       effectiveThinking,
       effectiveInteractive,
       effectiveCwd,
@@ -1256,7 +1278,7 @@ function validateLoadoutExtensionPaths(loadout: SubagentLoadout): string | null 
         realpathSync(runtimeControlPath),
         SPAWNING_EXTENSION_PATH,
         realpathSync(activationControlPath),
-        ...(loadout.version === 2
+        ...(loadout.version !== 1
           ? [realpathSync(join(SUBAGENTS_DIR, "subagent-mcp-control.ts"))]
           : []),
       ]);
@@ -1274,7 +1296,18 @@ function validateLoadoutExtensionPaths(loadout: SubagentLoadout): string | null 
 function validateLoadoutPreflight(loadout: SubagentLoadout): string | null {
   const extensionError = validateLoadoutExtensionPaths(loadout);
   if (extensionError) return extensionError;
-  if (!("version" in loadout) || loadout.version !== 2) return null;
+  if (!("version" in loadout) || loadout.version === 1) return null;
+
+  if (loadout.version === 3) {
+    for (const skillPath of loadout.skillPaths) {
+      if (!isExistingFile(skillPath)) return `sandbox skill is missing: ${skillPath}`;
+      try {
+        if (realpathSync(skillPath) !== skillPath) return `sandbox skill path is not canonical: ${skillPath}`;
+      } catch {
+        return `sandbox skill path could not be canonicalized: ${skillPath}`;
+      }
+    }
+  }
 
   const verified = verifyMcpServerReferences(loadout.mcpServerReferences);
   if ("errors" in verified) return `MCP capability identity check failed: ${verified.errors.join("; ")}`;
@@ -1352,7 +1385,14 @@ function applySandboxToParts(
     parts.push("--no-extensions", "--no-builtin-tools");
     if (loadout.grantSpawning) parts.push("-e", shellEscape(SPAWNING_EXTENSION_PATH));
 
-    if (loadout.version === 2) {
+    if (loadout.version === 3) {
+      if (!loadout.inheritSkills) parts.push("--no-skills");
+      for (const skillPath of loadout.skillPaths) {
+        parts.push("--skill", shellEscape(skillPath));
+      }
+    }
+
+    if (loadout.version !== 1) {
       const hasMcp = loadout.mcpServerReferences.length > 0;
       if (hasMcp || loadout.builtinTools.includes("codemode")) {
         parts.push("-e", shellEscape("builtin:codemode"));
@@ -1374,22 +1414,6 @@ function applySandboxToParts(
   for (const extensionPath of loadout.extensionPaths) {
     parts.push("-e", shellEscape(extensionPath));
   }
-}
-
-function buildPiPromptArgs(params: {
-  effectiveSkills?: readonly string[];
-  taskDelivery: "direct" | "artifact";
-  taskArg: string;
-}): string[] {
-  const skillPrompts = (params.effectiveSkills ?? []).map((skill) => `/skill:${skill}`);
-
-  const needsSeparator = params.taskDelivery === "artifact" && skillPrompts.length > 0;
-
-  return [
-    ...(needsSeparator ? [""] : []),
-    ...skillPrompts,
-    params.taskArg,
-  ];
 }
 
 function activityLabel(activity: SubagentActivityState): string | undefined {
@@ -1964,7 +1988,6 @@ export const __test__ = {
   buildArtifactPath,
   applySandboxToParts,
   buildResumeCapabilityEnvironment,
-  buildPiPromptArgs,
   formatWidgetRightLabel,
   observeRunningSubagent,
   activityAcknowledgesReply,
@@ -2024,7 +2047,6 @@ async function launchSubagent(
   const {
     harness,
     effectiveModel,
-    effectiveSkills,
     effectiveInteractive,
     effectiveCwd,
     effectiveAgentDir,
@@ -2283,7 +2305,8 @@ async function launchSubagent(
   envParts.push(`PI_SUBAGENT_SURFACE=${shellEscape(surface)}`);
   const envPrefix = envParts.join(" ") + " ";
 
-  // Pass task and skill prompts to the sub-agent.
+  // Pass the task to the sub-agent. Profile skills are discoverable through
+  // `--skill` flags in the sandbox and are never invoked at startup.
   // Only full-context fork mode gets a direct task argument because it already
   // inherits the parent conversation. Blank-session modes use artifact-backed
   // handoff so the wrapper instructions arrive as the initial user message.
@@ -2304,13 +2327,7 @@ async function launchSubagent(
     taskArg = `@${artifactPath}`;
   }
 
-  for (const promptArg of buildPiPromptArgs({
-    effectiveSkills,
-    taskDelivery: launchBehavior.taskDelivery,
-    taskArg,
-  })) {
-    parts.push(shellEscape(promptArg));
-  }
+  parts.push(shellEscape(taskArg));
 
   // Resolve cwd — param overrides agent default, supports absolute and relative paths.
   // This was already computed above so session placement, PI_CODING_AGENT_DIR, and cd agree.
@@ -3803,7 +3820,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (extensionReplayError) {
           const err =
             `Cannot safely resume "${requestedName}": ${extensionReplayError}. ` +
-            `Restore the exact extension file or spawn a fresh subagent.`;
+            `Restore the exact extension, skill, or MCP configuration, or spawn a fresh subagent.`;
           return { content: [{ type: "text" as const, text: err }], details: { error: err } };
         }
 

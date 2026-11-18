@@ -7,7 +7,16 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
-export type McpConfigScope = "global" | "project";
+/**
+ * Scope of the file that supplied a server. Registry scopes name the
+ * subagent-only capability registries beside the profile directories
+ * (`<agents dir>/.pi/mcp.json`); the parent session never reads them.
+ */
+export type McpConfigScope = "global" | "project" | "global-registry" | "project-registry";
+export type McpRegistryScope = Extract<McpConfigScope, "global-registry" | "project-registry">;
+const MCP_CONFIG_SCOPES = new Set<string>(["global", "project", "global-registry", "project-registry"]);
+/** Scopes accepted by snapshots written before capability registries existed. */
+export const AMBIENT_MCP_CONFIG_SCOPES: ReadonlySet<McpConfigScope> = new Set(["global", "project"]);
 export type McpSupportTool = "codemode" | "tool-search";
 
 export interface McpServerReference {
@@ -39,6 +48,7 @@ export interface McpConfigCatalogOptions {
 }
 
 type JsonRecord = Record<string, unknown>;
+export type McpConfigSource = ConfigSource;
 type ConfigSource = {
   path: string;
   scope: McpConfigScope;
@@ -47,6 +57,8 @@ type ConfigSource = {
 };
 
 export interface McpConfigCatalog {
+  /** Ordered registry sources consulted before ambient sources (first hit wins). */
+  registries?: readonly ConfigSource[];
   global: ConfigSource;
   project: ConfigSource | null;
 }
@@ -327,7 +339,7 @@ export function validateAndNormalizeMcpServerConfig(
     ) {
       return { error: "auth must contain exactly one non-empty provider string" };
     }
-    if (scope === "project") return { error: "auth is allowed only in the global mcp.json" };
+    if (scope !== "global") return { error: "auth is allowed only in the global mcp.json" };
     if (url.protocol !== "https:" && !LOOPBACK_HOSTS.has(url.hostname)) {
       return { error: "auth requires HTTPS or a loopback HTTP URL" };
     }
@@ -370,7 +382,8 @@ export function isCanonicalMcpServerReference(value: unknown): value is McpServe
     typeof value.source === "string" &&
     isAbsolute(value.source) &&
     resolve(value.source) === value.source &&
-    (value.scope === "global" || value.scope === "project") &&
+    typeof value.scope === "string" &&
+    MCP_CONFIG_SCOPES.has(value.scope) &&
     typeof value.digest === "string" &&
     /^[a-f0-9]{64}$/.test(value.digest)
   );
@@ -378,8 +391,10 @@ export function isCanonicalMcpServerReference(value: unknown): value is McpServe
 
 export function areCanonicalMcpServerReferences(
   values: unknown,
+  allowedScopes?: ReadonlySet<McpConfigScope>,
 ): values is McpServerReference[] {
   if (!Array.isArray(values) || !values.every(isCanonicalMcpServerReference)) return false;
+  if (allowedScopes && values.some((reference) => !allowedScopes.has(reference.scope))) return false;
   const names = values.map((reference) => reference.name);
   if (new Set(names).size !== names.length) return false;
   const namespaces = names.map(namespace);
@@ -482,6 +497,15 @@ export function verifyMcpServerReferences(
   };
 }
 
+/**
+ * Read one subagent-only registry `mcp.json` (`<agents dir>/.pi/mcp.json`).
+ * A missing file is an empty registry; invalid content is reported only to
+ * profiles that consult this registry.
+ */
+export function loadMcpRegistrySource(registryRoot: string, scope: McpRegistryScope): ConfigSource {
+  return readConfigSource(join(registryRoot, "mcp.json"), scope);
+}
+
 /** Read only the ambient MCP file identities and literal JSON values for canonical profile resolution. */
 export function loadMcpConfigCatalog(options: McpConfigCatalogOptions): McpConfigCatalog {
   const global = readConfigSource(join(options.agentDir ?? getAgentDir(), "mcp.json"), "global");
@@ -495,10 +519,21 @@ function namespace(name: string): string {
   return name.replace(/-/g, "_");
 }
 
-function effectiveNames(catalog: McpConfigCatalog): string[] {
-  if (!catalog.global.entries || (catalog.project && !catalog.project.entries)) return [];
-  const names = new Set(Object.keys(catalog.global.entries));
-  for (const name of Object.keys(catalog.project?.entries ?? {})) names.add(name);
+/** Sources in lookup order: registries first, then the trusted project, then global. */
+function orderedSources(catalog: McpConfigCatalog): ConfigSource[] {
+  return [
+    ...(catalog.registries ?? []),
+    ...(catalog.project ? [catalog.project] : []),
+    catalog.global,
+  ];
+}
+
+function effectiveNames(sources: readonly ConfigSource[]): string[] {
+  if (sources.some((source) => !source.entries)) return [];
+  const names = new Set<string>();
+  for (const source of sources) {
+    for (const name of Object.keys(source.entries ?? {})) names.add(name);
+  }
   return [...names];
 }
 
@@ -509,12 +544,13 @@ export function resolveMcpServerReferences(
 ): McpCapabilityResolution | { errors: string[] } {
   if (selectedNames.length === 0) return { serverReferences: [], supportTools: [] };
   const errors: string[] = [];
-  for (const source of [catalog.global, catalog.project].filter((entry): entry is ConfigSource => entry !== null)) {
+  const sources = orderedSources(catalog);
+  for (const source of sources) {
     if (source.error) errors.push(`${source.path}: ${source.error}`);
   }
   if (errors.length > 0) return { errors };
 
-  const allNames = effectiveNames(catalog);
+  const allNames = effectiveNames(sources);
   const references: McpServerReference[] = [];
   const selectedNamespaces = new Map<string, string>();
   let needsCodemode = false;
@@ -541,10 +577,11 @@ export function resolveMcpServerReferences(
       continue;
     }
 
-    const projectHasName = catalog.project?.entries &&
-      Object.prototype.hasOwnProperty.call(catalog.project.entries, name);
-    const source = projectHasName ? catalog.project! : catalog.global;
-    if (!source.entries || !Object.prototype.hasOwnProperty.call(source.entries, name)) {
+    // First source that defines the name wins and is used as-is.
+    const source = sources.find((candidate) =>
+      candidate.entries && Object.prototype.hasOwnProperty.call(candidate.entries, name)
+    );
+    if (!source?.entries) {
       errors.push(`server "${name}" is not configured in the permitted MCP sources`);
       continue;
     }

@@ -15,6 +15,7 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
+  AMBIENT_MCP_CONFIG_SCOPES,
   areCanonicalMcpServerReferences,
   type McpServerReference,
   type McpSupportTool,
@@ -140,7 +141,27 @@ export interface VersionedSubagentLoadoutV2 extends SubagentLoadoutBase {
   mcpSupportTools: McpSupportTool[];
 }
 
-export type VersionedSubagentLoadout = VersionedSubagentLoadoutV1 | VersionedSubagentLoadoutV2;
+/**
+ * Version 3 sidecars add subagent-only capability registry state: MCP
+ * references may carry registry scopes, profile skills are pinned to exact
+ * skill files passed with `--skill`, and `inheritSkills: false` replays
+ * `--no-skills`. Written only when one of those differs from version 2.
+ */
+export interface VersionedSubagentLoadoutV3 extends SubagentLoadoutBase {
+  version: 3;
+  capabilityMode: "registry-capabilities";
+  builtinTools: string[];
+  grantSpawning: boolean;
+  mcpServerReferences: McpServerReference[];
+  mcpSupportTools: McpSupportTool[];
+  skillPaths: string[];
+  inheritSkills: boolean;
+}
+
+export type VersionedSubagentLoadout =
+  | VersionedSubagentLoadoutV1
+  | VersionedSubagentLoadoutV2
+  | VersionedSubagentLoadoutV3;
 export type SubagentLoadout = LegacySubagentLoadout | VersionedSubagentLoadout;
 
 /** Path of the loadout sidecar written next to a subagent session file. */
@@ -196,6 +217,11 @@ const VERSIONED_V2_LOADOUT_FIELDS = new Set([
   ...VERSIONED_V1_LOADOUT_FIELDS,
   "mcpServerReferences",
   "mcpSupportTools",
+]);
+const VERSIONED_V3_LOADOUT_FIELDS = new Set([
+  ...VERSIONED_V2_LOADOUT_FIELDS,
+  "skillPaths",
+  "inheritSkills",
 ]);
 
 function isNullableString(value: unknown): value is string | null {
@@ -302,13 +328,44 @@ function isVersionedSubagentLoadout(loadout: Record<string, unknown>): boolean {
       hasValidVersionedFields(loadout)
     );
   }
+  if (loadout.version === 3) {
+    return (
+      hasExactFields(loadout, VERSIONED_V3_LOADOUT_FIELDS) &&
+      loadout.capabilityMode === "registry-capabilities" &&
+      hasValidVersionedFields(loadout) &&
+      areCanonicalMcpServerReferences(loadout.mcpServerReferences) &&
+      hasValidMcpSupportTools(loadout) &&
+      hasValidSkillFields(loadout)
+    );
+  }
   if (loadout.version !== 2) return false;
-  if (
-    !hasExactFields(loadout, VERSIONED_V2_LOADOUT_FIELDS) ||
-    loadout.capabilityMode !== "mcp-capabilities" ||
-    !hasValidVersionedFields(loadout) ||
-    !areCanonicalMcpServerReferences(loadout.mcpServerReferences)
-  ) return false;
+  return (
+    hasExactFields(loadout, VERSIONED_V2_LOADOUT_FIELDS) &&
+    loadout.capabilityMode === "mcp-capabilities" &&
+    hasValidVersionedFields(loadout) &&
+    // Version 2 predates capability registries; registry scopes require version 3.
+    areCanonicalMcpServerReferences(loadout.mcpServerReferences, AMBIENT_MCP_CONFIG_SCOPES) &&
+    hasValidMcpSupportTools(loadout)
+  );
+}
+
+function hasValidSkillFields(loadout: Record<string, unknown>): boolean {
+  if (typeof loadout.inheritSkills !== "boolean") return false;
+  if (!isStringArray(loadout.skillPaths)) return false;
+  const skillPaths = loadout.skillPaths;
+  return (
+    !skillPaths.some((path) =>
+      !path ||
+      !isAbsolute(path) ||
+      path !== path.trim() ||
+      /[\x00-\x1f\x7f]/.test(path) ||
+      resolve(path) !== path
+    ) &&
+    new Set(skillPaths).size === skillPaths.length
+  );
+}
+
+function hasValidMcpSupportTools(loadout: Record<string, unknown>): boolean {
   if (!isStringArray(loadout.mcpSupportTools)) return false;
   const supportTools = loadout.mcpSupportTools as string[];
   if ((loadout.mcpServerReferences as McpServerReference[]).length === 0 && supportTools.length > 0) {

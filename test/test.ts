@@ -266,6 +266,15 @@ function writePackageFixture(packageRoot: string, extensionPaths: readonly strin
   }
 }
 
+/** Write a Pi skill directory with SKILL.md and return the canonical skill file. */
+function writeSkillFixture(skillsDir: string, name: string, description = `${name} skill`): string {
+  const skillDir = join(skillsDir, name);
+  mkdirSync(skillDir, { recursive: true });
+  const skillFile = join(skillDir, "SKILL.md");
+  writeFileSync(skillFile, `---\nname: ${name}\ndescription: ${description}\n---\n\nUse ${name}.\n`);
+  return realpathSync(skillFile);
+}
+
 async function withIsolatedAgentEnv(
   fn: (paths: {
     projectDir: string;
@@ -487,6 +496,58 @@ describe("session.ts", () => {
       }],
       mcpSupportTools: ["codemode", "tool-search"],
     };
+    const versionThreeSample: SubagentLoadout = {
+      ...versionTwoSample,
+      version: 3,
+      capabilityMode: "registry-capabilities",
+      mcpServerReferences: [{
+        name: "docs",
+        source: "/home/u/.pi/agent/agents/.pi/mcp.json",
+        scope: "global-registry",
+        digest: "b".repeat(64),
+      }],
+      skillPaths: ["/home/u/.pi/agent/agents/.pi/skills/review/SKILL.md"],
+      inheritSkills: false,
+    };
+
+    it("round-trips version 3 registry snapshots", () => {
+      const sf = join(dir, "version-three.jsonl");
+      writeSubagentLoadout(sf, versionThreeSample);
+      assert.deepEqual(readSubagentLoadout(sf), versionThreeSample);
+      const projectRegistry = {
+        ...versionThreeSample,
+        mcpServerReferences: [{ ...versionThreeSample.mcpServerReferences[0], scope: "project-registry" }],
+        skillPaths: [],
+        inheritSkills: true,
+      };
+      writeSubagentLoadout(sf, projectRegistry as SubagentLoadout);
+      assert.deepEqual(readSubagentLoadout(sf), projectRegistry);
+    });
+
+    it("rejects malformed version-3 skill and registry state and registry scopes in version 2", () => {
+      const cases = [
+        { ...versionThreeSample, skillPaths: undefined },
+        { ...versionThreeSample, inheritSkills: undefined },
+        { ...versionThreeSample, inheritSkills: "false" },
+        { ...versionThreeSample, skillPaths: ["relative/SKILL.md"] },
+        { ...versionThreeSample, skillPaths: ["/skills/a/SKILL.md", "/skills/a/SKILL.md"] },
+        { ...versionThreeSample, skillPaths: ["/skills/../skills/a/SKILL.md"] },
+        { ...versionThreeSample, skillPaths: "/skills/a/SKILL.md" },
+        { ...versionThreeSample, capabilityMode: "mcp-capabilities" },
+        { ...versionThreeSample, unexpected: true },
+        { ...versionThreeSample, mcpServerReferences: [{
+          ...versionThreeSample.mcpServerReferences[0],
+          scope: "registry",
+        }] },
+        { ...versionTwoSample, mcpServerReferences: versionThreeSample.mcpServerReferences },
+        { ...versionTwoSample, skillPaths: [], inheritSkills: true },
+      ];
+      for (const [index, value] of cases.entries()) {
+        const sf = join(dir, `invalid-v3-${index}.jsonl`);
+        writeFileSync(sf + ".loadout.json", JSON.stringify(value), "utf8");
+        assert.equal(readSubagentLoadout(sf), null, `expected version-3 case ${index} to fail closed`);
+      }
+    });
 
     it("writes the versioned sidecar next to the session file", () => {
       const sf = join(dir, "s1.jsonl");
@@ -3259,6 +3320,7 @@ describe("subagent discovery", () => {
 
   it("carries a filename-mismatched canonical definition into launch preparation", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir }) => {
+      const reviewSkill = writeSkillFixture(join(projectDir, ".pi", "skills"), "review");
       writeAgentFile(
         projectAgentsDir,
         "filename-only",
@@ -3289,6 +3351,8 @@ describe("subagent discovery", () => {
         grantSpawning: true,
         mcpServerReferences: [],
         mcpSupportTools: [],
+        skillPaths: [reviewSkill],
+        inheritSkills: true,
       });
       const prepared = testApi.prepareAgentLaunch(
         { agent: "declared-name", task: "Inspect the change" },
@@ -3299,7 +3363,7 @@ describe("subagent discovery", () => {
       assert.ok("launch" in prepared);
       const launch = prepared.launch;
       assert.equal(launch.effectiveModel, "provider/restricted");
-      assert.deepEqual(launch.effectiveSkills, ["review"]);
+      assert.equal("effectiveSkills" in launch, false);
       assert.equal(launch.effectiveThinking, "medium");
       assert.equal(launch.effectiveCwd, join(globalDir, "profile-workspace"));
       assert.equal(launch.launchBehavior.sessionMode, "lineage-only");
@@ -3313,14 +3377,16 @@ describe("subagent discovery", () => {
         `${SUBAGENT_MCP_SUPPORT_TOOLS_ENV}=''`,
       ]);
       assert.deepEqual(launch.loadout, {
-        version: 2,
-        capabilityMode: "mcp-capabilities",
+        version: 3,
+        capabilityMode: "registry-capabilities",
         agent: "declared-name",
         builtinTools: ["read"],
         extensionPaths: [],
         grantSpawning: true,
         mcpServerReferences: [],
         mcpSupportTools: [],
+        skillPaths: [reviewSkill],
+        inheritSkills: true,
         model: "provider/restricted",
         thinking: "medium",
         systemPromptMode: "replace",
@@ -3342,6 +3408,11 @@ describe("subagent discovery", () => {
       assert.ok(commandParts.includes("--no-extensions"));
       assert.ok(commandParts.includes("--no-builtin-tools"));
       assert.equal(commandParts.includes("--tools"), false);
+      assert.equal(commandParts.includes("--no-skills"), false);
+      assert.deepEqual(
+        commandParts.flatMap((part, index) => part === "--skill" ? [commandParts[index + 1]] : []),
+        [shellEscape(reviewSkill)],
+      );
       const extensionPaths = commandParts
         .flatMap((part, index) => part === "-e" ? [commandParts[index + 1].slice(1, -1)] : []);
       assert.deepEqual(extensionPaths, [
@@ -3654,6 +3725,8 @@ describe("subagent discovery", () => {
       grantSpawning: true,
       mcpServerReferences: [],
       mcpSupportTools: [],
+      skillPaths: [],
+      inheritSkills: true,
     });
   });
 
@@ -4658,25 +4731,13 @@ describe("subagent discovery", () => {
     assert.match(error, /no extension paths|spawning extension path/);
   });
 
-  it("buildPiPromptArgs inserts separator for artifact-backed launches with skills", () => {
-    assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: ["review", "lint"], taskDelivery: "artifact", taskArg: "@artifact.md" }),
-      ["", "/skill:review", "/skill:lint", "@artifact.md"],
+  it("never constructs startup /skill: prompts for Pi launches", () => {
+    assert.equal("buildPiPromptArgs" in testApi, false);
+    const launcherSource = readFileSync(
+      fileURLToPath(new URL("../pi-extension/subagents/index.ts", import.meta.url)),
+      "utf8",
     );
-  });
-
-  it("buildPiPromptArgs omits separator for artifact-backed launches without skills", () => {
-    assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: undefined, taskDelivery: "artifact", taskArg: "@artifact.md" }),
-      ["@artifact.md"],
-    );
-  });
-
-  it("buildPiPromptArgs omits separator for direct launches with skills", () => {
-    assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: ["review"], taskDelivery: "direct", taskArg: "do the task" }),
-      ["/skill:review", "do the task"],
-    );
+    assert.doesNotMatch(launcherSource, /\/skill:/);
   });
 
   it("lists visible agents from discovery", async () => {
@@ -4801,6 +4862,475 @@ describe("subagent discovery", () => {
     });
   });
 });
+describe("subagent capability registries", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  function extensionPathsOf(discovery: { agents: Array<{ name: string; extensionPaths: string[] }> }, name: string) {
+    return discovery.agents.find((agent) => agent.name === name)?.extensionPaths;
+  }
+
+  function hasDiagnostic(
+    discovery: { diagnostics: Array<{ filePath: string; field?: string; message: string }> },
+    file: string,
+    field: string | RegExp,
+    message: RegExp,
+  ) {
+    return discovery.diagnostics.some((entry) =>
+      entry.filePath.endsWith(file) &&
+      (typeof field === "string" ? entry.field === field : field.test(entry.field ?? "")) &&
+      message.test(entry.message)
+    );
+  }
+
+  it("resolves registry packages before ambient settings with project-registry precedence", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
+      const globalRegistry = join(globalAgentsDir, ".pi");
+      const projectRegistry = join(projectAgentsDir, ".pi");
+      const source = "./packages/tools";
+      const onlySource = "./packages/registry-only";
+      writePackageFixture(join(globalDir, "packages", "tools"), ["ambient.ts"]);
+      writePackageFixture(join(projectDir, ".pi", "packages", "tools"), ["project.ts"]);
+      writePackageFixture(join(globalRegistry, "packages", "tools"), ["global-registry.ts"]);
+      writePackageFixture(join(projectRegistry, "packages", "tools"), ["project-registry.ts"]);
+      writePackageFixture(join(globalRegistry, "packages", "registry-only"), ["only.ts"]);
+      const globalSettingsText = JSON.stringify({ packages: [source] });
+      const globalRegistrySettingsText = JSON.stringify({ packages: [source, onlySource] });
+      writeFileSync(join(globalDir, "settings.json"), globalSettingsText);
+      writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ packages: [source] }));
+      mkdirSync(globalRegistry, { recursive: true });
+      mkdirSync(projectRegistry, { recursive: true });
+      writeFileSync(join(globalRegistry, "settings.json"), globalRegistrySettingsText);
+      writeFileSync(join(projectRegistry, "settings.json"), JSON.stringify({ packages: [source] }));
+
+      writeAgentFile(globalAgentsDir, "g-tools", `name: g-tools\nextensions:\n  - package: ${source}`);
+      writeAgentFile(globalAgentsDir, "g-only", `name: g-only\nextensions:\n  - package: ${onlySource}`);
+      writeAgentFile(projectAgentsDir, "p-tools", `name: p-tools\nextensions:\n  - package: ${source}`);
+      writeAgentFile(projectAgentsDir, "p-only", `name: p-only\nextensions:\n  - package: ${onlySource}`);
+      writeAgentFile(globalAgentsDir, "chain-registry", [
+        "name: chain-registry",
+        "builtin-tools: [read]",
+        "model-chain:",
+        "  - { cli: agy, model: gemini }",
+        "  - cli: pi",
+        "    model: cursor/gemini",
+        "    extensions:",
+        `      - package: ${onlySource}`,
+      ].join("\n"));
+
+      const nestedCwd = join(projectDir, "src");
+      mkdirSync(nestedCwd, { recursive: true });
+      const trusted = await discoverAgentDefinitions({ cwd: nestedCwd, projectTrusted: true });
+      const globalRegistryTool = realpathSync(join(globalRegistry, "packages", "tools", "global-registry.ts"));
+      const projectRegistryTool = realpathSync(join(projectRegistry, "packages", "tools", "project-registry.ts"));
+      const onlyTool = realpathSync(join(globalRegistry, "packages", "registry-only", "only.ts"));
+      assert.deepEqual(extensionPathsOf(trusted, "g-tools"), [globalRegistryTool]);
+      assert.deepEqual(extensionPathsOf(trusted, "p-tools"), [projectRegistryTool]);
+      assert.deepEqual(extensionPathsOf(trusted, "g-only"), [onlyTool]);
+      assert.deepEqual(extensionPathsOf(trusted, "p-only"), [onlyTool], "project profiles fall back to the global registry");
+      assert.deepEqual(
+        trusted.agents.find((agent) => agent.name === "chain-registry")?.modelChain?.[1].extensionPaths,
+        [onlyTool],
+      );
+
+      const untrusted = await discoverAgentDefinitions({ cwd: nestedCwd, projectTrusted: false });
+      assert.deepEqual(extensionPathsOf(untrusted, "g-tools"), [globalRegistryTool]);
+      assert.equal(untrusted.agents.some((agent) => agent.name === "p-tools"), false);
+
+      // Runtime cwd overrides never re-resolve profile-anchored grants.
+      const pTools = trusted.agents.find((agent) => agent.name === "p-tools");
+      assert.ok(pTools);
+      const sandbox = testApi.prepareAgentSandbox(pTools);
+      assert.ok("sandbox" in sandbox);
+      const otherRepo = join(dirname(projectDir), "other-repo");
+      mkdirSync(join(otherRepo, ".pi", "agents", ".pi"), { recursive: true });
+      const prepared = testApi.prepareAgentLaunch(
+        { agent: "p-tools", task: "Inspect", cwd: otherRepo },
+        pTools,
+        sandbox.sandbox,
+        projectDir,
+      );
+      assert.ok("launch" in prepared);
+      assert.equal(prepared.launch.loadout.cwd, otherRepo);
+      assert.deepEqual(prepared.launch.loadout.extensionPaths, [projectRegistryTool]);
+      assert.equal(prepared.launch.loadout.version, 2, "registry extensions alone keep the version-2 snapshot shape");
+
+      // The parent's own Pi package view never contains registry resources.
+      const parentResolved = await new DefaultPackageManager({
+        cwd: projectDir,
+        agentDir: globalDir,
+        settingsManager: SettingsManager.create(projectDir, globalDir, { projectTrusted: true }),
+      }).resolve(async () => "skip");
+      const parentPaths = parentResolved.extensions.map((resource) => resource.path);
+      assert.equal(parentPaths.some((path) => path.includes(`${join("agents", ".pi")}`)), false);
+      assert.equal(readFileSync(join(globalDir, "settings.json"), "utf8"), globalSettingsText);
+      assert.equal(readFileSync(join(globalRegistry, "settings.json"), "utf8"), globalRegistrySettingsText);
+    });
+  });
+
+  it("honors registry package filters and fails closed on invalid registry settings", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
+      const globalRegistry = join(globalAgentsDir, ".pi");
+      const projectRegistry = join(projectAgentsDir, ".pi");
+      const source = "./packages/filtered";
+      writePackageFixture(join(globalRegistry, "packages", "filtered"), ["one.ts", "disabled.ts"]);
+      writePackageFixture(join(globalDir, "packages", "filtered"), ["ambient.ts"]);
+      writeFileSync(join(globalDir, "settings.json"), JSON.stringify({ packages: [source] }));
+      writeFileSync(
+        join(globalRegistry, "settings.json"),
+        JSON.stringify({ packages: [{ source, extensions: ["!disabled.ts"] }] }),
+      );
+      writeAgentFile(globalAgentsDir, "filtered-all", `name: filtered-all\nextensions:\n  - package: ${source}`);
+      writeAgentFile(
+        globalAgentsDir,
+        "filtered-disabled",
+        `name: filtered-disabled\nextensions:\n  - package: ${source}\n    paths: [disabled.ts]`,
+      );
+      writeAgentFile(projectAgentsDir, "project-ext", `name: project-ext\nextensions:\n  - package: ${source}`);
+      writeAgentFile(projectAgentsDir, "project-plain", "name: project-plain\nbuiltin-tools: [read]");
+
+      mkdirSync(projectRegistry, { recursive: true });
+      writeFileSync(join(projectRegistry, "settings.json"), "{ invalid json");
+      const broken = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.deepEqual(extensionPathsOf(broken, "filtered-all"), [
+        realpathSync(join(globalRegistry, "packages", "filtered", "one.ts")),
+      ]);
+      assert.equal(broken.agents.some((agent) => agent.name === "filtered-disabled"), false);
+      assert.ok(hasDiagnostic(broken, "filtered-disabled.md", "extensions[0].paths[0]", /not an enabled extension resource/));
+      assert.equal(broken.agents.some((agent) => agent.name === "project-ext"), false);
+      assert.ok(hasDiagnostic(
+        broken,
+        "project-ext.md",
+        "extensions[0].package",
+        /cannot inspect project subagent registry packages safely/,
+      ));
+      assert.ok(broken.agents.some((agent) => agent.name === "project-plain"), "unrelated profiles stay valid");
+
+      writeFileSync(join(projectRegistry, "settings.json"), JSON.stringify({ packages: [{ source, bogus: true }] }));
+      const tombstoned = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.equal(tombstoned.agents.some((agent) => agent.name === "project-ext"), false);
+      assert.ok(hasDiagnostic(
+        tombstoned,
+        "project-ext.md",
+        "extensions[0].package",
+        /project subagent registry package configuration .* is invalid/,
+      ));
+
+      rmSync(join(projectRegistry, "settings.json"));
+      writeAgentFile(globalAgentsDir, "missing-ext", "name: missing-ext\nextensions:\n  - package: ./packages/absent");
+      const missing = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.ok(hasDiagnostic(
+        missing,
+        "missing-ext.md",
+        "extensions[0].package",
+        /not configured in the global subagent registry, or permitted global settings/,
+      ));
+    });
+  });
+
+  it("grants registry MCP servers ahead of ambient entries with registry scopes", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
+      const globalRegistry = join(globalAgentsDir, ".pi");
+      const projectRegistry = join(projectAgentsDir, ".pi");
+      mkdirSync(globalRegistry, { recursive: true });
+      mkdirSync(projectRegistry, { recursive: true });
+      const globalText = JSON.stringify({
+        mcpServers: { shared: { command: "ambient" }, ambientOnly: { command: "ambient-only" } },
+      });
+      const registryText = JSON.stringify({
+        mcpServers: { shared: { command: "global-registry" }, registryOnly: { command: "registry-only" } },
+      });
+      writeFileSync(join(globalDir, "mcp.json"), globalText);
+      writeFileSync(join(globalRegistry, "mcp.json"), registryText);
+      writeFileSync(join(projectRegistry, "mcp.json"), JSON.stringify({
+        mcpServers: { shared: { command: "project-registry", exposure: "direct" } },
+      }));
+      writeAgentFile(globalAgentsDir, "g-mcp", "name: g-mcp\nmcp-servers: [shared, registryOnly, ambientOnly]");
+      writeAgentFile(projectAgentsDir, "p-mcp", "name: p-mcp\nmcp-servers: [shared]");
+
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const globalAgent = discovery.agents.find((agent) => agent.name === "g-mcp");
+      assert.ok(globalAgent, JSON.stringify(discovery.diagnostics));
+      assert.deepEqual(globalAgent.mcpServerReferences.map(({ name, scope, source }) => ({ name, scope, source })), [
+        { name: "shared", scope: "global-registry", source: realpathSync(join(globalRegistry, "mcp.json")) },
+        { name: "registryOnly", scope: "global-registry", source: realpathSync(join(globalRegistry, "mcp.json")) },
+        { name: "ambientOnly", scope: "global", source: realpathSync(join(globalDir, "mcp.json")) },
+      ]);
+      const projectAgent = discovery.agents.find((agent) => agent.name === "p-mcp");
+      assert.ok(projectAgent);
+      assert.deepEqual(projectAgent.mcpServerReferences.map(({ scope }) => scope), ["project-registry"]);
+      assert.deepEqual(projectAgent.mcpSupportTools, []);
+
+      // The child's filtered controller re-verifies registry references.
+      const verified = verifyMcpServerReferences(globalAgent.mcpServerReferences);
+      assert.ok(!("errors" in verified));
+      assert.deepEqual(verified.servers.map((server) => [server.name, (server.config as any).command]), [
+        ["shared", "global-registry"],
+        ["registryOnly", "registry-only"],
+        ["ambientOnly", "ambient-only"],
+      ]);
+
+      // A registry MCP grant pins a version-3 snapshot with the same capability protocol.
+      const sandbox = testApi.prepareAgentSandbox(globalAgent);
+      assert.ok("sandbox" in sandbox);
+      const prepared = testApi.prepareAgentLaunch({ agent: "g-mcp", task: "Inspect" }, globalAgent, sandbox.sandbox, projectDir);
+      assert.ok("launch" in prepared, JSON.stringify(prepared));
+      assert.equal(prepared.launch.loadout.version, 3);
+      assert.deepEqual(prepared.launch.loadout.skillPaths, []);
+      assert.equal(prepared.launch.loadout.inheritSkills, true);
+      assert.ok(prepared.launch.capabilityEnvironment.includes(`${SUBAGENT_CAPABILITY_VERSION_ENV}=2`));
+      assert.deepEqual(
+        testApi.buildResumeCapabilityEnvironment(prepared.launch.loadout),
+        prepared.launch.capabilityEnvironment,
+      );
+      assert.equal(readFileSync(join(globalDir, "mcp.json"), "utf8"), globalText);
+      assert.equal(readFileSync(join(globalRegistry, "mcp.json"), "utf8"), registryText);
+    });
+  });
+
+  it("rejects disabled, missing, colliding, provider-auth, and unreadable registry MCP entries", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
+      const globalRegistry = join(globalAgentsDir, ".pi");
+      const projectRegistry = join(projectAgentsDir, ".pi");
+      mkdirSync(globalRegistry, { recursive: true });
+      mkdirSync(projectRegistry, { recursive: true });
+      writeFileSync(join(globalDir, "mcp.json"), JSON.stringify({
+        mcpServers: { tombstoned: { command: "ambient" }, name_clash: { command: "ambient" } },
+      }));
+      writeFileSync(join(globalRegistry, "mcp.json"), JSON.stringify({
+        mcpServers: {
+          tombstoned: { command: "registry", enabled: false },
+          "name-clash": { command: "registry" },
+          provider: { url: "https://example.com/mcp", auth: { provider: "anthropic" } },
+        },
+      }));
+      for (const [name, selection] of [
+        ["disabled", "tombstoned"],
+        ["missing", "absent"],
+        ["collision", "name-clash"],
+        ["auth", "provider"],
+      ] as const) {
+        writeAgentFile(globalAgentsDir, name, `name: ${name}\nmcp-servers: [${selection}]`);
+      }
+      writeAgentFile(projectAgentsDir, "project-mcp", "name: project-mcp\nmcp-servers: [tombstoned]");
+      writeAgentFile(projectAgentsDir, "project-plain", "name: project-plain\nbuiltin-tools: [read]");
+
+      writeFileSync(join(projectRegistry, "mcp.json"), "{ broken");
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const names = discovery.agents.map((agent) => agent.name);
+      for (const rejected of ["disabled", "missing", "collision", "auth", "project-mcp"]) {
+        assert.equal(names.includes(rejected), false, rejected);
+      }
+      assert.ok(hasDiagnostic(discovery, "disabled.md", "mcp-servers", /disabled/));
+      assert.ok(hasDiagnostic(discovery, "missing.md", "mcp-servers", /not configured/));
+      assert.ok(hasDiagnostic(discovery, "collision.md", "mcp-servers", /namespace normalization/));
+      assert.ok(hasDiagnostic(discovery, "auth.md", "mcp-servers", /auth is allowed only in the global mcp\.json/));
+      assert.ok(hasDiagnostic(discovery, "project-mcp.md", "mcp-servers", /invalid JSON/));
+      assert.equal(
+        discovery.diagnostics.some((entry) => entry.filePath.endsWith("disabled.md") && /invalid JSON/.test(entry.message)),
+        false,
+        "global profiles never consult the project registry",
+      );
+      assert.ok(names.includes("project-plain"));
+    });
+  });
+
+  it("parses inherit-skills only on flat Pi profiles", () => {
+    const parsed = parseAgentDefinition(
+      "---\nname: isolated\ninherit-skills: false\nskills: [review]\n---\nbody",
+      "/tmp/isolated.md",
+      "global",
+    );
+    assert.deepEqual(parsed.diagnostics, []);
+    assert.equal(parsed.agent?.inheritSkills, false);
+    assert.equal(
+      parseAgentDefinition("---\nname: default\n---\nbody", "/tmp/default.md", "global").agent?.inheritSkills,
+      undefined,
+    );
+
+    const invalid = parseAgentDefinition("---\nname: bad\ninherit-skills: \"no\"\n---\nbody", "/tmp/bad.md", "global");
+    assert.equal(invalid.agent, null);
+    assert.ok(invalid.diagnostics.some((entry) => entry.field === "inherit-skills"));
+
+    for (const [label, frontmatter] of [
+      ["claude", "cli: claude\ninherit-skills: true"],
+      ["agy", "cli: agy\ninherit-skills: true"],
+      ["chain", "inherit-skills: true\nmodel-chain:\n  - { cli: agy, model: a }\n  - { cli: pi, model: b }"],
+    ] as const) {
+      const rejected = parseAgentDefinition(`---\nname: ${label}\n${frontmatter}\n---\nbody`, `/tmp/${label}.md`, "global");
+      assert.equal(rejected.agent, null, label);
+      assert.ok(rejected.diagnostics.some((entry) => entry.field === "inherit-skills"), label);
+    }
+  });
+
+  it("resolves profile skills to files with registry precedence and launches them with --skill", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
+      const globalRegistry = join(globalAgentsDir, ".pi");
+      const projectRegistry = join(projectAgentsDir, ".pi");
+      const ambientShared = writeSkillFixture(join(globalDir, "skills"), "reg-test-shared");
+      const ambientOnly = writeSkillFixture(join(globalDir, "skills"), "reg-test-ambient");
+      const globalShared = writeSkillFixture(join(globalRegistry, "skills"), "reg-test-shared");
+      const globalOnly = writeSkillFixture(join(globalRegistry, "skills"), "reg-test-registry");
+      const projectShared = writeSkillFixture(join(projectRegistry, "skills"), "reg-test-shared");
+      // An ancestor `.agents/skills` of the global agents dir is ambient Pi
+      // discovery for that directory, never part of the registry.
+      writeSkillFixture(join(globalDir, ".agents", "skills"), "reg-test-leak");
+      // Package-provided registry skill.
+      const packageRoot = join(globalRegistry, "packages", "skill-pack");
+      mkdirSync(packageRoot, { recursive: true });
+      writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+        name: "skill-pack",
+        version: "1.0.0",
+        pi: { skills: ["./skills"] },
+      }));
+      const packaged = writeSkillFixture(join(packageRoot, "skills"), "reg-test-packaged");
+      writeFileSync(join(globalRegistry, "settings.json"), JSON.stringify({ packages: ["./packages/skill-pack"] }));
+
+      writeAgentFile(
+        globalAgentsDir,
+        "g-skills",
+        "name: g-skills\nskills: [reg-test-shared, reg-test-registry, reg-test-ambient, reg-test-packaged]",
+      );
+      writeAgentFile(projectAgentsDir, "p-skills", "name: p-skills\nskill: reg-test-shared");
+      writeAgentFile(
+        globalAgentsDir,
+        "isolated",
+        "name: isolated\nskills: [reg-test-registry]\ninherit-skills: false",
+      );
+      writeAgentFile(globalAgentsDir, "no-skills", "name: no-skills\ninherit-skills: false");
+      writeAgentFile(globalAgentsDir, "unknown-skill", "name: unknown-skill\nskills: [reg-test-missing]");
+      writeAgentFile(globalAgentsDir, "leak", "name: leak\nskills: [reg-test-leak]");
+      writeAgentFile(globalAgentsDir, "claude-skills", "name: claude-skills\ncli: claude\nskills: [reg-test-missing]");
+      writeAgentFile(globalAgentsDir, "plain", "name: plain\nbuiltin-tools: [read]");
+
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      const byName = (name: string) => discovery.agents.find((agent) => agent.name === name);
+      assert.deepEqual(byName("g-skills")?.skillPaths, [globalShared, globalOnly, ambientOnly, packaged]);
+      assert.deepEqual(byName("p-skills")?.skillPaths, [projectShared]);
+      assert.deepEqual(byName("isolated")?.skillPaths, [globalOnly]);
+      assert.deepEqual(byName("claude-skills")?.skillPaths, [], "Claude keeps its existing skills acceptance");
+      assert.equal(byName("unknown-skill"), undefined);
+      assert.ok(hasDiagnostic(discovery, "unknown-skill.md", "skills", /skill "reg-test-missing" is not available/));
+      assert.equal(byName("leak"), undefined, "registry skills exclude ancestor .agents discovery");
+      assert.ok(byName("plain"));
+      assert.notEqual(ambientShared, globalShared);
+
+      const launch = (name: string) => {
+        const agent = byName(name);
+        assert.ok(agent, name);
+        const sandbox = testApi.prepareAgentSandbox(agent);
+        assert.ok("sandbox" in sandbox, name);
+        const prepared = testApi.prepareAgentLaunch({ agent: name, task: "Do it" }, agent, sandbox.sandbox, projectDir);
+        assert.ok("launch" in prepared, name);
+        const parts: string[] = [];
+        testApi.applySandboxToParts(parts, prepared.launch.loadout, {
+          artifactDir: projectDir,
+          name,
+          artifactId: `${name}-launch`,
+        });
+        return {
+          loadout: prepared.launch.loadout,
+          parts,
+          skills: parts.flatMap((part, index) => part === "--skill" ? [parts[index + 1]] : []),
+        };
+      };
+
+      const inherited = launch("g-skills");
+      assert.equal(inherited.loadout.version, 3);
+      assert.equal(inherited.loadout.inheritSkills, true);
+      assert.equal(inherited.parts.includes("--no-skills"), false);
+      assert.deepEqual(inherited.skills, [globalShared, globalOnly, ambientOnly, packaged].map(shellEscape));
+
+      const isolated = launch("isolated");
+      assert.equal(isolated.loadout.inheritSkills, false);
+      assert.ok(isolated.parts.includes("--no-skills"));
+      assert.deepEqual(isolated.skills, [shellEscape(globalOnly)]);
+
+      const none = launch("no-skills");
+      assert.equal(none.loadout.version, 3);
+      assert.ok(none.parts.includes("--no-skills"));
+      assert.deepEqual(none.skills, []);
+
+      const plain = launch("plain");
+      assert.equal(plain.loadout.version, 2, "profiles without registry or skill state keep version-2 snapshots");
+      assert.equal(plain.parts.includes("--no-skills"), false);
+      assert.deepEqual(plain.skills, []);
+    });
+  });
+
+  it("fails resume closed when a version-3 skill file or registry MCP entry changes", async () => {
+    const d = realpathSync(createTestDir());
+    try {
+      const skill = writeSkillFixture(join(d, "registry", "skills"), "pinned");
+      const source = join(d, "registry", "mcp.json");
+      const entry = { command: "registry-command", exposure: "direct" };
+      writeFileSync(source, JSON.stringify({ mcpServers: { pinned: entry } }));
+      const normalized = validateAndNormalizeMcpServerConfig("pinned", entry, "global-registry");
+      assert.ok(!("error" in normalized));
+      const loadout: SubagentLoadout = {
+        version: 3,
+        capabilityMode: "registry-capabilities",
+        agent: "pinned-agent",
+        builtinTools: [],
+        extensionPaths: [],
+        grantSpawning: false,
+        mcpServerReferences: [{
+          name: "pinned",
+          source: realpathSync(source),
+          scope: "global-registry",
+          digest: digestNormalizedMcpConfig(normalized.normalized),
+        }],
+        mcpSupportTools: [],
+        skillPaths: [skill],
+        inheritSkills: false,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: d,
+        agentDir: d,
+      };
+      assert.equal(testApi.validateLoadoutPreflight(loadout), null);
+      const replay: string[] = [];
+      testApi.applySandboxToParts(replay, loadout, { artifactDir: d, name: "pinned", artifactId: "pinned-resume" });
+      assert.ok(replay.includes("--no-skills"));
+      assert.deepEqual(replay.flatMap((part, index) => part === "--skill" ? [replay[index + 1]] : []), [shellEscape(skill)]);
+      assert.ok(replay.includes(shellEscape(join(dirname(fileURLToPath(new URL("../pi-extension/subagents/index.ts", import.meta.url))), "subagent-mcp-control.ts"))));
+
+      writeFileSync(source, JSON.stringify({ mcpServers: { pinned: { ...entry, command: "changed" } } }));
+      assert.match(testApi.validateLoadoutPreflight(loadout), /configuration changed/);
+      writeFileSync(source, JSON.stringify({ mcpServers: { pinned: entry } }));
+
+      rmSync(skill);
+      assert.match(testApi.validateLoadoutPreflight(loadout), /sandbox skill is missing/);
+
+      const sessionPath = join(d, "finished-skill-child.jsonl");
+      writeFileSync(sessionPath, '{"type":"session","id":"skill-child-session"}\n', "utf8");
+      writeSubagentLoadout(sessionPath, loadout);
+      registerName(join(d, "artifacts", "test-session"), "pinned-agent", {
+        sessionFile: sessionPath,
+        sessionId: "skill-child-session",
+      });
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+      assert.ok(messageTool);
+      const result = await messageTool.execute(
+        "resume-missing-skill",
+        { name: "pinned-agent", message: "Continue" },
+        undefined,
+        undefined,
+        createMockContext(d, true),
+      );
+      assert.match(result.content[0].text, /sandbox skill is missing/);
+      assert.match(result.content[0].text, /spawn a fresh subagent/i);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("AGY harness helpers", () => {
   function makeState(dir: string, overrides: Partial<AgyResumeStateV1> = {}): AgyResumeStateV1 {
     const agentName = "pi-scout-abc123";

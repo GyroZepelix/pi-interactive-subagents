@@ -71,6 +71,21 @@ Pi profiles that omit `auto-exit`, `system-prompt`, or `session-mode` now defaul
 
 The package also ships a `subagent-profiles` skill that guides agents when they create or edit profile files.
 
+### Subagent-only capability registries
+
+MCP servers, Pi packages, and skills that only subagents should use go in a registry beside the profiles: `~/.pi/agent/agents/.pi/` (global, always trusted) or `<project>/.pi/agents/.pi/` (read only in a trusted project). The parent Pi session never reads it. A registry uses Pi's project layout, so stock commands run from the agents directory manage it:
+
+```bash
+cd ~/.pi/agent/agents
+pi install -l npm:@example/pi-web-tools
+pi mcp add -l project-docs -- npx -y @example/docs-mcp
+mkdir -p .pi/skills/review   # add .pi/skills/review/SKILL.md
+```
+
+Start `pi` once in that directory and trust it so these commands, `pi config --local`, and `pi mcp login` use its `.pi/` files. Profiles name registry entries in the usual `extensions`, `mcp-servers`, and `skills` fields. A project profile consults its project registry, then the global registry; a global profile consults the global registry. The first registry that has the entry wins over ambient settings. Entries in no registry resolve exactly as before. See [Subagent capability registries](docs/agent-definitions.md#subagent-capability-registries).
+
+`skills` now makes each listed skill discoverable to a Pi child with `--skill <path>` instead of invoking it with a `/skill:` startup prompt (a breaking change). Add `inherit-skills: false` to give the child only the listed skills. See [Skills](docs/agent-definitions.md#skills).
+
 See [Agent definitions](docs/agent-definitions.md) for the complete contract, including every field, validation, precedence, trust behavior, tool isolation, nested spawning, resume snapshots, and external-harness limitations.
 
 ### Codemode and MCP server grants
@@ -84,7 +99,7 @@ mcp-servers: [project-docs, issue-tracker]
 
 An MCP name grants the complete configured server while preserving Pi's `direct`, `codemode`, `deferred`, and `hidden` server/per-tool exposure and resource tools. The extension automatically loads `codemode` and `tool_search` support required by the selected exposures. Codemode can execute model-authored JavaScript and call its reachable tools, so grant it only when that authority is intended.
 
-Server names resolve from the global Pi `mcp.json` and, only in a trusted active project, that project's `.pi/mcp.json`. A project entry replaces a same-named global entry, including when the replacement is invalid or disabled; a runtime child `cwd` override does not change this source decision. Malformed source files, missing or disabled selections, invalid selected entries, and selected namespace collisions exclude the profile before pane creation. Once identity passes, connection and sign-in failures use Pi's normal MCP diagnostics and do not create a package-specific terminal startup failure.
+Server names resolve from the profile's [registries](#subagent-only-capability-registries) first, then from the global Pi `mcp.json` and, only in a trusted active project, that project's `.pi/mcp.json`. A project entry replaces a same-named global entry, including when the replacement is invalid or disabled; a runtime child `cwd` override does not change this source decision. Malformed source files, missing or disabled selections, invalid selected entries, and selected namespace collisions exclude the profile before pane creation. Once identity passes, connection and sign-in failures use Pi's normal MCP diagnostics and do not create a package-specific terminal startup failure.
 
 Restricted children keep `--no-extensions --no-builtin-tools` and never load ambient `builtin:mcp`. A protected controller re-reads only selected entries, verifies their source and semantic SHA-256 digest, and gives them to Pi's MCP runtime with ambient loading empty. Snapshots retain only ordered server name, canonical source path, scope, and digest--not config bodies, resolved environment values, headers, OAuth tokens, or provider credentials. Resume refuses changed, missing, disabled, invalid, or source-mismatched entries before pane creation and asks for a fresh spawn.
 
@@ -236,7 +251,7 @@ Every new named Pi child launches with global extension discovery and initial bu
 
 `extensions` is an optional YAML array of package mappings. Each `package` must exactly match a source configured in Pi settings. Omit `paths` to select every enabled extension resource from that package in Pi's resolved order, or provide a non-empty array of exact package-relative resource paths. Absolute paths, `.` or `..` segments, duplicate packages or selectors, disabled resources, root escapes, missing files, and empty selections invalidate the profile. Package order and explicit selector order are preserved; canonical duplicate files keep their first occurrence.
 
-Package lookup is read-only and never installs or updates packages, accesses the network, or writes settings. Global profiles use global package settings only. Profiles from the nearest trusted project prefer matching project package sources and may fall back to global sources. Untrusted project profiles and package settings are ignored. Resolution failures exclude the profile from listing and spawning before pane creation.
+Package, MCP, and skill lookup is read-only and never installs or updates packages, connects, accesses the network, reads credentials, or writes settings. Registry entries win first. Otherwise global profiles use global package settings only. Profiles from the nearest trusted project prefer matching project package sources and may fall back to global sources. Untrusted project profiles and package settings are ignored. Resolution failures exclude the profile from listing and spawning before pane creation.
 
 A declared extension is a grant to execute the complete trusted extension with the user's permissions. It is not a per-tool sandbox. The extension may register tools, hooks, commands, or providers and may change active tools dynamically. It may override built-in names; when custom tool names collide, the first declared extension wins.
 

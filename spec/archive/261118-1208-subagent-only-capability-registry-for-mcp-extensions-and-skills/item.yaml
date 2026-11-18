@@ -1,0 +1,15 @@
+schema_version: 2
+id: 261118-1208-subagent-only-capability-registry-for-mcp-extensions-and-skills
+title: Subagent-only capability registry for MCP, extensions, and skills
+kind: work-item
+work_type: feature
+parent: null
+route: quick-plan
+status: completed
+superseded_by: null
+created_at: '2026-11-18T12:08:00+01:00'
+updated_at: '2026-11-18T13:25:27+01:00'
+external_refs: []
+wiki_refs:
+- wiki/conventions/agent-profiles.md
+- wiki/architecture.md

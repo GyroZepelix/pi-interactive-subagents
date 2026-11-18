@@ -13,6 +13,41 @@ Definitions are keyed by their effective `name`, not by filename. A project defi
 
 `PI_SUBAGENT_ALLOWED` applies after discovery. A nested subagent sees only the valid definitions its parent granted through `subagent_agents`.
 
+## Subagent capability registries
+
+A registry holds MCP servers, Pi packages, and skills that only subagent profiles use. The parent Pi session never reads it. Each registry sits beside a profile directory and uses Pi's ordinary project layout:
+
+| Registry | Location | Availability |
+| --- | --- | --- |
+| Global | `<global agents dir>/.pi/`, for example `~/.pi/agent/agents/.pi/` | Always trusted |
+| Project | `<project>/.pi/agents/.pi/` | Read only when the active project is trusted, the same rule as project profiles |
+
+Inside a registry, `settings.json` lists packages (with Pi's per-package resource filters), `mcp.json` lists MCP servers, and `skills/` holds skill directories. Skills provided by registry packages are also available. Manage a registry with stock Pi commands run from the agents directory, which Pi treats as a project:
+
+```bash
+cd ~/.pi/agent/agents
+pi install -l npm:@example/pi-web-tools      # registry package
+pi config --local                            # enable or disable registry package resources
+pi mcp add -l project-docs -- npx -y @example/docs-mcp   # registry MCP server
+pi mcp login project-docs                    # OAuth sign-in for a registry HTTP server
+mkdir -p .pi/skills/review                   # registry skill: .pi/skills/review/SKILL.md
+pi update                                    # update registry and global packages
+```
+
+Pi asks you to trust a directory before these commands use its `.pi/` files, so start `pi` once in the agents directory and trust it (`pi install -l` and `pi config --local` also accept `--approve` for one command). Trusting it only affects Pi sessions started inside that directory. OAuth credentials from `pi mcp login` are stored in the agent directory's shared `mcp-auth.json`, keyed by server name and URL, where the child's filtered MCP controller finds them. As in any project `mcp.json`, `auth: { provider }` entries are not allowed in a registry.
+
+### Lookup order
+
+Registry entries are matched by exact package source, MCP server name, or skill name:
+
+1. A trusted project profile consults its project registry, then the global registry.
+2. A global profile consults only the global registry.
+3. When no registry contains the entry, the existing ambient rules below apply unchanged.
+
+The first source that contains the entry wins and is used as-is, so a registry entry replaces an ambient entry with the same source or name. Profiles that select nothing from a registry behave exactly as before. Lookup depends on the profile's location and the active trusted project, never on a runtime `cwd` passed to `subagent`.
+
+Resolution is read-only. It never installs, updates, connects, accesses the network, expands configuration expressions, reads credentials, or writes settings. A missing registry is empty. A malformed registry `settings.json` or `mcp.json`, an invalid registry package entry, or a disabled registry MCP server excludes only the profiles that consult that registry for the affected field, with a file-and-field diagnostic. Disabled registry entries never fall through to ambient entries.
+
 ## File format
 
 Every file must begin with YAML frontmatter delimited by opening and closing `---` lines. Pi's YAML parser reads the metadata. The Markdown body supplies the profile identity or system prompt and must not be empty.
@@ -27,13 +62,14 @@ extensions:
   - package: npm:@example/pi-review-tools
     paths: [index.ts]
 skills: [review]
+inherit-skills: false
 thinking: medium
 ---
 
 Review the requested change. Report findings with exact file references.
 ```
 
-This Pi profile omits `auto-exit`, `system-prompt`, and `session-mode`, so it uses the [Pi defaults](#pi-defaults-for-omitted-fields): it auto-exits, appends its body to Pi's system prompt, and links its session to the parent.
+This Pi profile omits `auto-exit`, `system-prompt`, and `session-mode`, so it uses the [Pi defaults](#pi-defaults-for-omitted-fields): it auto-exits, appends its body to Pi's system prompt, and links its session to the parent. Its child can discover only the `review` skill.
 
 Malformed YAML, unknown keys, invalid values, and invalid field types exclude the complete definition. Diagnostics identify the file and field. Other valid project files remain available. When an invalid project definition prevents the effective name from being determined safely, global definitions are suppressed rather than risking fallback to a less restricted profile.
 
@@ -47,8 +83,9 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `builtin-tools` | Comma-delimited string or YAML string array. Pi accepts `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, `ls`, or `codemode`; AGY accepts only `read`, `grep`, `find`, or `ls`. | Empty list. Flat and native-resumed Pi children still receive `ask_question`; chain attempts omit it to preserve one final delivery. `codemode` is flat-Pi-only. AGY receives no native tools. See [Tool isolation](#tool-isolation). |
 | `mcp-servers` | Comma-delimited string or YAML string array of exact configured Pi MCP server names | Empty list. Flat Pi profiles only. Grants complete servers with native exposure/resources; wildcards and per-tool selection are unsupported. See [Codemode and MCP server selection](#codemode-and-mcp-server-selection). |
 | `extensions` | YAML array of mappings containing exactly `package` and optional `paths` | Empty list. Selects installed, enabled extension resources from exact configured Pi package sources. See [Package extension selection](#package-extension-selection). |
-| `skill` | Comma-delimited string or YAML string array | Empty list of skill prompts. Alias of `skills`. |
-| `skills` | Comma-delimited string or YAML string array | Empty list. Do not use together with `skill`. |
+| `skill` | Comma-delimited string or YAML string array | Alias of `skills`. |
+| `skills` | Comma-delimited string or YAML string array of skill names | Empty list. Flat Pi profiles pass each resolved skill file with `--skill`, so the child can discover it; nothing is invoked at startup. Do not use together with `skill`. See [Skills](#skills). |
+| `inherit-skills` | YAML boolean | `true`. Flat Pi profiles only. `false` launches the child with `--no-skills`, so only the listed skills load. Invalid on `cli: claude`, `cli: agy`, and `model-chain` profiles, even when `true`. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | Optional. Applied with a profile model. |
 | `subagent_agents` | Comma-delimited string or YAML string array | Empty list. A non-empty list grants nested spawning and restricts targets to these effective names. |
 | `auto-exit` | YAML boolean | `true` for Pi when omitted. When true, the child shuts down and reports its final response only after Pi settles automatic retries, recovery, and queued continuation. Set `false` for a hands-on child that stays in its pane until the user exits it. |
@@ -81,6 +118,21 @@ These defaults changed. Earlier releases treated an omitted `auto-exit` as `fals
 Only actual YAML booleans are accepted. For example, `auto-exit: true` is valid and `auto-exit: "true"` is not.
 
 `skill` and `skills` are aliases. Supplying both excludes the definition rather than choosing a hidden precedence.
+
+## Skills
+
+For flat Pi profiles, each name in `skills` resolves at discovery to an exact skill file: first from the [registries](#lookup-order), then from the skills Pi would discover ambiently for the profile's settings context (the active trusted project and the global agent directory, including package skills and `.agents/skills`). The child receives one `--skill <path>` per listed skill. That makes the skill discoverable to the child model; the child decides whether to use it. An unknown name excludes the profile with a `skills` diagnostic before pane creation.
+
+`inherit-skills` controls the child's own skill discovery:
+
+- `true` (default): the child keeps Pi's native ambient skill discovery for its cwd, plus the listed skills. A listed skill that is also ambient loads once.
+- `false`: the child launches with `--no-skills`, so only the listed skills load. The list may name ambient skills.
+
+With `inherit-skills: true`, Pi keeps an ambient skill when a listed registry skill has the same name but a different file, and reports a name collision. Use `inherit-skills: false` when the registry version must win.
+
+`cli: claude` profiles still accept `skills`, which does not configure Claude Code. AGY and `model-chain` profiles reject `skill`, `skills`, and `inherit-skills`.
+
+Breaking change: `skills` previously sent `/skill:<name>` startup prompts that invoked each skill before the task. That behavior is removed. To have a child follow a skill on every run, say so in the profile body or the task.
 
 List fields accept either form:
 
@@ -149,7 +201,7 @@ model-chain:
 
 Retain its existing Markdown body. The package does not edit global profiles or provider configuration.
 
-The top-level `name`, `description`, `builtin-tools`, `cwd`, Markdown body, and `disable-model-invocation` are shared. Shared built-ins may contain only `read`, `grep`, `find`, and `ls`. Top-level `cli`, `model`, `thinking`, `mcp-servers`, `extensions`, `skill`/`skills`, `subagent_agents`, `session-mode`, `system-prompt`, `auto-exit`, and `interactive` are invalid even when empty. Runtime `model` overrides are also rejected; runtime `cwd` overrides remain available.
+The top-level `name`, `description`, `builtin-tools`, `cwd`, Markdown body, and `disable-model-invocation` are shared. Shared built-ins may contain only `read`, `grep`, `find`, and `ls`. Top-level `cli`, `model`, `thinking`, `mcp-servers`, `extensions`, `skill`/`skills`, `inherit-skills`, `subagent_agents`, `session-mode`, `system-prompt`, `auto-exit`, and `interactive` are invalid even when empty. Runtime `model` overrides are also rejected; runtime `cwd` overrides remain available.
 
 Every target must contain exactly a supported `cli` and non-empty `model`, with these optional fields:
 
@@ -185,7 +237,7 @@ When `paths` is omitted, the profile selects all enabled extension resources exp
 
 Profile package order and explicit selector order are preserved. If different selections resolve to the same canonical file, only the first occurrence is loaded.
 
-Resolution is read-only. It does not install or update packages, access the network, or write settings. A global profile can select only global package settings. A profile from the nearest trusted project first uses an exact source from that project's settings and may fall back to an exact global source. Untrusted project profiles and package settings are ignored. Invalid settings, an unconfigured or uninstalled package, a resolution error, or a selection with no enabled extension files excludes the profile before pane creation. `subagents_list` reports the profile file and relevant extension field or selector in its diagnostics.
+Resolution is read-only. It does not install or update packages, access the network, or write settings. An exact source in a [registry](#lookup-order) wins first and resolves as a Pi project-scope package rooted at that agents directory, with the registry's resource filters. Otherwise a global profile can select only global package settings, and a profile from the nearest trusted project first uses an exact source from that project's settings and may fall back to an exact global source. Untrusted project profiles and package settings are ignored. Invalid settings, an unconfigured or uninstalled package, a resolution error, or a selection with no enabled extension files excludes the profile before pane creation. `subagents_list` reports the profile file and relevant extension field or selector in its diagnostics.
 
 ## Codemode and MCP server selection
 
@@ -202,13 +254,13 @@ Missing or empty fields grant nothing. Duplicate list entries follow the ordinar
 
 An MCP selection grants the complete configured server. Pi's server and per-tool `direct`, `codemode`, `deferred`, and `hidden` exposure remains authoritative, including the standard `list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource` tools. The runtime loads and activates `codemode` and `tool_search` support automatically when selected exposures require them; profiles do not need to duplicate those implementation details. A standalone `codemode` grant activates only codemode. Codemode executes model-authored JavaScript and can call reachable tools, so it is an explicit authority grant.
 
-Resolution is read-only. It considers the global Pi `mcp.json` and, only when the active project is trusted, that project's `.pi/mcp.json`. The trusted project entry replaces a same-named global entry for every profile, including an invalid or disabled replacement; there is no global fallback. A runtime `cwd` override changes the child workspace but cannot select another MCP source or broaden the grant. A malformed selected source, missing/disabled selected entry, invalid selected config, or selected `-`/`_` namespace collision excludes the profile before pane creation. Resolution does not connect, install, expand environment/command expressions, read credentials, or write settings.
+Resolution is read-only. A [registry](#lookup-order) `mcp.json` entry wins first. Otherwise resolution considers the global Pi `mcp.json` and, only when the active project is trusted, that project's `.pi/mcp.json`. The trusted project entry replaces a same-named global entry for every profile, including an invalid or disabled replacement; there is no global fallback. A runtime `cwd` override changes the child workspace but cannot select another MCP source or broaden the grant. A malformed consulted source, missing/disabled selected entry, invalid selected config, or selected `-`/`_` namespace collision with any name in the profile's registries or ambient files excludes the profile before pane creation. Resolution does not connect, install, expand environment/command expressions, read credentials, or write settings.
 
 The child still launches with `--no-extensions --no-builtin-tools` and never loads ambient `builtin:mcp`. Its protected filtered controller re-reads only the exact selected entries, verifies their canonical source and semantic SHA-256 digest, reserves those names before profile extensions, and supplies them to Pi's public MCP runtime with ambient loading disabled. Unselected file-configured servers therefore do not connect, register tools/resources, or contribute names, descriptions, instructions, or prompt metadata. Once configuration identity passes, connection, authentication, reconnect, and transient failures use Pi's native MCP diagnostics and lifecycle rather than a package-specific terminal startup failure.
 
 Explicit `extensions` remain complete trusted executable grants. They load after the selected ambient names are reserved, may add differently named MCP servers, and can perform equivalent process or network I/O directly. `mcp-servers` is an ambient file-config filter, not an extension sandbox. Review both the selected server configurations and every declared extension.
 
-New Pi capability snapshots store only each server's ordered name, canonical source path, global/project scope, and semantic digest plus the required support-tool names. They do not copy config bodies, literal or resolved environment values, headers, OAuth tokens, provider credentials, or command output. Resume re-reads the exact stored source and refuses changed, missing, disabled, invalid, or source-mismatched entries before pane creation with guidance to spawn fresh. Rotating a credential behind an unchanged configured expression does not alter the digest. Version 1 extension-grant and legacy strict snapshots retain their existing replay paths.
+New Pi capability snapshots store only each server's ordered name, canonical source path, scope (`global`, `project`, `global-registry`, or `project-registry`), and semantic digest plus the required support-tool names. They do not copy config bodies, literal or resolved environment values, headers, OAuth tokens, provider credentials, or command output. Resume re-reads the exact stored source and refuses changed, missing, disabled, invalid, or source-mismatched entries before pane creation with guidance to spawn fresh. Rotating a credential behind an unchanged configured expression does not alter the digest. Version 1 extension-grant and legacy strict snapshots retain their existing replay paths.
 
 ## Body routing
 
@@ -258,11 +310,11 @@ Coordinate the task and delegate only when useful.
 
 `name` in a `subagent` tool call is a runtime display and addressing name, separate from the profile's effective name. If omitted, the extension uses the profile name and adds `-2`, `-3`, and so on when needed. An explicit name is never auto-suffixed: it is rejected when already running, reserved by an in-flight launch, or registered in the current parent session.
 
-Each new Pi launch stores a strict version 2 `mcp-capabilities` snapshot beside the child session. It contains selected built-ins, ordered canonical profile extension paths, explicit spawning state and targets, non-secret MCP server references and support state, model, thinking level, system prompt state, cwd, and agent directory. `subagent_message` structurally validates this exact state and preflights profile/framework extension files plus every stored MCP source/digest before creating a resume pane.
+Each new Pi launch stores a strict snapshot beside the child session. It contains selected built-ins, ordered canonical profile extension paths, explicit spawning state and targets, non-secret MCP server references and support state, model, thinking level, system prompt state, cwd, and agent directory. Launches that select a registry MCP server, list skills, or set `inherit-skills: false` store version 3 `registry-capabilities`, which adds the exact canonical skill files and `inheritSkills`; all other launches keep the version 2 `mcp-capabilities` shape. `subagent_message` structurally validates this exact state and preflights profile/framework extension files, every stored skill file, and every stored MCP source/digest before creating a resume pane. A missing skill file or changed registry MCP entry refuses the resume with guidance to spawn fresh.
 
 Resume does not reread the profile or package settings. It reconstructs the protected framework controls, preserves profile extension order, and uses the current installed contents at valid stored paths. Missing, malformed, relative, non-canonical, duplicate-canonical, reserved-framework, or nesting-inconsistent state fails closed rather than falling back to broader defaults.
 
-Existing valid version 1 extension-grant snapshots and strict legacy snapshots with `toolAllowlist` remain separate compatibility shapes. They continue through their existing command paths, and reading them does not rewrite them into version 2.
+Existing valid version 2, version 1 extension-grant, and strict legacy snapshots with `toolAllowlist` remain separate compatibility shapes. They continue through their existing command paths, and reading them does not rewrite them into a newer version.
 
 A successful AGY result stores a separate strict tagged snapshot referenced from the same name registry. New version 2 snapshots contain the exact conversation ID, cwd, model, effort, identity, logical and native tools, generated primary-agent contract, and ordered additional workspace list. Resume never rereads the mutable source profile or current parent cwd. It validates the stored state, every stored workspace, and the generated agent; reserves the snapshot against concurrent launch; and invokes `agy --conversation <exact-id>` with the exact stored boundary. A successful continuation atomically replaces only the stored conversation ID. Existing valid version 1 snapshots remain readable and resume with their original boundary and no added parent workspace. Missing, malformed, mismatched, unavailable, or unregistered state fails before pane creation.
 
@@ -288,7 +340,7 @@ AGY runs with `--output-format json`, the effective `--model`, and profile `thin
 
 Reading outside the workspaces requires the operator-managed global policy in `~/.gemini/antigravity-cli/settings.json`: `permissions.allow` containing `read_file(*)`, and `permissions.deny` containing `write_file(*)` plus absolute secret paths. See [AGY permission policy](../README.md#agy-permission-policy) for the snippet and caveats: the policy also governs interactive AGY use, denies every AGY file write, and cannot exclude in-repository secrets because path globs are unsupported. The extension only reads this file. Before each AGY launch or resume it checks for the two rules and, when they are missing or the file is missing, unreadable, or invalid, appends one non-blocking warning line to the acknowledgment.
 
-AGY profiles accept only `name`, `description`, `model`, `thinking`, `cwd`, the Markdown body, `disable-model-invocation`, `cli`, and `builtin-tools`. Explicit `mcp-servers`, `extensions`, `skill` or `skills`, `subagent_agents`, `system-prompt`, `session-mode`, `auto-exit`, and `interactive` fields are invalid, including empty values. `write`, `edit`, `bash`, `powershell`, and `codemode` are also invalid AGY built-ins.
+AGY profiles accept only `name`, `description`, `model`, `thinking`, `cwd`, the Markdown body, `disable-model-invocation`, `cli`, and `builtin-tools`. Explicit `mcp-servers`, `extensions`, `skill` or `skills`, `inherit-skills`, `subagent_agents`, `system-prompt`, `session-mode`, `auto-exit`, and `interactive` fields are invalid, including empty values. `write`, `edit`, `bash`, `powershell`, and `codemode` are also invalid AGY built-ins.
 
 AGY is one-shot. `subagent_message` rejects active steering without pane input. After successful completion, the same runtime name starts a one-shot continuation from the exact persisted conversation and workspace boundary. Terminal `ERROR`, `CANCELLED`, `INTERRUPTED`, waiting/unknown status, malformed JSON, denied actions, empty response, missing conversation ID, non-zero exit, and bounded stderr diagnostics are surfaced as failures without Pi or Claude fallback. A missing pane advertises resume only when a valid prior conversation snapshot, stored cwd, additional workspaces, and generated agent remain replayable.
 
@@ -296,8 +348,8 @@ Use this flat form when AGY must be the only target. For ordered AGY-to-Pi fallb
 
 ## Claude CLI limitations
 
-`cli: claude` uses the existing Claude Code launch path rather than a Pi child. It applies `model`, `cwd`, the Markdown body as an appended system prompt, and lifecycle tracking. Pi-specific `skills`, `thinking`, `session-mode`, `system-prompt` mode selection, nested-spawn allowlists, and resume snapshots do not configure Claude Code. Declaring `builtin-tools`, `mcp-servers`, or `extensions` on a `cli: claude` profile is invalid, even when the value is explicitly empty, because those capability fields cannot be enforced for Claude Code. Running Claude children can receive live messages, but finished Claude children cannot be resumed through `subagent_message`. Use `cli: pi` when those isolation and resume guarantees are required.
+`cli: claude` uses the existing Claude Code launch path rather than a Pi child. It applies `model`, `cwd`, the Markdown body as an appended system prompt, and lifecycle tracking. Pi-specific `skills`, `thinking`, `session-mode`, `system-prompt` mode selection, nested-spawn allowlists, and resume snapshots do not configure Claude Code. Declaring `builtin-tools`, `mcp-servers`, `extensions`, or `inherit-skills` on a `cli: claude` profile is invalid, even when the value is explicitly empty, because those capability fields cannot be enforced for Claude Code. Running Claude children can receive live messages, but finished Claude children cannot be resumed through `subagent_message`. Use `cli: pi` when those isolation and resume guarantees are required.
 
 ## Troubleshooting
 
-Run `subagents_list` in the active Pi session. It reports valid visible definitions and includes diagnostics for invalid files. If none are available, create a profile in the reported global directory or in the nearest trusted project `.pi/agents` directory.
+Run `subagents_list` in the active Pi session. It reports valid visible definitions and includes diagnostics for invalid files. If none are available, create a profile in the reported global directory or in the nearest trusted project `.pi/agents` directory. If `pi install -l` or `pi mcp login` does not see a registry entry, start `pi` in that agents directory once and trust it.

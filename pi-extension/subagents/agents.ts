@@ -3,6 +3,7 @@ import {
   DefaultPackageManager,
   SettingsManager,
   getAgentDir,
+  loadSkills,
   parseFrontmatter,
   type PackageSource,
   type ResolvedResource,
@@ -18,6 +19,7 @@ import {
 import { translateAgyTools } from "./agy.ts";
 import {
   loadMcpConfigCatalog,
+  loadMcpRegistrySource,
   resolveMcpServerReferences,
   type McpServerReference,
   type McpSupportTool,
@@ -66,6 +68,8 @@ export interface ParsedAgentDefinition {
   mcpServers: string[];
   extensions: AgentExtensionSelector[];
   skills: string[];
+  /** Pi-only: whether the child keeps native ambient skill discovery (default true). */
+  inheritSkills?: boolean;
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   subagentAgents: string[];
   autoExit?: boolean;
@@ -83,6 +87,8 @@ export interface ParsedAgentDefinition {
 
 export interface AgentDefinition extends Omit<ParsedAgentDefinition, "modelChain"> {
   extensionPaths: string[];
+  /** Exact skill files resolved from `skills` for Pi children, passed as `--skill`. */
+  skillPaths: string[];
   mcpServerReferences: McpServerReference[];
   mcpSupportTools: McpSupportTool[];
   modelChain?: AgentModelChainTarget[];
@@ -125,6 +131,7 @@ const SUPPORTED_FIELDS = new Set([
   "extensions",
   "skill",
   "skills",
+  "inherit-skills",
   "thinking",
   "subagent_agents",
   "auto-exit",
@@ -659,7 +666,7 @@ export function parseAgentDefinition(
   const cli = optionalEnum<AgentCli>(frontmatter, "cli", CLI_VALUES, filePath, diagnostics);
   if (modelChain !== undefined) {
     for (const field of [
-      "cli", "model", "thinking", "extensions", "mcp-servers", "skill", "skills", "subagent_agents",
+      "cli", "model", "thinking", "extensions", "mcp-servers", "skill", "skills", "inherit-skills", "subagent_agents",
       "session-mode", "system-prompt", "auto-exit", "interactive",
     ] as const) {
       if (hasOwn(frontmatter, field)) {
@@ -678,7 +685,7 @@ export function parseAgentDefinition(
     }
   }
   if (cli === "claude") {
-    for (const field of ["builtin-tools", "mcp-servers", "extensions"] as const) {
+    for (const field of ["builtin-tools", "mcp-servers", "extensions", "inherit-skills"] as const) {
       if (hasOwn(frontmatter, field)) {
         diagnostics.push(
           diagnostic(filePath, field, `cannot be used with cli: claude; ${field} is Pi-only`),
@@ -692,6 +699,7 @@ export function parseAgentDefinition(
       "mcp-servers",
       "skill",
       "skills",
+      "inherit-skills",
       "subagent_agents",
       "system-prompt",
       "session-mode",
@@ -719,6 +727,7 @@ export function parseAgentDefinition(
     }
   }
 
+  const inheritSkills = optionalBoolean(frontmatter, "inherit-skills", filePath, diagnostics);
   const agent: ParsedAgentDefinition = {
     name,
     description: optionalString(frontmatter, "description", filePath, diagnostics),
@@ -727,6 +736,7 @@ export function parseAgentDefinition(
     mcpServers,
     extensions,
     skills,
+    ...(inheritSkills !== undefined ? { inheritSkills } : {}),
     thinking: optionalEnum(frontmatter, "thinking", THINKING_VALUES, filePath, diagnostics),
     subagentAgents,
     autoExit: optionalBoolean(frontmatter, "auto-exit", filePath, diagnostics),
@@ -847,6 +857,31 @@ export function findNearestProjectAgentsDir(cwd: string): string | null {
   }
 }
 
+/**
+ * Subagent-only capability registry beside an agents directory. It uses Pi's
+ * project layout (`settings.json`, `mcp.json`, `skills/`) so stock `pi install
+ * -l`, `pi mcp add -l`, and `pi config --local` run from the agents directory
+ * manage it, while the parent session never reads it.
+ */
+export function capabilityRegistryDir(agentsDir: string): string {
+  return join(agentsDir, CONFIG_DIR_NAME);
+}
+
+type RegistryKind = "project" | "global";
+
+/** Ordered registries a profile consults before ambient sources (first hit wins). */
+type ProfileRegistries<T> = { project: T | null; global: T };
+
+function registriesFor<T>(agent: Pick<ParsedAgentDefinition, "source">, registries: ProfileRegistries<T>): T[] {
+  return agent.source === "project" && registries.project
+    ? [registries.project, registries.global]
+    : [registries.global];
+}
+
+function registryLabel(kind: RegistryKind): string {
+  return `${kind} subagent registry`;
+}
+
 type PackageScope = "user" | "project";
 type SettingsScope = "global" | "project";
 
@@ -856,6 +891,8 @@ type ResolvedPackage = {
 };
 
 type PackageCatalog = {
+  /** Set for subagent registries; their packages use Pi's project scope rooted at the agents dir. */
+  registryLabel?: string;
   cwd: string;
   agentDir: string;
   globalPackages: PackageSource[];
@@ -874,6 +911,17 @@ class ReadOnlyPackageSettingsStorage {
       global: JSON.stringify({ packages: globalPackages }),
       project: JSON.stringify({ packages: projectPackages }),
     };
+  }
+
+  /** Serve exact settings snapshots (for example `packages` plus `skills`) without allowing writes. */
+  static fromSettings(
+    globalSettings: Record<string, unknown>,
+    projectSettings: Record<string, unknown>,
+  ): ReadOnlyPackageSettingsStorage {
+    const storage = new ReadOnlyPackageSettingsStorage([], []);
+    storage.content.global = JSON.stringify(globalSettings);
+    storage.content.project = JSON.stringify(projectSettings);
+    return storage;
   }
 
   withLock(
@@ -1038,6 +1086,52 @@ function loadPackageCatalog(
   };
 }
 
+/**
+ * Load one registry's packages as Pi project-scope packages rooted at the
+ * agents directory, so `pi install -l` install paths and relative local
+ * sources resolve exactly as Pi would there. The registry is read-only and
+ * has no global delta bases.
+ */
+function loadRegistryPackageCatalog(agentsDir: string, kind: RegistryKind): PackageCatalog {
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.create(agentsDir, agentDir, { projectTrusted: true });
+  const settingsErrors: Partial<Record<SettingsScope, string>> = {};
+  for (const entry of settingsManager.drainErrors()) {
+    if (entry.scope !== "project") continue;
+    appendSettingsError(settingsErrors, "project", entry.error?.message ?? String(entry.error));
+  }
+  const invalidPackages = {
+    global: new Map<string, string>(),
+    project: new Map<string, string>(),
+  };
+  const registrySettings = settingsManager.getProjectSettings() as { packages?: unknown };
+  const projectPackages = validateConfiguredPackages(
+    registrySettings.packages,
+    "project",
+    settingsErrors,
+    invalidPackages.project,
+  );
+  const identityManager = new DefaultPackageManager({
+    cwd: agentsDir,
+    agentDir,
+    settingsManager: SettingsManager.fromStorage(
+      new ReadOnlyPackageSettingsStorage([], []),
+      { projectTrusted: true },
+    ),
+  });
+  return {
+    registryLabel: registryLabel(kind),
+    cwd: agentsDir,
+    agentDir,
+    globalPackages: [],
+    projectPackages,
+    settingsErrors,
+    invalidPackages,
+    identityManager,
+    cache: new Map(),
+  };
+}
+
 function findExactPackage(
   entries: readonly PackageSource[],
   source: string,
@@ -1187,7 +1281,8 @@ function canonicalFileWithinRoot(
 
 async function resolveAgentExtensions(
   agent: ParsedAgentDefinition,
-  catalog: PackageCatalog,
+  ambientCatalog: PackageCatalog,
+  registryCatalogs: readonly PackageCatalog[] = [],
 ): Promise<{ agent: AgentDefinition | null; diagnostics: AgentDiagnostic[] }> {
   const diagnostics: AgentDiagnostic[] = [];
   const extensionPaths: string[] = [];
@@ -1196,10 +1291,49 @@ async function resolveAgentExtensions(
   for (const [extensionIndex, selector] of agent.extensions.entries()) {
     const packageField = `extensions[${extensionIndex}].package`;
     const selectorField = `extensions[${extensionIndex}]`;
-    let scope: PackageScope;
+    let scope: PackageScope = "user";
     let configured: PackageSource | undefined;
+    let catalog = ambientCatalog;
 
-    if (agent.source === "project") {
+    // Subagent registries come first; the first registry naming the exact
+    // source wins. Invalid registry settings block rather than fall through.
+    let registryBlocked = false;
+    for (const registry of registryCatalogs) {
+      const invalidRegistryPackage = registry.invalidPackages.project.get(selector.package);
+      if (invalidRegistryPackage) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            packageField,
+            `${registry.registryLabel} package configuration for "${selector.package}" is invalid: ${invalidRegistryPackage}`,
+          ),
+        );
+        registryBlocked = true;
+        break;
+      }
+      if (registry.settingsErrors.project) {
+        diagnostics.push(
+          diagnostic(
+            agent.filePath,
+            packageField,
+            `cannot inspect ${registry.registryLabel} packages safely: ${registry.settingsErrors.project}`,
+          ),
+        );
+        registryBlocked = true;
+        break;
+      }
+      configured = findExactPackage(registry.projectPackages, selector.package);
+      if (configured) {
+        catalog = registry;
+        scope = "project";
+        break;
+      }
+    }
+    if (registryBlocked) continue;
+
+    if (configured) {
+      // Resolved from a subagent registry; ambient settings are not consulted.
+    } else if (agent.source === "project") {
       const invalidProjectPackage = catalog.invalidPackages.project.get(selector.package);
       if (invalidProjectPackage) {
         diagnostics.push(
@@ -1277,11 +1411,12 @@ async function resolveAgentExtensions(
 
     if (!configured) {
       const settingsScope = agent.source === "project" ? "project or global" : "global";
+      const registries = registryCatalogs.map((registry) => `the ${registry.registryLabel}`).join(", ");
       diagnostics.push(
         diagnostic(
           agent.filePath,
           packageField,
-          `package "${selector.package}" is not configured in permitted ${settingsScope} settings`,
+          `package "${selector.package}" is not configured in ${registries ? `${registries}, or ` : ""}permitted ${settingsScope} settings`,
         ),
       );
       continue;
@@ -1407,7 +1542,7 @@ async function resolveAgentExtensions(
 
   return {
     agent: diagnostics.length === 0
-      ? { ...agent, extensionPaths, mcpServerReferences: [], mcpSupportTools: [] }
+      ? { ...agent, extensionPaths, skillPaths: [], mcpServerReferences: [], mcpSupportTools: [] }
       : null,
     diagnostics,
   };
@@ -1416,8 +1551,9 @@ async function resolveAgentExtensions(
 async function resolveCompleteAgentExtensions(
   agent: ParsedAgentDefinition,
   catalog: PackageCatalog,
+  registryCatalogs: readonly PackageCatalog[],
 ): Promise<{ agent: AgentDefinition | null; diagnostics: AgentDiagnostic[] }> {
-  if (!agent.modelChain) return resolveAgentExtensions(agent, catalog);
+  if (!agent.modelChain) return resolveAgentExtensions(agent, catalog, registryCatalogs);
 
   const diagnostics: AgentDiagnostic[] = [];
   const resolvedTargets: AgentModelChainTarget[] = [];
@@ -1427,7 +1563,7 @@ async function resolveCompleteAgentExtensions(
       extensions: target.extensions,
       modelChain: undefined,
     };
-    const resolved = await resolveAgentExtensions(synthetic, catalog);
+    const resolved = await resolveAgentExtensions(synthetic, catalog, registryCatalogs);
     diagnostics.push(...resolved.diagnostics.map((entry) => ({
       ...entry,
       ...(entry.field
@@ -1441,10 +1577,201 @@ async function resolveCompleteAgentExtensions(
 
   return {
     agent: diagnostics.length === 0 && resolvedTargets.length === agent.modelChain.length
-      ? { ...agent, extensionPaths: [], modelChain: resolvedTargets }
+      ? { ...agent, extensionPaths: [], skillPaths: [], modelChain: resolvedTargets }
       : null,
     diagnostics,
   };
+}
+
+type SkillContext = {
+  label: string;
+  /** Skill name to canonical skill file, in Pi's first-wins precedence. */
+  skills: Map<string, string>;
+  error?: string;
+};
+
+function isPiHarnessFlatProfile(agent: ParsedAgentDefinition): boolean {
+  return !agent.modelChain && (agent.cli === undefined || agent.cli === "pi");
+}
+
+/** Mirror Pi's resource loader: an auto or package skill directory loads its SKILL.md. */
+function skillResourcePath(resource: ResolvedResource): string {
+  if (resource.metadata.source !== "auto" && resource.metadata.origin !== "package") {
+    return resource.path;
+  }
+  try {
+    if (!statSync(resource.path).isDirectory()) return resource.path;
+  } catch {
+    return resource.path;
+  }
+  const skillFile = join(resource.path, "SKILL.md");
+  return existsSync(skillFile) ? skillFile : resource.path;
+}
+
+function settingsSkillInputs(
+  settings: Record<string, unknown>,
+): { value: Record<string, unknown> } | { error: string } {
+  const value: Record<string, unknown> = {};
+  if (settings.packages !== undefined) {
+    if (!Array.isArray(settings.packages)) return { error: "packages must be an array" };
+    value.packages = settings.packages;
+  }
+  if (settings.skills !== undefined) {
+    if (!Array.isArray(settings.skills) || !settings.skills.every((entry) => typeof entry === "string")) {
+      return { error: "skills must be an array of strings" };
+    }
+    value.skills = settings.skills;
+  }
+  return { value };
+}
+
+/**
+ * Resolve every enabled skill Pi would discover for one read-only settings
+ * context, using Pi's package resolver and skill loader. Nothing is installed,
+ * written, or fetched; missing packages are skipped.
+ */
+async function loadSkillContext(params: {
+  label: string;
+  cwd: string;
+  agentDir: string;
+  globalSettings: Record<string, unknown>;
+  projectSettings: Record<string, unknown>;
+  projectTrusted: boolean;
+  settingsError?: string;
+  include: (resource: ResolvedResource) => boolean;
+}): Promise<SkillContext> {
+  const skills = new Map<string, string>();
+  if (params.settingsError) return { label: params.label, skills, error: params.settingsError };
+  const globalInputs = settingsSkillInputs(params.globalSettings);
+  if ("error" in globalInputs) return { label: params.label, skills, error: `global settings: ${globalInputs.error}` };
+  const projectInputs = settingsSkillInputs(params.projectSettings);
+  if ("error" in projectInputs) return { label: params.label, skills, error: `project settings: ${projectInputs.error}` };
+
+  try {
+    const settingsManager = SettingsManager.fromStorage(
+      ReadOnlyPackageSettingsStorage.fromSettings(globalInputs.value, projectInputs.value),
+      { projectTrusted: params.projectTrusted },
+    );
+    const manager = new DefaultPackageManager({
+      cwd: params.cwd,
+      agentDir: params.agentDir,
+      settingsManager,
+    });
+    const resolved = await manager.resolve(async () => "skip");
+    const skillPaths = resolved.skills
+      .filter((resource) => resource.enabled && params.include(resource))
+      .map(skillResourcePath);
+    const loaded = loadSkills({
+      cwd: params.cwd,
+      agentDir: params.agentDir,
+      skillPaths,
+      includeDefaults: false,
+    });
+    for (const skill of loaded.skills) {
+      if (skills.has(skill.name)) continue;
+      try {
+        skills.set(skill.name, realpathSync(skill.filePath));
+      } catch {
+        // An unreadable file cannot be granted; the name stays unavailable here.
+      }
+    }
+  } catch (error: any) {
+    return { label: params.label, skills, error: error?.message ?? String(error) };
+  }
+  return { label: params.label, skills };
+}
+
+async function loadRegistrySkillContext(agentsDir: string, kind: RegistryKind): Promise<SkillContext> {
+  const agentDir = getAgentDir();
+  const registryRoot = capabilityRegistryDir(agentsDir);
+  const settingsManager = SettingsManager.create(agentsDir, agentDir, { projectTrusted: true });
+  const settingsError = settingsManager.drainErrors()
+    .filter((entry) => entry.scope === "project")
+    .map((entry) => entry.error?.message ?? String(entry.error))
+    .join("; ");
+  return loadSkillContext({
+    label: registryLabel(kind),
+    cwd: agentsDir,
+    agentDir,
+    globalSettings: {},
+    projectSettings: settingsManager.getProjectSettings() as Record<string, unknown>,
+    projectTrusted: true,
+    ...(settingsError ? { settingsError } : {}),
+    // Keep only registry-owned skills: registry packages, registry settings
+    // entries, and `<registry>/skills/`. Pi also auto-discovers user skills
+    // and ancestor `.agents/skills`, which belong to the ambient context.
+    include: (resource) =>
+      resource.metadata.scope === "project" &&
+      !(resource.metadata.source === "auto" && resource.metadata.baseDir !== registryRoot),
+  });
+}
+
+async function loadAmbientSkillContext(
+  options: DiscoverAgentDefinitionsOptions,
+  projectAgentsDir: string | null,
+): Promise<SkillContext> {
+  const agentDir = getAgentDir();
+  const settingsCwd = projectAgentsDir ? dirname(dirname(projectAgentsDir)) : options.cwd;
+  const settingsManager = SettingsManager.create(settingsCwd, agentDir, {
+    projectTrusted: options.projectTrusted,
+  });
+  const settingsError = settingsManager.drainErrors()
+    .filter((entry) => entry.scope === "global" || options.projectTrusted)
+    .map((entry) => `${entry.scope} settings: ${entry.error?.message ?? String(entry.error)}`)
+    .join("; ");
+  return loadSkillContext({
+    label: "ambient",
+    cwd: settingsCwd,
+    agentDir,
+    globalSettings: settingsManager.getGlobalSettings() as Record<string, unknown>,
+    projectSettings: options.projectTrusted
+      ? settingsManager.getProjectSettings() as Record<string, unknown>
+      : {},
+    projectTrusted: options.projectTrusted,
+    ...(settingsError ? { settingsError } : {}),
+    include: () => true,
+  });
+}
+
+function formatAlternatives(labels: readonly string[]): string {
+  return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}` : labels.join("");
+}
+
+/** Resolve profile skill names to exact files: registries first, then ambient. */
+function resolveAgentSkills(
+  agent: AgentDefinition,
+  contexts: readonly SkillContext[],
+): { skillPaths: string[] } | { diagnostics: AgentDiagnostic[] } {
+  const diagnostics: AgentDiagnostic[] = [];
+  const skillPaths: string[] = [];
+  for (const name of agent.skills) {
+    let resolved: string | undefined;
+    let blocked = false;
+    for (const context of contexts) {
+      if (context.error) {
+        diagnostics.push(diagnostic(
+          agent.filePath,
+          "skills",
+          `cannot inspect ${context.label} skills safely for "${name}": ${context.error}`,
+        ));
+        blocked = true;
+        break;
+      }
+      resolved = context.skills.get(name);
+      if (resolved) break;
+    }
+    if (blocked) continue;
+    if (!resolved) {
+      diagnostics.push(diagnostic(
+        agent.filePath,
+        "skills",
+        `skill "${name}" is not available in the ${formatAlternatives(contexts.map((context) => context.label))} skills`,
+      ));
+      continue;
+    }
+    if (!skillPaths.includes(resolved)) skillPaths.push(resolved);
+  }
+  return diagnostics.length > 0 ? { diagnostics } : { skillPaths };
 }
 
 export async function discoverAgentDefinitions(
@@ -1478,14 +1805,23 @@ export async function discoverAgentDefinitions(
     for (const agent of project.agents) agents.set(agent.name, agent);
   }
 
+  const globalRegistryDir = capabilityRegistryDir(globalAgentsDir);
+  const projectRegistryDir = projectAgentsDir ? capabilityRegistryDir(projectAgentsDir) : null;
+
   const parsedAgents = [...agents.values()];
   let discovered: AgentDefinition[];
   if (parsedAgents.some((agent) =>
     agent.extensions.length > 0 || agent.modelChain?.some((target) => target.extensions.length > 0)
   )) {
     const catalog = loadPackageCatalog(options, projectAgentsDir);
+    const registryCatalogs: ProfileRegistries<PackageCatalog> = {
+      global: loadRegistryPackageCatalog(globalAgentsDir, "global"),
+      project: projectAgentsDir ? loadRegistryPackageCatalog(projectAgentsDir, "project") : null,
+    };
     const resolved = await Promise.all(
-      parsedAgents.map((agent) => resolveCompleteAgentExtensions(agent, catalog)),
+      parsedAgents.map((agent) =>
+        resolveCompleteAgentExtensions(agent, catalog, registriesFor(agent, registryCatalogs))
+      ),
     );
     discovered = [];
     for (const result of resolved) {
@@ -1496,6 +1832,7 @@ export async function discoverAgentDefinitions(
     discovered = parsedAgents.map((agent) => ({
       ...agent,
       extensionPaths: [],
+      skillPaths: [],
       mcpServerReferences: [],
       mcpSupportTools: [],
       ...(agent.modelChain
@@ -1504,11 +1841,42 @@ export async function discoverAgentDefinitions(
     }));
   }
 
+  // Only flat Pi children receive `--skill`; Claude keeps its existing
+  // acceptance of `skills`, and AGY/model-chain profiles reject the field.
+  if (discovered.some((agent) => isPiHarnessFlatProfile(agent) && agent.skills.length > 0)) {
+    const ambient = await loadAmbientSkillContext(options, projectAgentsDir);
+    const registrySkills: ProfileRegistries<SkillContext> = {
+      global: await loadRegistrySkillContext(globalAgentsDir, "global"),
+      project: projectAgentsDir ? await loadRegistrySkillContext(projectAgentsDir, "project") : null,
+    };
+    const resolvedSkillAgents: AgentDefinition[] = [];
+    for (const agent of discovered) {
+      if (!isPiHarnessFlatProfile(agent) || agent.skills.length === 0) {
+        resolvedSkillAgents.push(agent);
+        continue;
+      }
+      const resolution = resolveAgentSkills(agent, [...registriesFor(agent, registrySkills), ambient]);
+      if ("diagnostics" in resolution) {
+        diagnostics.push(...resolution.diagnostics);
+        continue;
+      }
+      resolvedSkillAgents.push({ ...agent, skillPaths: resolution.skillPaths });
+    }
+    discovered = resolvedSkillAgents;
+  }
+
   if (discovered.some((agent) => agent.mcpServers.length > 0)) {
     const catalog = loadMcpConfigCatalog(options);
+    const registrySources = {
+      global: loadMcpRegistrySource(globalRegistryDir, "global-registry"),
+      project: projectRegistryDir ? loadMcpRegistrySource(projectRegistryDir, "project-registry") : null,
+    };
     const resolvedMcpAgents: AgentDefinition[] = [];
     for (const agent of discovered) {
-      const resolution = resolveMcpServerReferences(agent.mcpServers, catalog);
+      const resolution = resolveMcpServerReferences(agent.mcpServers, {
+        ...catalog,
+        registries: registriesFor(agent, registrySources),
+      });
       if ("errors" in resolution) {
         diagnostics.push(...resolution.errors.map((message) =>
           diagnostic(agent.filePath, "mcp-servers", message)

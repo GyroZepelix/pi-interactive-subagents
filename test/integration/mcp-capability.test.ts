@@ -26,6 +26,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   loadMcpConfigCatalog,
+  loadMcpRegistrySource,
   resolveMcpServerReferences,
   type McpServerReference,
   type McpSupportTool,
@@ -125,14 +126,27 @@ function writeMcpConfig(agentDir: string, mcpServers: Record<string, unknown>): 
   return configPath;
 }
 
+/** Write a subagent-only global registry `mcp.json` under `<agentDir>/agents/.pi/`. */
+function writeRegistryMcpConfig(agentDir: string, mcpServers: Record<string, unknown>): string {
+  const registryRoot = join(agentDir, "agents", ".pi");
+  mkdirSync(registryRoot, { recursive: true });
+  return writeMcpConfig(registryRoot, mcpServers);
+}
+
 function resolveReferences(
   cwd: string,
   agentDir: string,
   names: string[],
+  options: { globalRegistry?: boolean } = {},
 ): { references: McpServerReference[]; supportTools: McpSupportTool[] } {
   const resolution = resolveMcpServerReferences(
     names,
-    loadMcpConfigCatalog({ cwd, agentDir, projectTrusted: false }),
+    {
+      ...loadMcpConfigCatalog({ cwd, agentDir, projectTrusted: false }),
+      ...(options.globalRegistry
+        ? { registries: [loadMcpRegistrySource(join(agentDir, "agents", ".pi"), "global-registry")] }
+        : {}),
+    },
   );
   assert.ok(!("errors" in resolution), "fixture MCP configuration must resolve");
   return {
@@ -396,6 +410,87 @@ describe("filtered MCP child lifecycle", { concurrency: 1 }, () => {
     assert.equal(existsSync(ambientMarker), false, "ambient marker remains absent after teardown");
     assert.equal(existsSync(join(paths.agentDir, "mcp-auth.json")), false);
     assertNoCredentialArtifacts(paths.root, credential);
+  });
+
+  it("starts a registry-only server in the child while the parent's ambient config never names it", async () => {
+    const paths = makeIsolatedRoot();
+    const registryMarker = join(paths.root, "registry.jsonl");
+    const ambientMarker = join(paths.root, "ambient-shadowed.jsonl");
+    writeMcpConfig(paths.agentDir, {
+      shared: {
+        command: process.execPath,
+        args: [MCP_FIXTURE, ambientMarker, "ambient"],
+        exposure: "direct",
+      },
+    });
+    const registryPath = writeRegistryMcpConfig(paths.agentDir, {
+      shared: {
+        command: process.execPath,
+        args: [MCP_FIXTURE, registryMarker, "registry"],
+        exposure: "direct",
+      },
+    });
+    const { references, supportTools } = resolveReferences(
+      paths.cwd,
+      paths.agentDir,
+      ["shared"],
+      { globalRegistry: true },
+    );
+    assert.deepEqual(references.map(({ scope, source }) => ({ scope, source })), [
+      { scope: "global-registry", source: realpathSync(registryPath) },
+    ]);
+    // The parent's ambient catalog (global plus project mcp.json) never reads the registry.
+    const ambientCatalog = loadMcpConfigCatalog({ cwd: paths.cwd, agentDir: paths.agentDir, projectTrusted: true });
+    assert.notEqual(ambientCatalog.global.path, realpathSync(registryPath));
+
+    const isolated = await startIsolatedRuntime(references, supportTools, paths);
+    await waitFor("registry MCP tool registration", () =>
+      isolated.runtime.session.getAllTools().some((tool) => tool.name === "mcp__shared__direct"));
+    const directResult = await isolated.runtime.session.getToolDefinition("mcp__shared__direct")!.execute(
+      "fixture-registry-direct",
+      {},
+      undefined,
+      undefined,
+      undefined as any,
+    );
+    assert.match(JSON.stringify(directResult), /registry:direct/);
+    assert.equal(existsSync(ambientMarker), false, "the shadowed ambient server must never start");
+    await disposeAndAssertStopped(isolated, registryMarker);
+  });
+
+  it("finds OAuth credentials for a registry server in the shared agent-dir credential store", async () => {
+    const paths = makeIsolatedRoot();
+    const authorizations: Array<string | undefined> = [];
+    let authServer: Server | undefined;
+    try {
+      authServer = createServer((request, response) => {
+        authorizations.push(request.headers.authorization);
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "unauthorized" }));
+      });
+      await new Promise<void>((resolvePromise, reject) => {
+        authServer!.once("error", reject);
+        authServer!.listen(0, "127.0.0.1", resolvePromise);
+      });
+      const address = authServer.address();
+      assert.ok(address && typeof address === "object");
+      const url = `http://127.0.0.1:${address.port}/mcp`;
+      writeRegistryMcpConfig(paths.agentDir, {
+        "registry-oauth": { url, exposure: "direct", timeout: 1 },
+      });
+      // Pi stores MCP OAuth state in <agentDir>/mcp-auth.json keyed by server
+      // namespace and URL, independent of which mcp.json defined the server.
+      const token = `registry-token-${process.pid}`;
+      writeFileSync(join(paths.agentDir, "mcp-auth.json"), JSON.stringify({
+        [`mcp__registry_oauth|${new URL(url).toString()}`]: { tokens: { access_token: token, token_type: "Bearer" } },
+      }));
+      const resolved = resolveReferences(paths.cwd, paths.agentDir, ["registry-oauth"], { globalRegistry: true });
+      await startIsolatedRuntime(resolved.references, resolved.supportTools, paths);
+      await waitFor("authorized registry MCP request", () => authorizations.length > 0);
+      assert.equal(authorizations[0], `Bearer ${token}`);
+    } finally {
+      await new Promise<void>((resolvePromise) => authServer?.close(() => resolvePromise()) ?? resolvePromise());
+    }
   });
 
   it("keeps valid connection and authentication failures on Pi's diagnostic path", async () => {
