@@ -16,3 +16,10 @@ A trusted-project switch that stops global profiles from being inherited (or all
 - Link: [Handoff: RPC (headless) mode requirements from A.Y.A.](./handoffs/2026-11-09-from-pi-voice-assistant-aya-rpc-mode-requirements.md)
 
 Requirements input only, not a design or plan: what A.Y.A. needs from a headless (RPC) mode so its Pi can delegate work to sub-agents; open to refinement in a later grill-with-docs.
+
+## B3: Background (non-split) subagent launch mode
+
+- Added: 2026-11-18
+- Source: session 2026-11-18 (subagent-only capability registry planning)
+
+An opt-in profile flag that runs a subagent without splitting the current tmux window while keeping the rest of the system (status, messaging, resume, result delivery). Candidate approaches to discuss later: a hidden or background tmux pane or session, or a `pi -p` process. Not yet discussed or designed.
