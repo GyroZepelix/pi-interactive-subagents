@@ -2,7 +2,7 @@
 
 ## Prerequisites and setup
 
-- Runtime use requires Pi 1.0 or newer and tmux; the locked development graph currently resolves Pi 1.1.x. Pi must run inside tmux, for example `tmux new -A -s pi 'pi'` (`README.md`, `package.json`, `package-lock.json`, `pi-extension/subagents/tmux.ts`).
+- Runtime use requires Pi 1.0 or newer and the tmux executable; the locked development graph currently resolves Pi 1.1.x. Inside tmux (for example `tmux new -A -s pi 'pi'`) children split the parent's window; without `$TMUX` they run on the private detached server `tmux -L pi-subagents` (`README.md`, `package.json`, `package-lock.json`, `pi-extension/subagents/tmux.ts`).
 - `cli: agy` additionally requires an authenticated compatible Antigravity CLI on `PATH`; the verified local baseline is 1.2.11 (`README.md`, `pi-extension/subagents/agy.ts`).
 - The project is an ESM package and Pi loads `pi-extension/subagents/index.ts` through the `pi.extensions` manifest field and the `subagent-profiles` skill under `skills/` through `pi.skills` (`package.json`).
 - Install locked development dependencies with `npm ci`. Dependency changes require lockfile regeneration and review (`README.md`, `package.json`, `package-lock.json`).
@@ -16,7 +16,7 @@
 | `npm pack --dry-run --json` | Published package contents. | Safe package inspection; no tarball is created. |
 | `git diff --check` | Whitespace and patch integrity. | Safe local check. |
 | Temporary `agy --add-dir <agent-root> --add-dir <second-workspace> --agent <generated-name> -p /agents --output-format text` probe | Repeatable added-workspace parsing and generated custom-agent selection/discovery only. | Safe non-model check; use ephemeral roots outside the repository and remove them afterward. It does not prove model tool execution or cross-workspace reads. |
-| `node --test test/integration/tmux-surface.test.ts` | Real tmux pane creation, delivery, focus, capture, and cleanup. | Requires tmux but does not invoke a model. Prefer a controlled detached tmux session when an active Pi TUI may compete for pane focus. |
+| `node --test test/integration/tmux-surface.test.ts` | Real tmux pane creation, delivery, focus, capture, and cleanup. | Requires tmux but does not invoke a model. Prefer a controlled detached tmux session when an active Pi TUI may compete for pane focus. Split-pane cases run only with an attached client; the detached private-server cases also run under `env -u TMUX -u TMUX_PANE`. |
 | `node --test --test-concurrency=1 test/integration/subagent-lifecycle.test.ts` | Real Pi/AGY child lifecycle, profile tools, result delivery, and resume behavior when applicable. | Model-consuming, time- and cost-bearing; requires explicit approval. Do not infer prompt-free AGY tool execution or exact resume from unit/discovery checks alone. |
 
 No lint, formatter-check, non-emitting type-check, or CI command is defined.

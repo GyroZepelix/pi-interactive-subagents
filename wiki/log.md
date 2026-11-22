@@ -272,3 +272,18 @@ Use this shape for new entries:
 - Disposition: MERGE `wiki/development.md` "starts isolated Pi SDK sessions without prompting a model" - added registry-server coverage and the seeded OAuth store key shape.
 - Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, ran memory safety scan.
 - Notes: registry and skill semantics were written to `wiki/conventions/agent-profiles.md` during implementation and were not duplicated; no lint-queue entries.
+
+## [2026-11-22] dream | Gamemaster checkpoint 261122-1959 direct
+
+- Trigger: `/dream` run after Gamemaster checkpoint: 261122-1959-headless-rpc-mode-subagents/direct.
+- Inputs: current conversation, `spec/archive/261122-1959-headless-rpc-mode-subagents/{plan,verification,outcome}.md`, `pi-extension/subagents/{tmux,index,status}.ts`, `test/test.ts`, `test/integration/tmux-surface.test.ts`, `README.md`, and the changed wiki pages.
+- Wiki pages changed: `wiki/architecture.md`, `wiki/conventions/runtime-safety.md`, `wiki/development.md`, `wiki/map.md`, `wiki/conventions/typescript-modules.md`, and `wiki/log.md`. The run's episode is discoverable through `wiki/dreams/episodes.jsonl`.
+- Disposition: SUPERSEDE `wiki/architecture.md` "The extension creates a detached right-hand tmux split" - surface is now chosen between split and the private detached server, and panes are tagged.
+- Disposition: SUPERSEDE `wiki/architecture.md` "The current schema accepts only `status.enabled`" - config now also accepts optional `maxConcurrent`.
+- Disposition: SUPERSEDE `wiki/conventions/runtime-safety.md` "Results cancelled by shutdown are not re-delivered to the replacement session" - aborted watches no longer close child panes, and live orphans are steered instead of resumed.
+- Disposition: SUPERSEDE `wiki/development.md` "Pi must run inside tmux, for example" - only the tmux executable is required; outside tmux children are detached.
+- Disposition: MERGE `wiki/development.md` "Prefer a controlled detached tmux session when an active Pi TUI may compete for pane focus" - added the attached-only split cases and the detached cases that run without `$TMUX`.
+- Disposition: MERGE `wiki/map.md` "tmux availability, pane lifecycle, command delivery" - added detached surfaces, handle routing, pane tags, and live-pane lookup.
+- Disposition: MERGE `wiki/conventions/typescript-modules.md` "Implementation modules expose focused named functions" - added the tmux transport seam and the new test setters.
+- Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, and ran the memory safety scan.
+- Notes: `wiki/overview.md` stale tmux-only lines were corrected by the Implement completion step before this run, not by Dream. E2E harness mechanics stay episodic. No lint-queue entries.

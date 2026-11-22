@@ -20,6 +20,8 @@ export type StatusActivityPhase = "starting" | "active" | "waiting" | "done";
 export interface StatusConfig {
   enabled: boolean;
   lineLimit: number;
+  /** Optional cap on this parent's running plus launching children; unset means unlimited. */
+  maxConcurrent?: number;
 }
 
 export type StatusObservation =
@@ -155,11 +157,23 @@ export function parseStatusConfig(rawConfig: unknown, source = "config.json"): S
   const status = requireObject(config.status, source, "status");
   rejectUnsupportedKeys(status, ["enabled"], source, "status");
   const enabled = requireBoolean(status.enabled, source, "status.enabled");
+  const maxConcurrent = parseMaxConcurrent(config, source);
 
   return {
     enabled,
     lineLimit: DEFAULT_STATUS_LINE_LIMIT,
+    ...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
   };
+}
+
+/** Optional top-level `maxConcurrent`: a positive integer, or absent for unlimited. */
+function parseMaxConcurrent(config: Record<string, unknown>, source: string): number | undefined {
+  if (!Object.prototype.hasOwnProperty.call(config, "maxConcurrent")) return undefined;
+  const value = config.maxConcurrent;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    invalidStatusConfig(source, "maxConcurrent must be a positive integer when provided");
+  }
+  return value;
 }
 
 function readStatusConfigFile(configPath: string, examplePath: string): { sourcePath: string; rawConfig: string } {

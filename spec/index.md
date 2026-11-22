@@ -38,6 +38,7 @@ Repository-local planning and execution artifacts.
 | [Default Pi subagents to auto-exit, append, and lineage-only, and ship a profile skill](./archive/261112-1435-default-pi-subagents-to-auto-exit-append-and-lineage-only-and-ship-a-profile-ski/plan.md) | work-item | completed | 2026-11-12 |
 | [Add system-prompt task option for Pi profiles](./archive/261112-1521-add-system-prompt-task-option-for-pi-profiles/plan.md) | work-item | completed | 2026-11-12 |
 | [Subagent-only capability registry for MCP, extensions, and skills](./archive/261118-1208-subagent-only-capability-registry-for-mcp-extensions-and-skills/plan.md) | work-item | completed | 2026-11-18 |
+| [Headless RPC-mode subagents](./archive/261122-1959-headless-rpc-mode-subagents/plan.md) | work-item | completed | 2026-11-22 |
 <!-- spec-items:archive:end -->
 
 ## Templates

@@ -45,6 +45,7 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 | `subagent_agents` | empty (no nesting) | The child may spawn other profiles; lists the exact names it may spawn. Never put spawning tools in `builtin-tools`. |
 | `auto-exit` | `true` for Pi | Set `false` only for a hands-on child the user works in directly; it then waits in its pane until the user exits. |
 | `interactive` | inverse of resolved `auto-exit` | Rarely. It only controls whether stall and recovery transitions wake the parent. |
+| `background` | `false` | Set `true` so new spawns run on the private detached tmux server (`tmux -L pi-subagents attach` to watch) instead of splitting the parent's tmux window. Spawn-only: a resume inside tmux still splits. Without a tmux client every child is detached anyway. |
 | `system-prompt` | `append` for Pi | `append` adds the body to Pi's system prompt and keeps Pi's own rules. Use `replace` only when the body must fully replace Pi's system prompt. Use `task` to put the body in the child's first message ahead of the task (no system-prompt flag), for example when a provider or extension may replace the system prompt. |
 | `session-mode` | `lineage-only` for Pi | `lineage-only` costs nothing and nests the child under the parent in `/resume`. Use `standalone` for an unlinked session. Use `fork` only when the child truly needs the parent conversation; it pays for that copied context on every request. |
 | `cwd` | active context cwd | The child should start elsewhere. Relative profile values resolve from the global Pi agent directory. |
@@ -62,9 +63,9 @@ For Pi profiles and `cli: pi` chain targets, omitted `auto-exit`, `system-prompt
 
 ## Harness restrictions
 
-- `cli: agy`: only `name`, `description`, `model`, `thinking`, `cwd`, `disable-model-invocation`, `cli`, `builtin-tools`, and the body (no `skills` or `inherit-skills`). `builtin-tools` only `read`, `grep`, `find`, `ls`. Any other field, even empty, is invalid. Sessions are standalone and one-shot.
+- `cli: agy`: only `name`, `description`, `model`, `thinking`, `cwd`, `background`, `disable-model-invocation`, `cli`, `builtin-tools`, and the body (no `skills` or `inherit-skills`). `builtin-tools` only `read`, `grep`, `find`, `ls`. Any other field, even empty, is invalid. Sessions are standalone and one-shot.
 - `cli: claude`: `builtin-tools`, `mcp-servers`, `extensions`, and `inherit-skills` are invalid, even when empty. Pi-specific fields (`skills`, `thinking`, `session-mode`, `system-prompt`, `subagent_agents`) do not configure Claude Code, and the Pi defaults above do not apply. Finished Claude children cannot be resumed.
-- `model-chain`: shared top-level fields are only `name`, `description`, `builtin-tools` (`read`, `grep`, `find`, `ls`), `cwd`, `disable-model-invocation`, and the body. Each target has `cli` (`agy` or `pi`) and `model`; AGY targets may add `thinking`; Pi targets may add `thinking`, `extensions`, `session-mode`, and `system-prompt`. `skills` and `inherit-skills` are invalid. Targets always auto-exit.
+- `model-chain`: shared top-level fields are only `name`, `description`, `builtin-tools` (`read`, `grep`, `find`, `ls`), `cwd`, `background`, `disable-model-invocation`, and the body. Each target has `cli` (`agy` or `pi`) and `model`; AGY targets may add `thinking`; Pi targets may add `thinking`, `extensions`, `session-mode`, and `system-prompt`. `skills` and `inherit-skills` are invalid. Targets always auto-exit.
 
 ## Example
 

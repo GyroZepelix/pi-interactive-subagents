@@ -9,7 +9,7 @@
 | `pi-extension/subagents/mcp-config.ts` | Read-only global/trusted-project MCP discovery, selected-entry validation, semantic normalization/digesting, non-secret canonical references, and replay identity verification. |
 | `pi-extension/subagents/agy.ts` | Pure AGY read-tool translation, generated primary-agent serialization, command construction, strict JSON result parsing, structured terminal provider evidence, and exact resume-state persistence/validation. |
 | `pi-extension/subagents/model-chain.ts` | Pure exhaustion classification, bounded attempt provenance, sequential injected controller, and strict atomic chain-sidecar persistence/validation. |
-| `pi-extension/subagents/tmux.ts` | tmux availability, pane lifecycle, command delivery, screen capture, layout balancing, and completion polling. |
+| `pi-extension/subagents/tmux.ts` | tmux availability, split and detached (`-L pi-subagents`) pane lifecycle, socket-qualified handle routing through an injectable transport, pane tags and live-pane lookup, command delivery, screen capture, layout balancing, and completion polling. |
 | `pi-extension/subagents/session.ts` | Session JSONL helpers, session seeding, persistent name registry, sandbox loadout sidecars, result extraction, and usage summaries. |
 | `pi-extension/subagents/activity.ts` | Versioned activity snapshot schema, validation, and atomic recorder. |
 | `pi-extension/subagents/status.ts` | Strict status config and the starting/active/waiting/stalled/running state machine. |

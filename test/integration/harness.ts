@@ -23,7 +23,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import {
-  isMuxAvailable,
+  isTmuxAvailable,
   createSurface,
   createSurfaceSplit,
   sendCommand,
@@ -76,11 +76,11 @@ export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
 // ── Backend detection ──
 
 /**
- * Detect whether tmux is available in the current environment.
- * Returns ["tmux"] or [].
+ * Detect whether an attached tmux client is available for split-pane tests.
+ * Returns ["tmux"] or []. Detached-server tests need only the tmux binary.
  */
 export function getAvailableBackends(): string[] {
-  return isMuxAvailable() ? ["tmux"] : [];
+  return isTmuxAvailable() ? ["tmux"] : [];
 }
 
 export function focusSurface(surface: string): void {

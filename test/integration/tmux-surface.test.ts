@@ -5,18 +5,29 @@
  * sending commands, reading screen output, and closing panes.
  * No LLM calls — fast and free.
  *
- * Run inside tmux:
+ * Run inside tmux (split and detached cases):
  *   tmux new 'node --test test/integration/tmux-surface.test.ts'
+ * Run without a tmux client (detached cases only; needs the tmux binary):
+ *   env -u TMUX -u TMUX_PANE node --test test/integration/tmux-surface.test.ts
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { completionSuffix, pollForExit, submitText } from "../../pi-extension/subagents/tmux.ts";
+import {
+  DETACHED_TMUX_SOCKET,
+  completionSuffix,
+  createDetachedSurface,
+  findLiveTaggedPane,
+  isCommandAvailable,
+  pollForExit,
+  submitText,
+  tagSurface,
+} from "../../pi-extension/subagents/tmux.ts";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -47,9 +58,12 @@ const BRACKETED_PASTE_FIXTURE = fileURLToPath(
   new URL("./fixtures/bracketed-paste-recorder.mjs", import.meta.url),
 );
 
-function tmuxBufferNames(): string[] {
+function tmuxBufferNames(socket?: string): string[] {
   try {
-    return execFileSync("tmux", ["list-buffers", "-F", "#{buffer_name}"], { encoding: "utf8" })
+    return execFileSync("tmux", [...(socket ? ["-L", socket] : []), "list-buffers", "-F", "#{buffer_name}"], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    })
       .split("\n")
       .filter(Boolean);
   } catch {
@@ -67,7 +81,7 @@ function wrappedMarkerPattern(marker: string): RegExp {
 }
 
 if (backends.length === 0) {
-  console.log("⚠️  tmux is not available — skipping tmux-surface integration tests");
+  console.log("⚠️  no attached tmux client — skipping split-pane tmux-surface integration tests");
   console.log("   Run inside tmux to enable these tests.");
 }
 
@@ -262,6 +276,23 @@ for (const backend of backends) {
       }
     });
 
+    it("finds a tagged split pane on the attached server until its completion file exists", async () => {
+      const surface = createTrackedSurface(env, "tag-split-test");
+      await sleep(500);
+      const sessionPath = join(env.dir, `tagged-split-${uniqueId()}.jsonl`);
+      const doneFile = join(env.dir, `tagged-split-${uniqueId()}.code`);
+      tagSurface(surface, { sessionPath, doneFile });
+
+      assert.deepEqual(findLiveTaggedPane(sessionPath), { status: "found", surface });
+      writeFileSync(doneFile, "0\n");
+      assert.deepEqual(findLiveTaggedPane(sessionPath), { status: "absent" });
+      rmSync(doneFile, { force: true });
+
+      closeSurface(surface);
+      untrackSurface(env, surface);
+      assert.deepEqual(findLiveTaggedPane(sessionPath), { status: "absent" });
+    });
+
     it("reads screen asynchronously", async () => {
       const surface = createTrackedSurface(env, "async-read-test");
       await sleep(1000);
@@ -315,3 +346,117 @@ for (const backend of backends) {
     });
   });
 }
+
+// ── Detached private-server surface (no tmux client required) ──
+
+const tmuxBinary = isCommandAvailable("tmux");
+if (!tmuxBinary) {
+  console.log("⚠️  tmux binary is not available — skipping detached-surface integration tests");
+}
+
+describe("tmux-surface [detached]", { timeout: 60_000, skip: !tmuxBinary }, () => {
+  let dir: string;
+  const surfaces: string[] = [];
+  const savedTmux = process.env.TMUX;
+  const savedPane = process.env.TMUX_PANE;
+
+  before(() => {
+    // Simulate `env -u TMUX`: a headless parent without a tmux client.
+    delete process.env.TMUX;
+    delete process.env.TMUX_PANE;
+    dir = mkdtempSync(join(tmpdir(), "pi-detached-"));
+  });
+
+  after(() => {
+    for (const surface of surfaces) {
+      try { closeSurface(surface); } catch {}
+    }
+    if (savedTmux !== undefined) process.env.TMUX = savedTmux;
+    if (savedPane !== undefined) process.env.TMUX_PANE = savedPane;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function detached(name: string): string {
+    const surface = createDetachedSurface(name);
+    surfaces.push(surface);
+    return surface;
+  }
+
+  function forget(surface: string): void {
+    const index = surfaces.indexOf(surface);
+    if (index >= 0) surfaces.splice(index, 1);
+  }
+
+  it("creates a socket-qualified pane, runs a command, and captures it sync and async", async () => {
+    const surface = detached("detached echo");
+    assert.match(surface, new RegExp(`^${DETACHED_TMUX_SOCKET}:%\\d+$`));
+    await sleep(1000);
+
+    const marker = uniqueId();
+    sendCommand(surface, `echo "DETACHED_${marker}"`);
+    await waitForScreen(surface, wrappedMarkerPattern(`DETACHED_${marker}`), 10_000, 50);
+    assert.ok(screenContainsMarker(readScreen(surface, 50), `DETACHED_${marker}`));
+    assert.ok(screenContainsMarker(await readScreenAsync(surface, 50), `DETACHED_${marker}`));
+  });
+
+  it("bracket-pastes live text into a detached pane through the private server's buffers", async () => {
+    const surface = detached("detached paste");
+    const resultFile = join(dir, `paste-${uniqueId()}.jsonl`);
+    await sleep(FOCUS_TEST_SHELL_READY_DELAY_MS);
+
+    sendCommand(surface, `node ${shellEscape(BRACKETED_PASTE_FIXTURE)} ${shellEscape(resultFile)}`);
+    await waitForScreen(surface, /READY/, 10_000, 50);
+
+    const payload = "detached π reply";
+    submitText(surface, payload);
+    await waitForFile(resultFile, 10_000, /"submissionCount":1/);
+    const record = JSON.parse(readFileSync(resultFile, "utf8").trim().split("\n")[0]);
+    assert.equal(record.sha256, createHash("sha256").update(payload).digest("hex"));
+    assert.equal(record.bracketedPaste, true);
+    assert.equal(
+      tmuxBufferNames(DETACHED_TMUX_SOCKET).some((name) => name.startsWith("pi-subagent-")),
+      false,
+      "named live-message buffers must be deleted after successful paste",
+    );
+  });
+
+  it("finishes from the completion file of a long command sent to a detached pane", async () => {
+    const surface = detached("detached done");
+    await sleep(1000);
+    const doneFile = join(dir, `done-${uniqueId()}.code`);
+    sendLongCommand(surface, `(exit 6)${completionSuffix(doneFile)}`);
+    const result = await pollForExit(surface, new AbortController().signal, { interval: 100, doneFile });
+    assert.deepEqual(result, { reason: "sentinel", exitCode: 6 });
+  });
+
+  it("tags, finds, and stops finding a detached pane after completion or close", async () => {
+    const surface = detached("detached tag");
+    await sleep(500);
+    const sessionPath = join(dir, `tagged-${uniqueId()}.jsonl`);
+    const doneFile = join(dir, `tagged-${uniqueId()}.code`);
+    tagSurface(surface, { sessionPath, doneFile });
+
+    assert.deepEqual(findLiveTaggedPane(sessionPath), { status: "found", surface });
+    assert.deepEqual(findLiveTaggedPane(join(dir, "other.jsonl")), { status: "absent" });
+
+    writeFileSync(doneFile, "0\n");
+    assert.deepEqual(findLiveTaggedPane(sessionPath), { status: "absent" });
+    rmSync(doneFile, { force: true });
+    assert.deepEqual(findLiveTaggedPane(sessionPath), { status: "found", surface });
+
+    closeSurface(surface);
+    forget(surface);
+    assert.deepEqual(findLiveTaggedPane(sessionPath), { status: "absent" });
+  });
+
+  it("reports interruption after the only detached pane is closed", async () => {
+    const surface = detached("detached interrupt");
+    await sleep(500);
+    const pending = pollForExit(surface, new AbortController().signal, { interval: 25 });
+    closeSurface(surface);
+    forget(surface);
+    const result = await pending;
+    assert.equal(result.reason, "interrupted");
+    assert.match(result.errorMessage ?? "", /no longer exists/);
+  });
+});

@@ -19,7 +19,11 @@ import {
   isMuxAvailable,
   isCommandAvailable,
   muxSetupHint,
-  createSurface,
+  createSurfaceOfKind,
+  findLiveTaggedPane,
+  tagSurface,
+  type LiveTaggedPaneLookup,
+  type SurfaceKind,
   sendCommand,
   sendLongCommand,
   submitText,
@@ -549,6 +553,74 @@ function prepareSubagentDoneFile(artifactDir: string, launchId: string): string 
 
 const statusConfig = loadStatusConfig();
 
+/**
+ * Choose where a child pane goes. A new spawn uses the private detached
+ * server when the parent has no tmux client or its profile sets
+ * `background: true`; a resume is detached only without a tmux client
+ * (inside tmux a resume always splits). Everything else splits as before.
+ */
+function selectSurfaceKind(options: {
+  purpose: "spawn" | "resume";
+  background?: boolean;
+  attached?: boolean;
+}): SurfaceKind {
+  const attached = options.attached ?? !!process.env.TMUX;
+  if (!attached) return "detached";
+  if (options.purpose === "spawn" && options.background === true) return "detached";
+  return "split";
+}
+
+/**
+ * Best-effort pane tag recording the child's session (or AGY state) path and
+ * completion file, so a later parent can detect a still-live child and steer
+ * it instead of resuming a second process on the same session.
+ */
+function tagChildSurface(surface: string, sessionPath: string, doneFile?: string): void {
+  try {
+    tagSurface(surface, { sessionPath, doneFile });
+  } catch {
+    // Tagging needs tmux 3.0+; a failed tag must never break the launch.
+  }
+}
+
+/** Optional `maxConcurrent` from config.json; undefined means unlimited. */
+let launchCap: number | undefined = statusConfig.maxConcurrent;
+/** Launches of this parent that reserved a slot but have not registered yet. */
+let inFlightLaunches = 0;
+
+/**
+ * Reserve a concurrency slot for a spawn or resume before any pane exists.
+ * Counts this parent's running children plus in-flight launches. Inert when
+ * `maxConcurrent` is unset. Steering never reserves a slot.
+ */
+function reserveLaunchSlot(cap: number | undefined = launchCap): { release(): void } | { error: string } {
+  if (cap === undefined) return { release() {} };
+  const active = runningSubagents.size + inFlightLaunches;
+  if (active >= cap) {
+    return {
+      error:
+        `Subagent concurrency limit reached: ${active} of maxConcurrent ${cap} are running or launching. ` +
+        `Wait for a running subagent to finish, then retry. No pane was created.`,
+    };
+  }
+  inFlightLaunches += 1;
+  let released = false;
+  return {
+    release() {
+      if (released) return;
+      released = true;
+      inFlightLaunches -= 1;
+    },
+  };
+}
+
+function launchCapResult(error: string) {
+  return {
+    content: [{ type: "text" as const, text: error }],
+    details: { error, status: "over-cap" },
+  };
+}
+
 function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
   if (snapshot.kind === "starting") return " starting… ";
   if (snapshot.kind === "running") return ` running ${snapshot.elapsedText} `;
@@ -769,6 +841,29 @@ function deliverSubagentMessage(
   } catch {
     // Stale extension API after session replacement; nothing to deliver to.
   }
+  notifyRpcResult(message);
+}
+
+/**
+ * In RPC mode, surface each `subagent_result` as a host notification
+ * (`info` on success, `error` on failure or interruption). TUI is unchanged.
+ */
+function notifyRpcResult(message: Parameters<ExtensionAPI["sendMessage"]>[0]): void {
+  if (message.customType !== "subagent_result") return;
+  const ctx = latestCtx;
+  if (!ctx || ctx.mode !== "rpc" || !ctx.hasUI) return;
+  const details = (message.details ?? {}) as Record<string, unknown>;
+  const name = typeof details.name === "string" ? details.name : "subagent";
+  const exitCode = typeof details.exitCode === "number" ? details.exitCode : 1;
+  const failed = exitCode !== 0 || !!details.error || !!details.errorMessage || !!details.interrupted;
+  try {
+    ctx.ui.notify(
+      failed ? `Subagent "${name}" failed.` : `Subagent "${name}" finished.`,
+      failed ? "error" : "info",
+    );
+  } catch {
+    // Stale context after session replacement; the steer message still carries the result.
+  }
 }
 
 /** Interval timer for widget re-renders. */
@@ -875,8 +970,97 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
   return lines;
 }
 
+/** Last RPC emissions, so each record is sent only when its content changes. */
+let lastRpcWidget: string | null = null;
+let lastRpcStatus: string | null = null;
+
+function resetRpcStatusCache(): void {
+  lastRpcWidget = null;
+  lastRpcStatus = null;
+}
+
+function rpcAgentLabel(agent: RunningSubagent): string {
+  const harness = agent.chainTarget
+    ? `target ${agent.chainTarget.index}/${agent.chainTarget.count} ${agent.chainTarget.harness} ${agent.chainTarget.model}`
+    : agent.cli === "agy" || agent.cli === "claude"
+      ? agent.cli
+      : null;
+  const tags = [agent.agent, harness].filter((tag): tag is string => !!tag);
+  return tags.length > 0 ? `${agent.name} (${tags.join(", ")})` : agent.name;
+}
+
+/** Pi children own a transcript; Claude and AGY have no Pi session file. */
+function rpcSessionFile(agent: RunningSubagent): string | undefined {
+  return agent.cli === "claude" || agent.cli === "agy" ? undefined : agent.sessionFile;
+}
+
+/**
+ * Plain string lines for the RPC widget. No per-second elapsed text, so the
+ * 1 s refresh cannot produce a stream of changed records.
+ */
+function buildRpcWidgetLines(agents: RunningSubagent[], now = Date.now()): string[] {
+  return [
+    `Subagents: ${agents.length} running`,
+    ...agents.map((agent) => `- ${rpcAgentLabel(agent)}: ${classifyStatus(agent.statusState, now).kind}`),
+  ];
+}
+
+/** Versioned machine-readable running state for RPC hosts (`subagents` status key). */
+function buildRpcStatusJson(agents: RunningSubagent[], now = Date.now()): string {
+  return JSON.stringify({
+    v: 1,
+    running: agents.map((agent) => {
+      const sessionFile = rpcSessionFile(agent);
+      return {
+        name: agent.name,
+        ...(agent.agent ? { agent: agent.agent } : {}),
+        state: classifyStatus(agent.statusState, now).kind,
+        ...(sessionFile ? { sessionFile } : {}),
+      };
+    }),
+  });
+}
+
+/**
+ * RPC mode drops TUI component widgets, so emit a string-lines widget and a
+ * `subagents` JSON status instead, each only when its content changes, and
+ * clear both when no child runs.
+ */
+function updateRpcStatus(ctx: ExtensionContext): void {
+  if (runningSubagents.size === 0) {
+    if (lastRpcWidget !== null) ctx.ui.setWidget("subagent-status", undefined);
+    if (lastRpcStatus !== null) ctx.ui.setStatus("subagents", undefined);
+    resetRpcStatusCache();
+    if (widgetInterval) {
+      clearInterval(widgetInterval);
+      widgetInterval = null;
+      (globalThis as any)[WIDGET_INTERVAL_KEY] = null;
+    }
+    return;
+  }
+
+  const agents = Array.from(runningSubagents.values());
+  const now = Date.now();
+  const lines = buildRpcWidgetLines(agents, now);
+  const widgetKey = JSON.stringify(lines);
+  if (widgetKey !== lastRpcWidget) {
+    ctx.ui.setWidget("subagent-status", lines, { placement: "aboveEditor" });
+    lastRpcWidget = widgetKey;
+  }
+  const status = buildRpcStatusJson(agents, now);
+  if (status !== lastRpcStatus) {
+    ctx.ui.setStatus("subagents", status);
+    lastRpcStatus = status;
+  }
+}
+
 function updateWidget() {
   if (!latestCtx?.hasUI) return;
+
+  if (latestCtx.mode === "rpc") {
+    updateRpcStatus(latestCtx);
+    return;
+  }
 
   if (runningSubagents.size === 0) {
     latestCtx.ui.setWidget("subagent-status", undefined);
@@ -1907,6 +2091,82 @@ async function handleSubagentSteer(
   };
 }
 
+/** Test seam for live-orphan detection and steering transport. */
+let orphanPaneOps: {
+  find: (sessionPath: string) => LiveTaggedPaneLookup;
+  send: (surface: string, text: string) => void;
+} = { find: findLiveTaggedPane, send: submitText };
+
+type RegistryEntry = NonNullable<ReturnType<typeof resolveNameInRegistry>>;
+
+/**
+ * Parent-restart guard (D2). When the registry entry's session (or AGY state)
+ * file is not owned by a child in this process but a live tagged pane for it
+ * exists, steer that pane instead of resuming a second process on the same
+ * session. An unknown lookup refuses the resume rather than risk a double
+ * launch. Returns null when the caller may continue to resume.
+ */
+async function guardLiveOrphan(
+  name: string,
+  entry: RegistryEntry,
+  rawMessage: string | undefined,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } | null> {
+  const isAgy = "harness" in entry && entry.harness === "agy";
+  const sessionPath = "harness" in entry
+    ? (entry.harness === "agy" ? entry.stateFile : null)
+    : entry.sessionFile;
+  if (!sessionPath) return null;
+
+  // A child of this process is handled by the in-memory steering paths.
+  const key = canonicalSessionPath(sessionPath);
+  for (const running of runningSubagents.values()) {
+    if (running.sessionFile && canonicalSessionPath(running.sessionFile) === key) return null;
+    if (running.agyStateFile && canonicalSessionPath(running.agyStateFile) === key) return null;
+  }
+
+  const lookup = orphanPaneOps.find(sessionPath);
+  if (lookup.status === "absent") return null;
+  if (lookup.status === "unknown") {
+    const err =
+      `Cannot safely resume "${name}": could not determine whether its earlier run is still live in tmux ` +
+      `(${lookup.error}). Retry shortly; resuming now could start a second process on the same session.`;
+    return { content: [{ type: "text", text: err }], details: { error: err, name, status: "unknown" } };
+  }
+
+  if (isAgy) {
+    const err =
+      `AGY subagent "${name}" is still running in tmux pane ${lookup.surface} from an earlier parent session. ` +
+      `Active steering is unsupported for AGY; wait for its one-shot run to finish, then use the same name to continue.`;
+    return {
+      content: [{ type: "text", text: err }],
+      details: { error: err, name, status: "unsupported", surface: lookup.surface, orphan: true },
+    };
+  }
+
+  const flattened = (rawMessage ?? "").replace(/\s*\n\s*/g, " ").trim();
+  if (!flattened) {
+    const err = `Subagent "${name}" is still running in tmux pane ${lookup.surface}; \`message\` is required to steer it.`;
+    return { content: [{ type: "text", text: err }], details: { error: err, name, surface: lookup.surface } };
+  }
+  try {
+    orphanPaneOps.send(lookup.surface, flattened);
+  } catch (error: any) {
+    const err =
+      `Failed to submit message to still-running subagent "${name}" via tmux: ${error?.message ?? String(error)}`;
+    return { content: [{ type: "text", text: err }], details: { error: err, name, surface: lookup.surface } };
+  }
+  return {
+    content: [{
+      type: "text",
+      text:
+        `Message submitted to still-running subagent "${name}" in tmux pane ${lookup.surface}. ` +
+        `It was started by an earlier parent session, so its result will NOT be delivered to this session ` +
+        `automatically; read its session file or use the same name again after it finishes.`,
+    }],
+    details: { name, status: "submitted", surface: lookup.surface, orphan: true, sessionFile: sessionPath },
+  };
+}
+
 function startStatusRefresh(pi: ExtensionAPI) {
   if (!statusConfig.enabled || statusInterval) return;
 
@@ -2018,6 +2278,26 @@ export const __test__ = {
   deliverSubagentMessage,
   formatUsageSegments,
   widgetIcon,
+  selectSurfaceKind,
+  reserveLaunchSlot,
+  guardLiveOrphan,
+  buildRpcWidgetLines,
+  buildRpcStatusJson,
+  updateWidget,
+  notifyRpcResult,
+  get inFlightLaunches() {
+    return inFlightLaunches;
+  },
+  setLaunchCapForTest(cap: number | undefined) {
+    launchCap = cap;
+  },
+  setOrphanPaneOpsForTest(ops: typeof orphanPaneOps | null) {
+    orphanPaneOps = ops ?? { find: findLiveTaggedPane, send: submitText };
+  },
+  setLatestCtxForTest(ctx: ExtensionContext | null) {
+    latestCtx = ctx;
+    resetRpcStatusCache();
+  },
 };
 
 function startWidgetRefresh() {
@@ -2040,7 +2320,7 @@ async function launchSubagent(
   ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
   agentDefs: AgentDefinition,
   prepared: PreparedSingleAgentLaunch,
-  options?: { surface?: string },
+  options?: { surface?: string; surfaceKind?: SurfaceKind },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = randomUUID();
@@ -2064,6 +2344,7 @@ async function launchSubagent(
   if (!sessionFile) throw new Error("No session file");
   const sessionId = ctx.sessionManager.getSessionId();
   const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
+  const surfaceKind = options?.surfaceKind ?? selectSurfaceKind({ purpose: "spawn" });
 
   // AGY is an artifact-backed one-shot external harness. Build and validate its
   // complete capability and replay contract before creating a tmux pane.
@@ -2115,11 +2396,12 @@ async function launchSubagent(
     if (!isExistingFile(definitionPath)) throw new Error(`Generated AGY agent is missing: ${definitionPath}`);
 
     const surfacePreCreated = !!options?.surface;
-    const surface = options?.surface ?? createSurface(params.name);
+    const surface = options?.surface ?? createSurfaceOfKind(surfaceKind, params.name);
     if (!surfacePreCreated) {
       await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
     }
     const doneFile = prepareSubagentDoneFile(artifactDir, id);
+    tagChildSurface(surface, stateFile, doneFile);
     const agyCommand = buildAgyCommand({
       agentRoot: agyState.agentRoot,
       additionalWorkspaceRoots: agyAdditionalWorkspaceRoots(agyState),
@@ -2174,7 +2456,7 @@ async function launchSubagent(
   // Use pre-created surface (parallel mode) or create a new one.
   // For new surfaces, pause briefly so the shell is ready before sending the command.
   const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSurface(params.name);
+  const surface = options?.surface ?? createSurfaceOfKind(surfaceKind, params.name);
   if (!surfacePreCreated) {
     await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
   }
@@ -2222,6 +2504,7 @@ async function launchSubagent(
 
     const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
     const doneFile = prepareSubagentDoneFile(artifactDir, id);
+    tagChildSurface(surface, subagentSessionFile, doneFile);
     const command = `${cdPrefix}${cmdParts.join(" ")}${completionSuffix(doneFile)}`;
 
     const launchScriptName = `${(params.name || "subagent")
@@ -2335,6 +2618,7 @@ async function launchSubagent(
 
   const piCommand = cdPrefix + envPrefix + parts.join(" ");
   const doneFile = prepareSubagentDoneFile(artifactDir, id);
+  tagChildSurface(surface, subagentSessionFile, doneFile);
   const command = `${piCommand}${completionSuffix(doneFile)}`;
   const launchScriptName = `${(params.name || "subagent")
     .toLowerCase()
@@ -2513,9 +2797,13 @@ async function watchSubagent(
   close: (surface: string) => void = closeSurface,
 ): Promise<SubagentResult> {
   const { name, task, surface, startTime, sessionFile } = running;
+  // Watchers are aborted only when this parent session shuts down or the
+  // extension reloads. The child must outlive that (R6), so an aborted watch
+  // leaves the pane running instead of closing it.
+  const watchSignal = AbortSignal.any([signal, getModuleAbortSignal()]);
 
   try {
-    const result = await poll(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
+    const result = await poll(surface, watchSignal, {
       interval: 1000,
       sessionFile,
       sentinelFile: running.sentinelFile,
@@ -2707,9 +2995,11 @@ async function watchSubagent(
       ...(stats ? { stats } : {}),
     };
   } catch (err: any) {
-    try {
-      close(surface);
-    } catch {}
+    if (!watchSignal.aborted) {
+      try {
+        close(surface);
+      } catch {}
+    }
     cleanupRunningQuestion(running);
     runningSubagents.delete(running.id);
 
@@ -2781,6 +3071,7 @@ async function startPreparedModelChain(params: {
   prepared: PreparedModelChainLaunch;
   parentArtifactDir: string;
   abortController: AbortController;
+  surfaceKind?: SurfaceKind;
 }): Promise<{ first: RunningSubagent; completion: Promise<SubagentResult>; stateFile: string }> {
   const controllerId = randomUUID();
   const controllerStartedAt = Date.now();
@@ -2822,6 +3113,7 @@ async function startPreparedModelChain(params: {
       ctx,
       preparedTarget.definition,
       chainLaunch,
+      { surfaceKind: params.surfaceKind },
     );
     running.abortController = abortController;
     running.suppressStatusMessages = true;
@@ -2967,6 +3259,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       latestModelRegistry = null;
     }
     sessionShutDown = false;
+    resetRpcStatusCache();
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.
@@ -2984,6 +3277,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     sessionShutDown = true;
     latestCtx = null;
     latestPi = null;
+    resetRpcStatusCache();
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
@@ -3155,17 +3449,25 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           ctx.sessionManager.getSessionId(),
         );
 
+        // Optional maxConcurrent cap: reserve a slot before any pane exists.
+        const launchSlot = reserveLaunchSlot();
+        if ("error" in launchSlot) return launchCapResult(launchSlot.error);
+
         // Claim both explicit and defaulted names synchronously before any pane
         // creation. Explicit collisions fail; only omitted names are suffixed.
         const registryNames = new Set(Object.keys(readNameRegistry(parentArtifactDir)));
         const claim = claimRuntimeName(params.name, params.agent, registryNames);
         if ("error" in claim) {
+          launchSlot.release();
           return {
             content: [{ type: "text", text: claim.error }],
             details: { error: "runtime name collision" },
           };
         }
         params.name = claim.name;
+        // Detached when the parent has no tmux client or the profile opts into
+        // background launch; otherwise today's split.
+        const surfaceKind = selectSurfaceKind({ purpose: "spawn", background: agentDefs.background });
 
         if ("chainTargets" in preparedLaunch.launch) {
           const watcherAbort = new AbortController();
@@ -3178,9 +3480,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               prepared: preparedLaunch.launch,
               parentArtifactDir,
               abortController: watcherAbort,
+              surfaceKind,
             });
           } finally {
             reservedNames.delete(claim.name);
+            launchSlot.release();
           }
           startWidgetRefresh();
           startStatusRefresh(pi);
@@ -3270,9 +3574,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         let running;
         try {
-          running = await launchSubagent(params, ctx, agentDefs, preparedLaunch.launch);
+          running = await launchSubagent(params, ctx, agentDefs, preparedLaunch.launch, { surfaceKind });
         } finally {
           reservedNames.delete(claim.name);
+          launchSlot.release();
         }
 
         // Persist name → session so subagent_message({ name }) can resume this
@@ -3638,6 +3943,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
+        // A child left running by an earlier parent process is not in the
+        // in-memory map. Steer its live tagged pane instead of resuming a
+        // second process on the same session file.
+        const orphanResult = await guardLiveOrphan(requestedName, entry, params.message);
+        if (orphanResult) return orphanResult;
+
         if ("harness" in entry) {
           const state = readAgyResumeState(entry.stateFile);
           if (!state) {
@@ -3661,8 +3972,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             const err = "Cannot resume AGY: the `agy` executable is not available on PATH.";
             return { content: [{ type: "text" as const, text: err }], details: { error: err } };
           }
+          const launchSlot = reserveLaunchSlot();
+          if ("error" in launchSlot) return launchCapResult(launchSlot.error);
           const resumeClaim = claimResumeSession(entry.stateFile);
           if ("error" in resumeClaim) {
+            launchSlot.release();
             return { content: [{ type: "text" as const, text: resumeClaim.error }], details: { error: resumeClaim.error } };
           }
 
@@ -3683,9 +3997,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           let running: RunningSubagent;
           let launchScriptFile = "";
           try {
-            surface = createSurface(name);
+            surface = createSurfaceOfKind(selectSurfaceKind({ purpose: "resume" }), name);
             await new Promise<void>((done) => setTimeout(done, getShellReadyDelayMs()));
             const doneFile = prepareSubagentDoneFile(artifactDir, id);
+            tagChildSurface(surface, entry.stateFile, doneFile);
             const command = `cd ${shellEscape(state.cwd)} && ${buildAgyCommand({
               agentRoot: state.agentRoot,
               additionalWorkspaceRoots: agyAdditionalWorkspaceRoots(state),
@@ -3733,6 +4048,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             throw error;
           } finally {
             resumeClaim.release();
+            launchSlot.release();
           }
 
           startWidgetRefresh();
@@ -3830,8 +4146,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Count lines cheaply (no per-line JSON.parse) so resuming a large
         // transcript doesn't block the UI.
         const entryCountBefore = countSessionEntryLines(sessionPath);
+        const launchSlot = reserveLaunchSlot();
+        if ("error" in launchSlot) return launchCapResult(launchSlot.error);
         const resumeClaim = claimResumeSession(sessionPath);
         if ("error" in resumeClaim) {
+          launchSlot.release();
           return {
             content: [{ type: "text" as const, text: resumeClaim.error }],
             details: { error: resumeClaim.error },
@@ -3843,7 +4162,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         let launchScriptFile = "";
         let running: RunningSubagent;
         try {
-          surface = createSurface(name);
+          surface = createSurfaceOfKind(selectSurfaceKind({ purpose: "resume" }), name);
           await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
 
         // Build pi resume command
@@ -3895,6 +4214,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const resumeCdPrefix = loadout.cwd ? `cd ${shellEscape(loadout.cwd)} && ` : "";
 
         const doneFile = prepareSubagentDoneFile(artifactDir, id);
+        tagChildSurface(surface, sessionPath, doneFile);
         const command = `${resumeCdPrefix}${resumeEnvPrefix}${parts.join(" ")}${completionSuffix(doneFile)}`;
         launchScriptFile = join(
           artifactDir,
@@ -3945,6 +4265,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           throw error;
         } finally {
           resumeClaim.release();
+          launchSlot.release();
         }
         startWidgetRefresh();
         startStatusRefresh(pi);

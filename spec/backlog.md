@@ -9,17 +9,10 @@ Repository-wide register of open ideas that are not yet work items. Each entry i
 
 A trusted-project switch that stops global profiles from being inherited (or allowlists specific global names), so a project such as story-knowledgebase exposes only its own `.pi/agents/` profiles and never spawns global profiles that load other providers (for example pi-cursor). Today a project profile only overrides a global profile with the same name; other global profiles stay visible and spawnable. Nested children inherit the effect because they discover from the same project.
 
-## B2: RPC mode subagent support for A.Y.A.
+## B4: Clean up finished orphan panes
 
-- Added: 2026-11-15
-- Source: pi-voice-assistant (roadmap item 261109-1834-a-y-a-roadmap, register B16)
-- Link: [Handoff: RPC (headless) mode requirements from A.Y.A.](./handoffs/2026-11-09-from-pi-voice-assistant-aya-rpc-mode-requirements.md)
+- Added: 2026-11-22
+- Source: item 261122-1959-headless-rpc-mode-subagents (outcome candidate C4)
+- Link: [Outcome](./archive/261122-1959-headless-rpc-mode-subagents/outcome.md)
 
-Requirements input only, not a design or plan: what A.Y.A. needs from a headless (RPC) mode so its Pi can delegate work to sub-agents; open to refinement in a later grill-with-docs.
-
-## B3: Background (non-split) subagent launch mode
-
-- Added: 2026-11-18
-- Source: session 2026-11-18 (subagent-only capability registry planning)
-
-An opt-in profile flag that runs a subagent without splitting the current tmux window while keeping the rest of the system (status, messaging, resume, result delivery). Candidate approaches to discuss later: a hidden or background tmux pane or session, or a `pi -p` process. Not yet discussed or designed.
+Since item 261122-1959, a subagent keeps running when its parent Pi exits or reloads (Decision Log I2). After that child finishes, its pane stays open at a shell prompt because no watcher closes it. This applies to split panes inside tmux and to the private detached server (`tmux -L pi-subagents`). An optional cleanup could close a tagged pane once its completion file exists, either at the next parent start or on a later message. This matters most on the phone: leftover shells count toward Android's phantom-process limit and keep the private tmux server alive. On the laptop it is cosmetic.

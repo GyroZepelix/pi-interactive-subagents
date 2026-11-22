@@ -2,7 +2,7 @@
 
 Async subagents for [Pi](https://github.com/earendil-works/pi), running in tmux panes. Spawn a configured agent, continue working in the parent session, and receive its result as a steer message when it finishes.
 
-This fork is tmux-only.
+This fork requires tmux. Inside a tmux session children open split panes beside the parent. Without a tmux client, such as `pi --mode rpc` driven by another program, children run headless on a private detached tmux server with the same tool contract. See [Headless and background mode](#headless-and-background-mode).
 
 ## How it works
 
@@ -26,7 +26,7 @@ The default is 500 milliseconds.
 ## Requirements
 
 - Pi 1.0.0 or newer
-- tmux
+- tmux on `PATH` (3.0 or newer for live-child detection after a parent restart)
 - Antigravity CLI `agy` on `PATH` for profiles using `cli: agy` (verified with 1.2.11)
 
 ## Installation
@@ -37,11 +37,40 @@ Pi packages execute code with your user permissions. Review the source, then ins
 pi install git:git@github.com:GyroZepelix/pi-interactive-subagents.git
 ```
 
-Start Pi inside tmux:
+Start Pi inside tmux for split panes:
 
 ```bash
 tmux new -A -s pi 'pi'
 ```
+
+Pi started outside tmux still spawns subagents, on the detached server described below.
+
+## Headless and background mode
+
+When `$TMUX` is unset and the tmux binary is available, every spawn and resume runs in its own detached session on the private per-user server `tmux -L pi-subagents`. No configuration is needed, and launch scripts, completion files, message delivery, `ask_question`, and resume work exactly as in split panes. A profile with `background: true` sends new spawns to the same detached server even inside tmux, so the parent window is not split. A later resume of that child inside tmux opens a split pane, because `background` applies only to spawning.
+
+Watch or debug detached children with:
+
+```bash
+tmux -L pi-subagents attach
+tmux -L pi-subagents list-panes -a -F '#{session_name} #{pane_id} #{pane_current_command}'
+```
+
+The server starts with the environment of the parent that first used it and exits when its last child session closes. Package-owned settings, such as `PI_CODING_AGENT_DIR` and the capability variables, are always passed explicitly in each launch script, and credentials are never placed in arguments or logs. Other ambient environment, such as `PATH` or provider keys, comes from the server, as it does from the tmux server for split panes.
+
+### Parent exit and restart
+
+The extension never kills children when the parent exits or reloads. A child keeps running, but its result is not delivered to a later parent automatically; it remains in the child's session file. Its pane also stays open after the child finishes (at a shell prompt), inside tmux as well as on the detached server; close it with `tmux kill-pane` (add `-L pi-subagents` for detached panes) once you no longer need it. Every child pane is tagged with its session path (tmux pane option `@pi_subagent_session`) and its completion file. When a restarted parent sends `subagent_message` to a name whose tagged pane is still running, the message is submitted to that pane instead of resuming a second process on the same session file, and the reply says that the result will not arrive automatically. A still-running AGY child rejects the message. If tmux cannot answer the lookup, the resume is refused with a retry message. Hosts that need results should keep the parent alive while children run (see the `subagents` status below).
+
+### RPC status contract
+
+Only when Pi runs with `--mode rpc` (`ctx.mode === "rpc"`), the extension also emits records that an RPC host can read:
+
+- `setWidget("subagent-status", lines)` with plain string lines, for example `Subagents: 1 running` and `- scout (scout): active`.
+- `setStatus("subagents", json)` with versioned compact JSON: `{"v":1,"running":[{"name":"scout","agent":"scout","state":"active","sessionFile":"/path/child.jsonl"}]}`. `state` is `starting`, `active`, `waiting`, `stalled`, or `running`; `agent` and `sessionFile` are present when known. Claude and AGY children have no Pi session file.
+- One `notify` per completed child: `info` on success, `error` on failure or interruption.
+
+Widget and status records are sent only when their content changes and contain no per-second timers. Both are cleared when no child runs. Completion still arrives as a `subagent_result` steer message whose `details` carry `name`, `agent`, `harness`, `exitCode`, `elapsed`, and, when available, `sessionFile`, `sessionId`, `errorMessage`, `interrupted`, `resumeSupported`, and `stats`. TUI mode keeps the existing widget and emits none of these records.
 
 ## Agent setup
 
@@ -226,6 +255,7 @@ Names are unique within one parent session and remain registered after a child f
 - A running AGY child rejects active messages without writing to its pane. Wait for the one-shot run to finish.
 - When a Pi child has a pending `ask_question`, the answer is wrapped in a private correlated envelope and delivered through the same stdin-backed tmux path. Only the matching child acknowledgment reports delivery; a timeout remains unconfirmed and never resends. Other waiting Pi messages retain activity-based confirmation, while active Pi and Claude paths report submission.
 - A finished Pi child resumes asynchronously and later reports another result.
+- A child left running by an earlier parent process is steered through its tagged pane instead of being resumed. See [Parent exit and restart](#parent-exit-and-restart).
 - A successfully completed AGY child resumes asynchronously by its exact persisted conversation ID and immutable launch-time capability snapshot, including the exact additional workspace list. Existing version 1 snapshots replay their original boundary without acquiring the current parent cwd. Missing, malformed, mismatched, unavailable, or concurrently claimed state fails before pane creation.
 - Pi resume replays a strictly validated launch-time capability snapshot. It does not reread the profile or package settings.
 - New version 2 snapshots retain selected built-ins, ordered canonical profile extension paths, MCP support state, and non-secret server references. Resume uses current extension contents and revalidates each exact MCP source/digest before pane creation; missing, disabled, malformed, changed, source-mismatched, non-canonical, duplicated, or reserved state is refused with fresh-spawn guidance.
@@ -241,7 +271,7 @@ Every flat or native-resumed Pi child receives `ask_question`, even when its pro
 
 An unconfirmed live message is ambiguous: the child may already have accepted it. The extension never kills the pane or replays the message automatically.
 
-If a child remains unresponsive, inspect its pane and session first. To recover explicitly, find the target child pane with `tmux list-panes -a -F '#{pane_id} #{pane_title} #{pane_current_command}'`, then terminate only that child process or pane (for example, `tmux kill-pane -t %42`). Do not terminate the parent Pi pane. The watcher reports the interruption and removes the stale running entry. Pi preserves its registered session for explicit same-name recovery; review it before replaying work. AGY advertises same-name recovery only when a valid earlier conversation snapshot is still replayable, so an interrupted initial AGY run is not resumable. Finished Claude sessions remain non-resumable.
+If a child remains unresponsive, inspect its pane and session first. To recover explicitly, find the target child pane with `tmux list-panes -a -F '#{pane_id} #{pane_title} #{pane_current_command}'` (add `-L pi-subagents` for detached children), then terminate only that child process or pane (for example, `tmux kill-pane -t %42`). Do not terminate the parent Pi pane. The watcher reports the interruption and removes the stale running entry. Pi preserves its registered session for explicit same-name recovery; review it before replaying work. AGY advertises same-name recovery only when a valid earlier conversation snapshot is still replayable, so an interrupted initial AGY run is not resumable. Finished Claude sessions remain non-resumable.
 
 ## Security model
 
@@ -285,6 +315,17 @@ Copy `config.json.example` to `config.json` beside the extension to configure st
 }
 ```
 
+Add an optional top-level `maxConcurrent` positive integer to cap this parent's running and launching children:
+
+```json
+{
+  "status": { "enabled": true },
+  "maxConcurrent": 4
+}
+```
+
+When the cap is reached, a spawn or resume fails with an error before any pane is created; nothing is queued. Steering a running child is never capped. When `maxConcurrent` is unset there is no limit. Children left running by an earlier parent process are not counted.
+
 ## Development and verification
 
 Install the locked development dependencies after reviewing the dependency change:
@@ -304,10 +345,11 @@ git diff --check
 
 The package dry run should contain runtime files, `skills/subagent-profiles/SKILL.md`, this README, `LICENSE`, `config.json.example`, and `docs/agent-definitions.md`. It should not contain `spec/`, `wiki/`, tests, or repository instructions.
 
-The tmux-only surface test does not invoke a model. Run it in a controlled tmux session; an active Pi TUI can compete with its pane-focus assertions.
+The tmux surface test does not invoke a model. Run it in a controlled tmux session; an active Pi TUI can compete with its pane-focus assertions. The detached-server cases also run without a tmux client, where the split-pane cases are skipped.
 
 ```bash
 node --test test/integration/tmux-surface.test.ts
+env -u TMUX -u TMUX_PANE node --test test/integration/tmux-surface.test.ts
 ```
 
 The lifecycle suite invokes configured models and may consume time and money. Run it only with explicit approval:

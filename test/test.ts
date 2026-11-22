@@ -118,7 +118,22 @@ import filteredMcpControlExtension from "../pi-extension/subagents/subagent-mcp-
 import {
   SUBAGENT_MCP_REFERENCES_ENV,
 } from "../pi-extension/subagents/subagent-protocol.ts";
-import { __pollForExitTest__ } from "../pi-extension/subagents/tmux.ts";
+import {
+  __pollForExitTest__,
+  __tmuxTransportTest__,
+  closeSurface,
+  createDetachedSurface,
+  createSurfaceSplit,
+  findLiveTaggedPane,
+  isCommandAvailable,
+  isMuxAvailable,
+  muxSetupHint,
+  parseSurfaceHandle,
+  readScreen,
+  readScreenAsync,
+  sendCommand,
+  tagSurface,
+} from "../pi-extension/subagents/tmux.ts";
 import {
   QUESTION_ANSWER_PREFIX,
   QUESTION_PROTOCOL_VERSION,
@@ -8728,5 +8743,659 @@ describe("tmux.ts", () => {
       // Inside single quotes, everything is literal
       assert.ok(escaped.includes("$world"));
     });
+  });
+});
+
+// ── Headless RPC-mode subagents ──
+
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const saved: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    saved[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) restoreEnvVar(key, value);
+  }
+}
+
+async function withEnvAsync<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const saved: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    saved[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) restoreEnvVar(key, value);
+  }
+}
+
+function recordTmux(respond: (args: string[]) => string = () => "") {
+  const calls: string[][] = [];
+  __tmuxTransportTest__.set({
+    sync(args) {
+      calls.push(args);
+      return respond(args);
+    },
+  });
+  return calls;
+}
+
+describe("headless detached tmux surface", () => {
+  beforeEach(() => __tmuxTransportTest__.set(null));
+
+  it("parses plain and socket-qualified handles", () => {
+    assert.deepEqual(parseSurfaceHandle("%12"), { socket: null, pane: "%12" });
+    assert.deepEqual(parseSurfaceHandle("pi-subagents:%3"), { socket: "pi-subagents", pane: "%3" });
+  });
+
+  it("keeps split-handle argv byte-identical for every primitive", async () => {
+    const calls = recordTmux((args) => (args[0] === "split-window" ? "%21\n" : "screen"));
+    try {
+      assert.equal(createSurfaceSplit("x", "right", "%1"), "%21");
+      sendCommand("%21", "echo hi");
+      readScreen("%21", 7);
+      await readScreenAsync("%21", 9, { joinWrapped: true });
+      closeSurface("%21");
+      submitText("%21", "text", (args) => {
+        calls.push(args);
+        return "";
+      });
+      assert.deepEqual(calls.slice(0, 6), [
+        ["split-window", "-d", "-h", "-t", "%1", "-P", "-F", "#{pane_id}"],
+        ["send-keys", "-t", "%21", "-l", "echo hi"],
+        ["send-keys", "-t", "%21", "Enter"],
+        ["capture-pane", "-p", "-t", "%21", "-S", "-7"],
+        ["capture-pane", "-p", "-J", "-t", "%21", "-S", "-9"],
+        ["kill-pane", "-t", "%21"],
+      ]);
+      assert.deepEqual(calls[7].slice(0, 2), ["paste-buffer", "-p"]);
+      assert.equal(calls[7].at(-1), "%21");
+      assert.equal(calls.some((args) => args.includes("-L")), false);
+    } finally {
+      __tmuxTransportTest__.set(null);
+    }
+  });
+
+  it("routes every detached-handle primitive to the private socket", async () => {
+    const calls = recordTmux((args) => (args.includes("new-session") ? "%5\n" : ""));
+    try {
+      const surface = createDetachedSurface("My Scout: v1.2");
+      assert.equal(surface, "pi-subagents:%5");
+      const [create] = calls;
+      assert.deepEqual(create.slice(0, 5), ["-L", "pi-subagents", "new-session", "-d", "-s"]);
+      assert.match(create[5], /^my-scout-v1-2-[0-9a-f]{8}$/);
+      assert.deepEqual(create.slice(6), ["-P", "-F", "#{pane_id}"]);
+
+      sendCommand(surface, "echo hi");
+      readScreen(surface, 7);
+      await readScreenAsync(surface, 9);
+      closeSurface(surface);
+      submitText(surface, "text", (args) => {
+        calls.push(args);
+        return "";
+      });
+      tagSurface(surface, { sessionPath: "/tmp/child.jsonl", doneFile: "/tmp/id.code" });
+      for (const args of calls.slice(1)) {
+        assert.deepEqual(args.slice(0, 2), ["-L", "pi-subagents"], `expected socket routing for ${args.join(" ")}`);
+        assert.equal(args.includes("pi-subagents:%5"), false);
+      }
+      assert.deepEqual(calls.at(-1), [
+        "-L", "pi-subagents",
+        "set-option", "-p", "-t", "%5", "@pi_subagent_session", resolve("/tmp/child.jsonl"),
+        ";", "set-option", "-p", "-t", "%5", "@pi_subagent_done", "/tmp/id.code",
+      ]);
+      assert.equal(calls.some((args) => args[2] === "select-layout"), false);
+    } finally {
+      __tmuxTransportTest__.set(null);
+    }
+  });
+
+  it("reports a missing private server as a vanished pane but other probe failures as unknown", async () => {
+    const noServer = Object.assign(new Error("Command failed"), {
+      stderr: "no server running on /tmp/tmux-501/pi-subagents\n",
+    });
+    __tmuxTransportTest__.set({ sync() { throw noServer; } });
+    try {
+      assert.equal(await __pollForExitTest__.surfaceExists("pi-subagents:%5"), false);
+      assert.equal(await __pollForExitTest__.surfaceExists("%5"), null);
+      __tmuxTransportTest__.set({ sync() { throw new Error("permission denied"); } });
+      assert.equal(await __pollForExitTest__.surfaceExists("pi-subagents:%5"), null);
+    } finally {
+      __tmuxTransportTest__.set(null);
+    }
+  });
+
+  it("makes subagents available with only the tmux binary and names installing tmux", () => {
+    withEnv({ TMUX: undefined }, () => {
+      assert.equal(isMuxAvailable(), isCommandAvailable("tmux"));
+    });
+    assert.match(muxSetupHint(), /Install tmux/);
+    assert.match(muxSetupHint(), /tmux -L pi-subagents attach/);
+  });
+
+  describe("findLiveTaggedPane", { skip: !isCommandAvailable("tmux") }, () => {
+    function lookup(
+      env: string | undefined,
+      responses: Record<string, string | Error>,
+      sessionPath = "/tmp/headless-child.jsonl",
+    ) {
+      const calls: string[][] = [];
+      __tmuxTransportTest__.set({
+        sync(args) {
+          calls.push(args);
+          const key = args[0] === "-V" ? "version" : args[0] === "-L" ? "private" : "attached";
+          const response = responses[key] ?? "";
+          if (response instanceof Error) throw response;
+          return response;
+        },
+      });
+      try {
+        return { result: withEnv({ TMUX: env }, () => findLiveTaggedPane(sessionPath)), calls };
+      } finally {
+        __tmuxTransportTest__.set(null);
+      }
+    }
+    const row = (pane: string, tag: string, done = "", dead = "0") => `${pane}\t${dead}\t${tag}\t${done}\n`;
+
+    it("finds tagged panes on the attached server and on the private socket", () => {
+      const attached = lookup("/tmp/tmux-test/default,1,0", {
+        version: "tmux 3.8",
+        attached: row("%7", "/tmp/other.jsonl") + row("%8", "/tmp/headless-child.jsonl"),
+      });
+      assert.deepEqual(attached.result, { status: "found", surface: "%8" });
+
+      const detached = lookup(undefined, {
+        version: "tmux 3.8",
+        private: row("%2", "/tmp/headless-child.jsonl"),
+      });
+      assert.deepEqual(detached.result, { status: "found", surface: "pi-subagents:%2" });
+      assert.equal(detached.calls.some((args) => args[0] === "list-panes"), false, "no attached query without $TMUX");
+    });
+
+    it("treats completed or dead tagged panes as absent", () => {
+      const dir = createTestDir();
+      try {
+        const doneFile = join(dir, "id.code");
+        writeFileSync(doneFile, "0\n");
+        const finished = lookup(undefined, {
+          version: "tmux 3.8",
+          private: row("%2", "/tmp/headless-child.jsonl", doneFile) + row("%3", "/tmp/headless-child.jsonl", "", "1"),
+        });
+        assert.deepEqual(finished.result, { status: "absent" });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("treats a missing private server as absent and transport failures as unknown", () => {
+      const noServer = Object.assign(new Error("failed"), {
+        stderr: "error connecting to /tmp/tmux-501/pi-subagents (No such file or directory)\n",
+      });
+      assert.deepEqual(lookup(undefined, { version: "tmux 3.8", private: noServer }).result, { status: "absent" });
+      assert.equal(lookup(undefined, { version: "tmux 3.8", private: new Error("boom") }).result.status, "unknown");
+      assert.equal(
+        lookup("/tmp/tmux-test/default,1,0", { version: "tmux 3.8", attached: new Error("lost server") }).result.status,
+        "unknown",
+      );
+      assert.equal(lookup(undefined, { version: "tmux 2.9a" }).result.status, "unknown");
+    });
+  });
+});
+
+describe("surface selection and background profiles", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  it("selects detached without $TMUX, detached background spawns inside tmux, and split otherwise", () => {
+    const select = testApi.selectSurfaceKind;
+    assert.equal(select({ purpose: "spawn", attached: false }), "detached");
+    assert.equal(select({ purpose: "resume", attached: false }), "detached");
+    assert.equal(select({ purpose: "spawn", attached: true }), "split");
+    assert.equal(select({ purpose: "spawn", attached: true, background: false }), "split");
+    assert.equal(select({ purpose: "spawn", attached: true, background: true }), "detached");
+    assert.equal(select({ purpose: "resume", attached: true, background: true }), "split");
+    withEnv({ TMUX: undefined }, () => assert.equal(select({ purpose: "spawn" }), "detached"));
+    withEnv({ TMUX: "/tmp/tmux-test/default,1,0" }, () => assert.equal(select({ purpose: "spawn" }), "split"));
+  });
+
+  it("parses background as an optional YAML boolean and diagnoses other values", () => {
+    const on = parseAgentDefinition(`---\nname: bg\nbackground: true\n---\nbody`, "/tmp/bg.md", "global");
+    assert.equal(on.agent?.background, true);
+    const unset = parseAgentDefinition(`---\nname: plain\n---\nbody`, "/tmp/plain.md", "global");
+    assert.equal(unset.agent?.background, undefined);
+    const invalid = parseAgentDefinition(`---\nname: bad\nbackground: "yes"\n---\nbody`, "/tmp/bad.md", "global");
+    assert.equal(invalid.agent, null);
+    assert.ok(invalid.diagnostics.some((entry) => entry.field === "background" && /YAML boolean/.test(entry.message)));
+    const chain = parseAgentDefinition(
+      `---\nname: chained\nbackground: true\nmodel-chain:\n  - cli: pi\n    model: a/b\n  - cli: pi\n    model: c/d\n---\nbody`,
+      "/tmp/chained.md",
+      "global",
+    );
+    assert.deepEqual(chain.diagnostics, []);
+    assert.equal(chain.agent?.background, true);
+  });
+});
+
+describe("maxConcurrent cap", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  it("parses an optional positive integer and rejects other values naming the key", () => {
+    assert.equal(parseStatusConfig({ status: { enabled: true } }).maxConcurrent, undefined);
+    assert.equal(parseStatusConfig({ status: { enabled: true }, maxConcurrent: 3 }).maxConcurrent, 3);
+    for (const value of [0, -1, 1.5, "2", null, true]) {
+      assert.throws(
+        () => parseStatusConfig({ status: { enabled: true }, maxConcurrent: value }),
+        /maxConcurrent must be a positive integer/,
+      );
+    }
+  });
+
+  it("is inert when unset and counts running plus in-flight launches when set", () => {
+    assert.equal(testApi.runningSubagents.size, 0);
+    const unlimited = [1, 2, 3].map(() => testApi.reserveLaunchSlot(undefined));
+    assert.ok(unlimited.every((slot: any) => !("error" in slot)));
+    assert.equal(testApi.inFlightLaunches, 0);
+
+    const first = testApi.reserveLaunchSlot(2);
+    const second = testApi.reserveLaunchSlot(2);
+    const third = testApi.reserveLaunchSlot(2);
+    assert.ok(!("error" in first) && !("error" in second));
+    assert.match(third.error, /maxConcurrent 2/);
+    first.release();
+    first.release();
+    assert.equal(testApi.inFlightLaunches, 1);
+    testApi.runningSubagents.set("busy", { id: "busy", name: "busy" });
+    try {
+      assert.match(testApi.reserveLaunchSlot(2).error, /2 of maxConcurrent 2/);
+    } finally {
+      testApi.runningSubagents.delete("busy");
+      second.release();
+    }
+    assert.equal(testApi.inFlightLaunches, 0);
+  });
+
+  it("rejects an over-cap spawn and resume before any pane is created", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
+      writeAgentFile(projectAgentsDir, "inspector", "name: inspector\nbuiltin-tools: [read]");
+      const parentSession = join(projectDir, "parent.jsonl");
+      writeFileSync(parentSession, '{"type":"session","id":"test-session"}\n');
+      const ctx = createMockContext(projectDir, true);
+      ctx.sessionManager.getSessionFile = () => parentSession;
+
+      const sessionPath = join(projectDir, "finished-child.jsonl");
+      writeFileSync(sessionPath, '{"type":"session","id":"child-session"}\n');
+      writeSubagentLoadout(sessionPath, {
+        version: 1,
+        capabilityMode: "extension-grants",
+        agent: "inspector",
+        builtinTools: ["read"],
+        extensionPaths: [],
+        grantSpawning: false,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: projectDir,
+        agentDir: projectDir,
+      });
+      registerName(join(projectDir, "artifacts", "test-session"), "done-child", {
+        sessionFile: sessionPath,
+        sessionId: "child-session",
+      });
+
+      const tmuxCalls = recordTmux(() => {
+        throw new Error("no pane may be created over the cap");
+      });
+      testApi.setOrphanPaneOpsForTest({ find: () => ({ status: "absent" }), send() { throw new Error("no steer"); } });
+      testApi.setLaunchCapForTest(1);
+      testApi.runningSubagents.set("busy", { id: "busy", name: "busy", sessionFile: "/tmp/busy.jsonl" });
+      try {
+        const { api, registeredTools } = createMockExtensionApi();
+        (subagentsModule as any).default(api);
+        const spawnTool = registeredTools.find((tool) => tool.name === "subagent");
+        const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+
+        const spawned = await spawnTool.execute(
+          "cap-spawn",
+          { agent: "inspector", task: "look" },
+          undefined,
+          undefined,
+          ctx,
+        );
+        assert.equal(spawned.details?.status, "over-cap");
+        assert.match(spawned.content[0].text, /maxConcurrent 1/);
+
+        const resumed = await messageTool.execute(
+          "cap-resume",
+          { name: "done-child", message: "Continue" },
+          undefined,
+          undefined,
+          ctx,
+        );
+        assert.equal(resumed.details?.status, "over-cap");
+        assert.deepEqual(tmuxCalls, []);
+        assert.equal(testApi.inFlightLaunches, 0);
+        assert.equal(testApi.reservedNames.size, 0);
+      } finally {
+        testApi.runningSubagents.delete("busy");
+        testApi.setLaunchCapForTest(undefined);
+        testApi.setOrphanPaneOpsForTest(null);
+        __tmuxTransportTest__.set(null);
+      }
+    });
+  });
+});
+
+describe("orphan steering guard", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  async function runMessage(d: string, name: string, message: string) {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+    return messageTool.execute("orphan", { name, message }, undefined, undefined, createMockContext(d, true));
+  }
+
+  function registerPiChild(d: string, name: string): string {
+    const sessionPath = join(d, `${name}.jsonl`);
+    writeFileSync(sessionPath, '{"type":"session","id":"child-session"}\n');
+    registerName(join(d, "artifacts", "test-session"), name, { sessionFile: sessionPath, sessionId: "child-session" });
+    return sessionPath;
+  }
+
+  it("steers a live tagged pane from an earlier parent instead of resuming", async () => {
+    const d = createTestDir();
+    const sent: Array<[string, string]> = [];
+    const looked: string[] = [];
+    const tmuxCalls = recordTmux(() => {
+      throw new Error("no new pane");
+    });
+    try {
+      const sessionPath = registerPiChild(d, "orphan-child");
+      testApi.setOrphanPaneOpsForTest({
+        find(path: string) {
+          looked.push(path);
+          return { status: "found", surface: "pi-subagents:%9" };
+        },
+        send(surface: string, text: string) {
+          sent.push([surface, text]);
+        },
+      });
+      const result = await runMessage(d, "orphan-child", "keep\n  going");
+      assert.deepEqual(looked, [sessionPath]);
+      assert.deepEqual(sent, [["pi-subagents:%9", "keep going"]]);
+      assert.equal(result.details?.status, "submitted");
+      assert.equal(result.details?.orphan, true);
+      assert.match(result.content[0].text, /will NOT be delivered to this session automatically/);
+      assert.equal(testApi.runningSubagents.size, 0);
+      assert.deepEqual(tmuxCalls, []);
+    } finally {
+      testApi.setOrphanPaneOpsForTest(null);
+      __tmuxTransportTest__.set(null);
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to resume when the live-pane lookup is unknown", async () => {
+    const d = createTestDir();
+    const tmuxCalls = recordTmux(() => {
+      throw new Error("no new pane");
+    });
+    try {
+      registerPiChild(d, "unknown-child");
+      testApi.setOrphanPaneOpsForTest({
+        find: () => ({ status: "unknown", error: "server unreachable" }),
+        send() { throw new Error("must not steer"); },
+      });
+      const result = await runMessage(d, "unknown-child", "Continue");
+      assert.equal(result.details?.status, "unknown");
+      assert.match(result.content[0].text, /Cannot safely resume "unknown-child".*server unreachable.*Retry/s);
+      assert.equal(testApi.runningSubagents.size, 0);
+      assert.deepEqual(tmuxCalls, []);
+    } finally {
+      testApi.setOrphanPaneOpsForTest(null);
+      __tmuxTransportTest__.set(null);
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it("continues to the existing resume path when no tagged pane is live", async () => {
+    const d = createTestDir();
+    try {
+      registerPiChild(d, "absent-child");
+      testApi.setOrphanPaneOpsForTest({ find: () => ({ status: "absent" }), send() { throw new Error("must not steer"); } });
+      const result = await runMessage(d, "absent-child", "Continue");
+      // The existing resume path runs and refuses on the missing sandbox snapshot.
+      assert.match(result.content[0].text, /no sandbox snapshot found/);
+    } finally {
+      testApi.setOrphanPaneOpsForTest(null);
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to steer a live AGY orphan and leaves in-process children to the in-memory paths", async () => {
+    const d = createTestDir();
+    try {
+      const stateFile = join(d, "agy-state.json");
+      writeFileSync(stateFile, "{}");
+      registerName(join(d, "artifacts", "test-session"), "agy-orphan", { harness: "agy", stateFile });
+      testApi.setOrphanPaneOpsForTest({
+        find: () => ({ status: "found", surface: "%4" }),
+        send() { throw new Error("must not steer AGY"); },
+      });
+      const result = await runMessage(d, "agy-orphan", "Continue");
+      assert.equal(result.details?.status, "unsupported");
+      assert.match(result.content[0].text, /still running in tmux pane %4/);
+
+      let lookedUp = false;
+      testApi.setOrphanPaneOpsForTest({
+        find: () => { lookedUp = true; return { status: "found", surface: "%4" }; },
+        send() { throw new Error("must not steer"); },
+      });
+      const sessionPath = join(d, "mine.jsonl");
+      testApi.runningSubagents.set("mine", { id: "mine", name: "other-name", sessionFile: sessionPath });
+      try {
+        assert.equal(await testApi.guardLiveOrphan("mine", { sessionFile: sessionPath, sessionId: null }, "hi"), null);
+        assert.equal(lookedUp, false);
+      } finally {
+        testApi.runningSubagents.delete("mine");
+      }
+    } finally {
+      testApi.setOrphanPaneOpsForTest(null);
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("RPC status, widget, and notify", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  function fakeCtx(mode: "rpc" | "tui") {
+    const widgets: any[] = [];
+    const statuses: Array<[string, string | undefined]> = [];
+    const notes: Array<[string, string | undefined]> = [];
+    const ctx = {
+      mode,
+      hasUI: true,
+      ui: {
+        setWidget(key: string, content: any, options?: any) { widgets.push({ key, content, options }); },
+        setStatus(key: string, text: string | undefined) { statuses.push([key, text]); },
+        notify(message: string, type?: string) { notes.push([message, type]); },
+      },
+    };
+    return { ctx, widgets, statuses, notes };
+  }
+
+  function running(id: string, extra: Record<string, unknown> = {}) {
+    const startTime = Date.now();
+    return {
+      id,
+      name: id,
+      task: "",
+      agent: "scout",
+      surface: "pi-subagents:%1",
+      startTime,
+      sessionFile: `/tmp/${id}.jsonl`,
+      interactive: false,
+      statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+      ...extra,
+    };
+  }
+
+  it("emits string lines and versioned JSON only on change and clears when idle", () => {
+    const { ctx, widgets, statuses } = fakeCtx("rpc");
+    testApi.setLatestCtxForTest(ctx);
+    try {
+      testApi.runningSubagents.set("a", running("a"));
+      testApi.runningSubagents.set("b", running("b", { cli: "claude", agent: undefined }));
+      testApi.updateWidget();
+      testApi.updateWidget();
+      assert.equal(widgets.length, 1);
+      assert.equal(statuses.length, 1);
+      assert.deepEqual(widgets[0].content, ["Subagents: 2 running", "- a (scout): starting", "- b (claude): starting"]);
+      assert.ok(widgets[0].content.every((line: string) => typeof line === "string" && !/\x1b/.test(line)));
+      assert.equal(statuses[0][0], "subagents");
+      assert.deepEqual(JSON.parse(statuses[0][1]!), {
+        v: 1,
+        running: [
+          { name: "a", agent: "scout", state: "starting", sessionFile: "/tmp/a.jsonl" },
+          { name: "b", state: "starting" },
+        ],
+      });
+
+      testApi.runningSubagents.delete("b");
+      testApi.updateWidget();
+      assert.equal(widgets.length, 2);
+      assert.equal(statuses.length, 2);
+
+      testApi.runningSubagents.delete("a");
+      testApi.updateWidget();
+      testApi.updateWidget();
+      assert.deepEqual(widgets.at(-1), { key: "subagent-status", content: undefined, options: undefined });
+      assert.deepEqual(statuses.at(-1), ["subagents", undefined]);
+      assert.equal(widgets.length, 3);
+      assert.equal(statuses.length, 3);
+    } finally {
+      testApi.runningSubagents.clear();
+      testApi.setLatestCtxForTest(null);
+    }
+  });
+
+  it("keeps the TUI component widget and emits no RPC status in TUI mode", () => {
+    const { ctx, widgets, statuses } = fakeCtx("tui");
+    testApi.setLatestCtxForTest(ctx);
+    try {
+      testApi.runningSubagents.set("a", running("a"));
+      testApi.updateWidget();
+      assert.equal(widgets.length, 1);
+      assert.equal(typeof widgets[0].content, "function");
+      assert.deepEqual(statuses, []);
+    } finally {
+      testApi.runningSubagents.clear();
+      testApi.updateWidget();
+      testApi.setLatestCtxForTest(null);
+    }
+  });
+
+  it("notifies once per subagent_result in RPC mode only", () => {
+    const { api } = createMockExtensionApi();
+    const rpc = fakeCtx("rpc");
+    testApi.setLatestCtxForTest(rpc.ctx);
+    try {
+      testApi.deliverSubagentMessage(api, {
+        customType: "subagent_result",
+        content: "done",
+        display: true,
+        details: { name: "a", exitCode: 0 },
+      });
+      testApi.deliverSubagentMessage(api, {
+        customType: "subagent_result",
+        content: "failed",
+        display: true,
+        details: { name: "b", exitCode: 1, interrupted: true },
+      });
+      testApi.deliverSubagentMessage(api, {
+        customType: "subagent_status",
+        content: "status",
+        display: true,
+        details: {},
+      });
+      assert.deepEqual(rpc.notes, [
+        ['Subagent "a" finished.', "info"],
+        ['Subagent "b" failed.', "error"],
+      ]);
+
+      const tui = fakeCtx("tui");
+      testApi.setLatestCtxForTest(tui.ctx);
+      testApi.deliverSubagentMessage(api, {
+        customType: "subagent_result",
+        content: "done",
+        display: true,
+        details: { name: "a", exitCode: 0 },
+      });
+      assert.deepEqual(tui.notes, []);
+    } finally {
+      testApi.setLatestCtxForTest(null);
+    }
+  });
+});
+
+describe("parent exit keeps children running", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  function runningEntry(id: string) {
+    const startTime = Date.now();
+    return {
+      id,
+      name: id,
+      task: "",
+      surface: "pi-subagents:%7",
+      startTime,
+      sessionFile: `/tmp/${id}.jsonl`,
+      interactive: false,
+      statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+    };
+  }
+
+  it("leaves the pane open when the watcher is aborted by session shutdown", async () => {
+    const closed: string[] = [];
+    const controller = new AbortController();
+    const running = runningEntry("abort-keep");
+    testApi.runningSubagents.set(running.id, running);
+    const result = await testApi.watchSubagent(
+      running,
+      controller.signal,
+      async (_surface: string, signal: AbortSignal) => {
+        controller.abort();
+        if (signal.aborted) throw new Error("Aborted while waiting for subagent to finish");
+        return { reason: "sentinel", exitCode: 0 };
+      },
+      (surface: string) => closed.push(surface),
+    );
+    assert.equal(result.error, "cancelled");
+    assert.deepEqual(closed, []);
+    assert.equal(testApi.runningSubagents.has(running.id), false);
+  });
+
+  it("still closes the pane after an unexpected watcher error", async () => {
+    const closed: string[] = [];
+    const running = runningEntry("error-close");
+    testApi.runningSubagents.set(running.id, running);
+    const result = await testApi.watchSubagent(
+      running,
+      new AbortController().signal,
+      async () => { throw new Error("boom"); },
+      (surface: string) => closed.push(surface),
+    );
+    assert.match(result.summary, /boom/);
+    assert.deepEqual(closed, ["pi-subagents:%7"]);
   });
 });

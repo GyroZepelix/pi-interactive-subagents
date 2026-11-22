@@ -74,6 +74,8 @@ export interface ParsedAgentDefinition {
   subagentAgents: string[];
   autoExit?: boolean;
   interactive?: boolean;
+  /** Launch new spawns on the private detached tmux server even inside tmux. */
+  background?: boolean;
   systemPromptMode?: SystemPromptMode;
   sessionMode?: SubagentSessionMode;
   cwd?: string;
@@ -136,6 +138,7 @@ const SUPPORTED_FIELDS = new Set([
   "subagent_agents",
   "auto-exit",
   "interactive",
+  "background",
   "system-prompt",
   "session-mode",
   "cwd",
@@ -728,6 +731,7 @@ export function parseAgentDefinition(
   }
 
   const inheritSkills = optionalBoolean(frontmatter, "inherit-skills", filePath, diagnostics);
+  const background = optionalBoolean(frontmatter, "background", filePath, diagnostics);
   const agent: ParsedAgentDefinition = {
     name,
     description: optionalString(frontmatter, "description", filePath, diagnostics),
@@ -741,6 +745,7 @@ export function parseAgentDefinition(
     subagentAgents,
     autoExit: optionalBoolean(frontmatter, "auto-exit", filePath, diagnostics),
     interactive: optionalBoolean(frontmatter, "interactive", filePath, diagnostics),
+    ...(background !== undefined ? { background } : {}),
     systemPromptMode: optionalEnum(
       frontmatter,
       "system-prompt",

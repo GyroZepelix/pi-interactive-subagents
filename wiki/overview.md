@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`pi-interactive-subagents` is a tmux-only Pi extension for running asynchronous subagents in separate panes. A parent Pi session can spawn an agent, continue working, receive status in the TUI, and receive the final result as a steered message. The intended users are Pi users who want visible, concurrent agent sessions with constrained role profiles (`README.md`, `package.json`).
+`pi-interactive-subagents` is a tmux-based Pi extension for running asynchronous subagents in separate panes: split panes inside tmux, or a private detached tmux server (`tmux -L pi-subagents`) when the parent has no tmux client or a profile sets `background: true`. A parent Pi session can spawn an agent, continue working, receive status in the TUI, and receive the final result as a steered message. The intended users are Pi users who want visible, concurrent agent sessions with constrained role profiles (`README.md`, `package.json`).
 
 ## Deliverable
 
@@ -12,7 +12,7 @@ The repository ships an ESM Pi package whose registered extension entry point is
 
 - TypeScript is executed directly by Pi/Node; local imports retain `.ts` extensions (`package.json`, `pi-extension/subagents/*.ts`).
 - Runtime APIs use a verified Pi 0.87.0 development baseline through `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and matching `typebox`; public peer ranges remain wildcard (`package.json`, `package-lock.json`).
-- tmux is the only supported pane backend and both `$TMUX` and the `tmux` executable are required (`README.md`, `pi-extension/subagents/tmux.ts`).
+- tmux is the only supported pane backend; only the `tmux` executable is required. With `$TMUX` set children split the parent's window; without it they run on the private detached server (`README.md`, `pi-extension/subagents/tmux.ts`).
 - Runtime state is file-backed under Pi session and artifact directories, not in a project database (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`).
 
 ## Repository boundaries

@@ -6,18 +6,102 @@
  * it, and poll for exit. Keeping the tmux calls isolated here means index.ts
  * stays testable without a multiplexer running.
  *
- * Panes are identified by tmux pane ids (e.g. `%12`). Splits always target
- * the parent pi's pane (`$TMUX_PANE`) so they follow the agent rather than
- * the user's focus.
+ * Two surface kinds exist:
+ * - split: a pane split off the parent pi's pane (`$TMUX_PANE`) on the tmux
+ *   server the parent runs in, so new panes follow the agent rather than the
+ *   user's focus. Handles are plain tmux pane ids (e.g. `%12`).
+ * - detached: a pane in its own detached session on the private per-user
+ *   server `tmux -L pi-subagents`. Used when the parent has no tmux client
+ *   (`$TMUX` unset) or a profile sets `background: true`. Handles encode the
+ *   socket (e.g. `pi-subagents:%3`) and every primitive routes them with
+ *   `-L <socket>`.
  */
 import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const execFileAsync = promisify(execFile);
+
+// ── Surface handles and transport ──
+
+/** Fixed per-user private socket name for detached subagent panes. */
+export const DETACHED_TMUX_SOCKET = "pi-subagents";
+
+export type SurfaceKind = "split" | "detached";
+
+export interface SurfaceHandle {
+  /** Private socket name for detached panes; null for the attached server. */
+  socket: string | null;
+  /** tmux pane id, e.g. `%3`. */
+  pane: string;
+}
+
+const SOCKET_HANDLE_PATTERN = /^([A-Za-z0-9_-]+):(%\d+)$/;
+
+/** Split a surface handle into its optional socket and tmux pane id. */
+export function parseSurfaceHandle(surface: string): SurfaceHandle {
+  const match = SOCKET_HANDLE_PATTERN.exec(surface);
+  return match ? { socket: match[1], pane: match[2] } : { socket: null, pane: surface };
+}
+
+/** Encode a pane id (and optional private socket) as a surface handle. */
+export function formatSurfaceHandle(socket: string | null, pane: string): string {
+  return socket ? `${socket}:${pane}` : pane;
+}
+
+function socketArgs(socket: string | null): string[] {
+  return socket ? ["-L", socket] : [];
+}
+
+type TmuxSyncRunner = (args: string[], options?: { input?: string; quiet?: boolean }) => string;
+type TmuxAsyncRunner = (args: string[]) => Promise<string>;
+
+/** Throw unless the tmux invocation can reach the server named by its args. */
+function requireTmuxForArgs(args: readonly string[]): void {
+  // Private-socket commands and version probes need only the binary.
+  if (args[0] === "-L" || args[0] === "-V") {
+    if (!isCommandAvailable("tmux")) {
+      throw new Error(`tmux is required for subagents. ${muxSetupHint()}`);
+    }
+    return;
+  }
+  requireTmux();
+}
+
+const defaultTmuxTransport: { sync: TmuxSyncRunner; async: TmuxAsyncRunner } = {
+  sync(args, options) {
+    requireTmuxForArgs(args);
+    return execFileSync("tmux", args, {
+      ...(options?.input !== undefined ? { input: options.input } : {}),
+      // Probes capture stderr instead of echoing tmux errors into the parent TUI.
+      ...(options?.quiet ? { stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] } : {}),
+      encoding: "utf8",
+    });
+  },
+  async async(args) {
+    requireTmuxForArgs(args);
+    const { stdout } = await execFileAsync("tmux", args, { encoding: "utf8" });
+    return stdout;
+  },
+};
+
+let tmuxTransport = defaultTmuxTransport;
+
+/**
+ * Test seam: replace the tmux process runner so argv can be asserted without
+ * a tmux server. Pass null to restore the real transport.
+ */
+export const __tmuxTransportTest__ = {
+  set(transport: { sync: TmuxSyncRunner; async?: TmuxAsyncRunner } | null): void {
+    tmuxTransport = transport
+      ? { sync: transport.sync, async: transport.async ?? (async (args) => transport.sync(args)) }
+      : defaultTmuxTransport;
+    commandAvailability.delete("tmux-pane-options");
+  },
+};
 
 // ── Availability ──
 
@@ -48,12 +132,19 @@ export function isTmuxAvailable(): boolean {
   return !!process.env.TMUX && isCommandAvailable("tmux");
 }
 
+/**
+ * True when subagents can get a surface: inside tmux (split panes) or, without
+ * a tmux client, on the private detached server. Both need only the binary.
+ */
 export function isMuxAvailable(): boolean {
-  return isTmuxAvailable();
+  return isCommandAvailable("tmux");
 }
 
 export function muxSetupHint(): string {
-  return "Start pi inside tmux (`tmux new -A -s pi 'pi'`).";
+  return (
+    "Install tmux and make it available on PATH. Inside tmux subagents open split panes; " +
+    "without a tmux client they run on a private detached server (`tmux -L pi-subagents attach` to watch)."
+  );
 }
 
 function requireTmux(): void {
@@ -92,13 +183,12 @@ function rebalanceSurfaces(hintPane?: string): void {
   const target = process.env.TMUX_PANE ?? hintPane;
   if (!target) return;
   if (rebalanceTimer) clearTimeout(rebalanceTimer);
+  const run = tmuxTransport.sync;
   rebalanceTimer = setTimeout(() => {
     rebalanceTimer = null;
     try {
       // -t <pane> resolves to that pane's window; does not change focus.
-      execFileSync("tmux", ["select-layout", "-t", target, SUBAGENT_TMUX_LAYOUT], {
-        encoding: "utf8",
-      });
+      run(["select-layout", "-t", target, SUBAGENT_TMUX_LAYOUT]);
     } catch {
       // Pane/window may be gone; balancing is best-effort.
     }
@@ -129,7 +219,6 @@ export function createSurfaceSplit(
   fromSurface?: string,
 ): string {
   void name;
-  requireTmux();
 
   const args = ["split-window", "-d"];
   if (direction === "left" || direction === "right") {
@@ -145,7 +234,7 @@ export function createSurfaceSplit(
   }
   args.push("-P", "-F", "#{pane_id}");
 
-  const pane = execFileSync("tmux", args, { encoding: "utf8" }).trim();
+  const pane = tmuxTransport.sync(args).trim();
   if (!pane.startsWith("%")) {
     throw new Error(`Unexpected tmux split-window output: ${pane}`);
   }
@@ -154,15 +243,58 @@ export function createSurfaceSplit(
   return pane;
 }
 
+/** tmux session names may not contain `:` or `.`; keep a readable safe slug. */
+function detachedSessionName(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40) || "subagent";
+  return `${slug}-${randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * Create a pane in its own detached session on the private subagent server
+ * (`tmux -L pi-subagents`). Needs the tmux binary but no `$TMUX`. The server
+ * starts on first use with the caller's environment and exits by itself when
+ * its last session closes. Returns a socket-qualified handle such as
+ * `pi-subagents:%3`.
+ */
+export function createDetachedSurface(name: string): string {
+  const pane = tmuxTransport
+    .sync([
+      ...socketArgs(DETACHED_TMUX_SOCKET),
+      "new-session",
+      "-d",
+      "-s",
+      detachedSessionName(name),
+      "-P",
+      "-F",
+      "#{pane_id}",
+    ])
+    .trim();
+  if (!pane.startsWith("%")) {
+    throw new Error(`Unexpected tmux new-session output: ${pane}`);
+  }
+  return formatSurfaceHandle(DETACHED_TMUX_SOCKET, pane);
+}
+
+/** Create a subagent surface of the selected kind. */
+export function createSurfaceOfKind(kind: SurfaceKind, name: string): string {
+  return kind === "detached" ? createDetachedSurface(name) : createSurface(name);
+}
+
 /**
  * Send a command string to a pane and execute it.
  * Typed literally (`-l`) so special characters are not interpreted as keys,
  * then submitted with Enter.
  */
 export function sendCommand(surface: string, command: string): void {
-  requireTmux();
-  execFileSync("tmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
-  execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
+  const { socket, pane } = parseSurfaceHandle(surface);
+  const prefix = socketArgs(socket);
+  tmuxTransport.sync([...prefix, "send-keys", "-t", pane, "-l", command]);
+  tmuxTransport.sync([...prefix, "send-keys", "-t", pane, "Enter"]);
 }
 
 type TmuxTextRunner = (
@@ -174,11 +306,7 @@ function runTmuxTextCommand(
   args: string[],
   options?: { input?: string; encoding?: BufferEncoding },
 ): unknown {
-  requireTmux();
-  return execFileSync("tmux", args, {
-    ...options,
-    encoding: options?.encoding ?? "utf8",
-  });
+  return tmuxTransport.sync(args, options?.input !== undefined ? { input: options.input } : undefined);
 }
 
 /**
@@ -196,18 +324,21 @@ export function submitText(
   runner: TmuxTextRunner = runTmuxTextCommand,
 ): void {
   const bufferName = `pi-subagent-${process.pid}-${randomUUID()}`;
+  // Buffers are per server, so every step targets the handle's server.
+  const { socket, pane } = parseSurfaceHandle(surface);
+  const prefix = socketArgs(socket);
   let needsCleanup = true;
   try {
-    runner(["load-buffer", "-b", bufferName, "-"], { input: text, encoding: "utf8" });
-    runner(["paste-buffer", "-p", "-d", "-b", bufferName, "-t", surface], {
+    runner([...prefix, "load-buffer", "-b", bufferName, "-"], { input: text, encoding: "utf8" });
+    runner([...prefix, "paste-buffer", "-p", "-d", "-b", bufferName, "-t", pane], {
       encoding: "utf8",
     });
     needsCleanup = false; // paste-buffer -d removed it after the successful paste.
-    runner(["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
+    runner([...prefix, "send-keys", "-t", pane, "Enter"], { encoding: "utf8" });
   } finally {
     if (needsCleanup) {
       try {
-        runner(["delete-buffer", "-b", bufferName], { encoding: "utf8" });
+        runner([...prefix, "delete-buffer", "-b", bufferName], { encoding: "utf8" });
       } catch {
         // Preserve the original transport failure. Cleanup is best effort when
         // the tmux server itself is unavailable.
@@ -271,14 +402,16 @@ export function completionSuffix(doneFile: string): string {
  * Read the screen contents of a pane (sync).
  */
 export function readScreen(surface: string, lines = 50): string {
-  requireTmux();
-  return execFileSync(
-    "tmux",
-    ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
-    {
-      encoding: "utf8",
-    },
-  );
+  const { socket, pane } = parseSurfaceHandle(surface);
+  return tmuxTransport.sync([
+    ...socketArgs(socket),
+    "capture-pane",
+    "-p",
+    "-t",
+    pane,
+    "-S",
+    `-${Math.max(1, lines)}`,
+  ]);
 }
 
 /**
@@ -289,30 +422,152 @@ export async function readScreenAsync(
   lines = 50,
   options?: { joinWrapped?: boolean },
 ): Promise<string> {
-  requireTmux();
-  const { stdout } = await execFileAsync(
-    "tmux",
-    [
-      "capture-pane",
-      "-p",
-      ...(options?.joinWrapped ? ["-J"] : []),
-      "-t",
-      surface,
-      "-S",
-      `-${Math.max(1, lines)}`,
-    ],
-    { encoding: "utf8" },
-  );
-  return stdout;
+  const { socket, pane } = parseSurfaceHandle(surface);
+  return tmuxTransport.async([
+    ...socketArgs(socket),
+    "capture-pane",
+    "-p",
+    ...(options?.joinWrapped ? ["-J"] : []),
+    "-t",
+    pane,
+    "-S",
+    `-${Math.max(1, lines)}`,
+  ]);
 }
 
 /**
- * Close a pane.
+ * Close a pane. Killing a detached child's only pane also ends its session;
+ * detached closes skip split-layout rebalancing.
  */
 export function closeSurface(surface: string): void {
-  requireTmux();
-  execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
-  rebalanceSurfaces();
+  const { socket, pane } = parseSurfaceHandle(surface);
+  tmuxTransport.sync([...socketArgs(socket), "kill-pane", "-t", pane]);
+  if (!socket) rebalanceSurfaces();
+}
+
+// ── Pane tags (live child detection across parent restarts) ──
+
+/** Pane user option holding the child's canonical session (or AGY state) path. */
+export const PANE_SESSION_TAG = "@pi_subagent_session";
+/** Pane user option holding the per-launch completion file path. */
+export const PANE_DONE_TAG = "@pi_subagent_done";
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * Tag a child pane with its session path and completion file so a later
+ * parent process can find a still-running child (`findLiveTaggedPane`).
+ * Requires tmux 3.0+ pane options. Throws on transport failure; callers treat
+ * tagging as best effort.
+ */
+export function tagSurface(surface: string, tags: { sessionPath: string; doneFile?: string }): void {
+  const { socket, pane } = parseSurfaceHandle(surface);
+  const args = [
+    ...socketArgs(socket),
+    "set-option",
+    "-p",
+    "-t",
+    pane,
+    PANE_SESSION_TAG,
+    canonicalPath(tags.sessionPath),
+  ];
+  if (tags.doneFile) {
+    args.push(";", "set-option", "-p", "-t", pane, PANE_DONE_TAG, resolve(tags.doneFile));
+  }
+  tmuxTransport.sync(args, { quiet: true });
+}
+
+/** True when tmux supports pane user options (`set-option -p`, tmux 3.0+). */
+function tmuxSupportsPaneOptions(): boolean {
+  const key = "tmux-pane-options";
+  if (commandAvailability.has(key)) return commandAvailability.get(key)!;
+  let supported = false;
+  try {
+    const version = tmuxTransport.sync(["-V"], { quiet: true }).trim();
+    const match = /(\d+)\.(\d+)/.exec(version);
+    supported = !!match && Number(match[1]) >= 3;
+  } catch {
+    supported = false;
+  }
+  commandAvailability.set(key, supported);
+  return supported;
+}
+
+/** Path of the private subagent server socket (tmux default socket dir). */
+export function detachedSocketPath(): string {
+  const base = process.env.TMUX_TMPDIR || "/tmp";
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  return join(base, `tmux-${uid}`, DETACHED_TMUX_SOCKET);
+}
+
+/** A failure that proves a private server has no panes (none running). */
+function isNoServerError(error: unknown): boolean {
+  const err = error as { stderr?: unknown; message?: unknown };
+  const text = `${typeof err?.stderr === "string" ? err.stderr : ""}\n${
+    typeof err?.message === "string" ? err.message : ""
+  }`;
+  return (
+    /no server running on/i.test(text) ||
+    /error connecting to .*\((No such file or directory|Connection refused)\)/i.test(text)
+  );
+}
+
+export type LiveTaggedPaneLookup =
+  | { status: "found"; surface: string }
+  | { status: "absent" }
+  | { status: "unknown"; error: string };
+
+function sameSocketPath(a: string, b: string): boolean {
+  return canonicalPath(a) === canonicalPath(b);
+}
+
+/**
+ * Find a live child pane tagged with `sessionPath` on the attached tmux server
+ * (when `$TMUX` is set) and on the private subagent server. A pane counts as
+ * live while its completion file is absent and the pane is not dead.
+ * Transport failures return `unknown`, never `absent`; only a missing private
+ * server proves absence there.
+ */
+export function findLiveTaggedPane(sessionPath: string): LiveTaggedPaneLookup {
+  if (!isCommandAvailable("tmux")) return { status: "absent" };
+  if (!tmuxSupportsPaneOptions()) {
+    return { status: "unknown", error: "tmux 3.0 or newer is required to detect live subagent panes" };
+  }
+
+  const target = canonicalPath(sessionPath);
+  const format = `#{pane_id}\t#{pane_dead}\t#{${PANE_SESSION_TAG}}\t#{${PANE_DONE_TAG}}`;
+  const servers: Array<{ socket: string | null }> = [];
+  const attachedSocket = process.env.TMUX ? process.env.TMUX.split(",")[0] : null;
+  if (attachedSocket) servers.push({ socket: null });
+  if (!attachedSocket || !sameSocketPath(attachedSocket, detachedSocketPath())) {
+    servers.push({ socket: DETACHED_TMUX_SOCKET });
+  }
+
+  for (const { socket } of servers) {
+    let output: string;
+    try {
+      output = tmuxTransport.sync([...socketArgs(socket), "list-panes", "-a", "-F", format], { quiet: true });
+    } catch (error) {
+      if (socket && isNoServerError(error)) continue;
+      const message = error instanceof Error ? error.message : String(error);
+      return { status: "unknown", error: message.split("\n")[0] };
+    }
+    for (const line of output.split("\n")) {
+      if (!line) continue;
+      const [pane, dead, tag, doneFile] = line.split("\t");
+      if (!pane?.startsWith("%") || !tag || dead === "1") continue;
+      if (canonicalPath(tag) !== target) continue;
+      if (doneFile && existsSync(doneFile)) continue;
+      return { status: "found", surface: formatSurfaceHandle(socket, pane) };
+    }
+  }
+  return { status: "absent" };
 }
 
 // ── Exit polling ──
@@ -347,13 +602,14 @@ function interpretExitSidecar(data: any): PollResult {
 }
 
 async function surfaceExists(surface: string): Promise<boolean | null> {
+  const { socket, pane } = parseSurfaceHandle(surface);
   try {
-    const { stdout } = await execFileAsync("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], {
-      encoding: "utf8",
-    });
-    return stdout.split("\n").includes(surface);
-  } catch {
-    // A server/transport failure cannot prove that one pane disappeared.
+    const stdout = await tmuxTransport.async([...socketArgs(socket), "list-panes", "-a", "-F", "#{pane_id}"]);
+    return stdout.split("\n").includes(pane);
+  } catch (error) {
+    // The private server exits with its last session, which proves the pane
+    // is gone. Any other server/transport failure cannot prove that.
+    if (socket && isNoServerError(error)) return false;
     return null;
   }
 }
@@ -378,7 +634,7 @@ function readScreenForSentinel(surface: string, lines: number): Promise<string> 
   return readScreenAsync(surface, lines, { joinWrapped: true });
 }
 
-export const __pollForExitTest__ = { interpretExitSidecar, surfaceExists, consumeDoneFile };
+export const __pollForExitTest__ = { interpretExitSidecar, surfaceExists, consumeDoneFile, isNoServerError };
 
 /**
  * Poll until the subagent exits. Checks for a `.exit` sidecar file first
