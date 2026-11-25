@@ -46,7 +46,7 @@ Registry entries are matched by exact package source, MCP server name, or skill 
 
 The first source that contains the entry wins and is used as-is, so a registry entry replaces an ambient entry with the same source or name. Profiles that select nothing from a registry behave exactly as before. Lookup depends on the profile's location and the active trusted project, never on a runtime `cwd` passed to `subagent`.
 
-Resolution is read-only. It never installs, updates, connects, accesses the network, expands configuration expressions, reads credentials, or writes settings. A missing registry is empty. A malformed registry `settings.json` or `mcp.json`, an invalid registry package entry, or a disabled registry MCP server excludes only the profiles that consult that registry for the affected field, with a file-and-field diagnostic. Disabled registry entries never fall through to ambient entries.
+Resolution is read-only. It never installs, updates, connects, accesses the network, expands configuration expressions, reads credentials, or writes settings. A missing registry is empty. A malformed registry `settings.json` or `mcp.json`, an invalid registry package entry, or a disabled registry MCP server marked `required: true` excludes only the profiles that consult that registry for the affected field, with a file-and-field diagnostic. A disabled registry MCP server selected as optional (the default) is left out of the grant instead; see [Optional and required MCP servers](#optional-and-required-mcp-servers). Disabled registry entries never fall through to ambient entries.
 
 ## File format
 
@@ -81,7 +81,7 @@ Malformed YAML, unknown keys, invalid values, and invalid field types exclude th
 | `description` | Non-empty string | Optional text shown by `subagents_list`. |
 | `model` | Non-empty string | Optional child model for a flat profile. Forbidden with `model-chain`. Pi uses its configured default when omitted; AGY uses its own default. |
 | `builtin-tools` | Comma-delimited string or YAML string array. Pi accepts `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, `ls`, or `codemode`; AGY accepts only `read`, `grep`, `find`, or `ls`. | Empty list. Flat and native-resumed Pi children still receive `ask_question`; chain attempts omit it to preserve one final delivery. `codemode` is flat-Pi-only. AGY receives no native tools. See [Tool isolation](#tool-isolation). |
-| `mcp-servers` | Comma-delimited string or YAML string array of exact configured Pi MCP server names | Empty list. Flat Pi profiles only. Grants complete servers with native exposure/resources; wildcards and per-tool selection are unsupported. See [Codemode and MCP server selection](#codemode-and-mcp-server-selection). |
+| `mcp-servers` | Comma-delimited string, or YAML array of exact configured Pi MCP server names and `{ name, required }` mappings | Empty list. Flat Pi profiles only. Servers are optional unless marked `required: true`; an optional server that is not configured or is disabled is skipped. Grants complete servers with native exposure/resources; wildcards and per-tool selection are unsupported. See [Codemode and MCP server selection](#codemode-and-mcp-server-selection). |
 | `extensions` | YAML array of mappings containing exactly `package` and optional `paths` | Empty list. Selects installed, enabled extension resources from exact configured Pi package sources. See [Package extension selection](#package-extension-selection). |
 | `skill` | Comma-delimited string or YAML string array | Alias of `skills`. |
 | `skills` | Comma-delimited string or YAML string array of skill names | Empty list. Flat Pi profiles pass each resolved skill file with `--skill`, so the child can discover it; nothing is invoked at startup. Do not use together with `skill`. See [Skills](#skills). |
@@ -146,7 +146,7 @@ subagent_agents:
   - implementer
 ```
 
-Every array member must be a string and must not contain commas. Each `subagent_agents` entry must also satisfy the effective `name` restrictions. Empty strings are removed and duplicate entries are collapsed.
+Every array member must be a string and must not contain commas; `mcp-servers` also accepts `{ name, required }` mappings (see [Optional and required MCP servers](#optional-and-required-mcp-servers)). Each `subagent_agents` entry must also satisfy the effective `name` restrictions. Empty strings are removed and duplicate entries are collapsed.
 
 ## Model chains
 
@@ -251,11 +251,31 @@ mcp-servers:
   - issue-tracker
 ```
 
-Missing or empty fields grant nothing. Duplicate list entries follow the ordinary list normalization. Names must be exact valid Pi MCP names; wildcard and per-tool grants are not supported. Declaring `mcp-servers` on Claude, AGY, or `model-chain` profiles is invalid even when the value is empty. Existing AGY and model-chain restrictions also reject `codemode`.
+Missing or empty fields grant nothing. Names must be exact valid Pi MCP names; wildcard and per-tool grants are not supported. Declaring `mcp-servers` on Claude, AGY, or `model-chain` profiles is invalid even when the value is empty, including the mapping form. Existing AGY and model-chain restrictions also reject `codemode`.
+
+### Optional and required MCP servers
+
+Every listed server is optional by default. Mark a server that the profile cannot work without with a `{ name, required }` mapping. Plain names and mappings can be mixed in one YAML array:
+
+```yaml
+mcp-servers:
+  - project-docs                # optional
+  - name: issue-tracker
+    required: true              # the profile fails without it
+  - { name: notes, required: false }
+```
+
+A mapping accepts only `name` (a valid server name) and `required` (YAML `true` or `false`, default `false`). Any other key, a missing or invalid `name`, a non-boolean `required`, or an entry that is neither a string nor a mapping makes the profile invalid. Comma-delimited strings still work, and every entry they produce is optional. Repeated entries for the same name with the same required setting collapse into the first one; the same name listed as both required and optional makes the profile invalid.
+
+An optional server is left out of the grant, without a diagnostic, in exactly two cases: no permitted source defines the name, or the first source that defines it has `enabled: false`. A disabled first source still never falls through to a later source. A skipped server grants nothing and does not count toward `codemode` or `tool_search` support. `subagents_list` appends `(optional MCP unavailable: <names>)` to the affected profile line, so the parent agent and the user can see which servers the child will not have. The spawn result, child task, and resume snapshot are unchanged; resume does not re-resolve skipped servers.
+
+A server marked `required: true` that is not configured or is disabled excludes the profile with a diagnostic, and a spawn fails before pane creation. Every other resolution problem stays fatal for optional and required servers alike: invalid server config, a malformed or unreadable source file, a `-`/`_` namespace collision, a registry `auth` provider entry, and invalid names.
+
+Breaking change: before optional servers existed, every missing or disabled selection excluded the profile. Add `required: true` to keep that fail-closed behavior for a server.
 
 An MCP selection grants the complete configured server. Pi's server and per-tool `direct`, `codemode`, `deferred`, and `hidden` exposure remains authoritative, including the standard `list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource` tools. The runtime loads and activates `codemode` and `tool_search` support automatically when selected exposures require them; profiles do not need to duplicate those implementation details. A standalone `codemode` grant activates only codemode. Codemode executes model-authored JavaScript and can call reachable tools, so it is an explicit authority grant.
 
-Resolution is read-only. A [registry](#lookup-order) `mcp.json` entry wins first. Otherwise resolution considers the global Pi `mcp.json` and, only when the active project is trusted, that project's `.pi/mcp.json`. The trusted project entry replaces a same-named global entry for every profile, including an invalid or disabled replacement; there is no global fallback. A runtime `cwd` override changes the child workspace but cannot select another MCP source or broaden the grant. A malformed consulted source, missing/disabled selected entry, invalid selected config, or selected `-`/`_` namespace collision with any name in the profile's registries or ambient files excludes the profile before pane creation. Resolution does not connect, install, expand environment/command expressions, read credentials, or write settings.
+Resolution is read-only. A [registry](#lookup-order) `mcp.json` entry wins first. Otherwise resolution considers the global Pi `mcp.json` and, only when the active project is trusted, that project's `.pi/mcp.json`. The trusted project entry replaces a same-named global entry for every profile, including an invalid or disabled replacement; there is no global fallback. A runtime `cwd` override changes the child workspace but cannot select another MCP source or broaden the grant. A malformed consulted source, a missing or disabled entry marked `required: true`, invalid selected config, or selected `-`/`_` namespace collision with any name in the profile's registries or ambient files excludes the profile before pane creation. A missing or disabled optional entry is skipped instead. Resolution does not connect, install, expand environment/command expressions, read credentials, or write settings.
 
 The child still launches with `--no-extensions --no-builtin-tools` and never loads ambient `builtin:mcp`. Its protected filtered controller re-reads only the exact selected entries, verifies their canonical source and semantic SHA-256 digest, reserves those names before profile extensions, and supplies them to Pi's public MCP runtime with ambient loading disabled. Unselected file-configured servers therefore do not connect, register tools/resources, or contribute names, descriptions, instructions, or prompt metadata. Once configuration identity passes, connection, authentication, reconnect, and transient failures use Pi's native MCP diagnostics and lifecycle rather than a package-specific terminal startup failure.
 

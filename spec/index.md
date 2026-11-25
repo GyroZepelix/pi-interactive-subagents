@@ -39,6 +39,7 @@ Repository-local planning and execution artifacts.
 | [Add system-prompt task option for Pi profiles](./archive/261112-1521-add-system-prompt-task-option-for-pi-profiles/plan.md) | work-item | completed | 2026-11-12 |
 | [Subagent-only capability registry for MCP, extensions, and skills](./archive/261118-1208-subagent-only-capability-registry-for-mcp-extensions-and-skills/plan.md) | work-item | completed | 2026-11-18 |
 | [Headless RPC-mode subagents](./archive/261122-1959-headless-rpc-mode-subagents/plan.md) | work-item | completed | 2026-11-22 |
+| [Optional and required MCP servers in agent profiles](./archive/261125-1133-optional-and-required-mcp-servers-in-agent-profiles/plan.md) | work-item | completed | 2026-11-25 |
 <!-- spec-items:archive:end -->
 
 ## Templates

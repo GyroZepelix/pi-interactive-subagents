@@ -287,3 +287,20 @@ Use this shape for new entries:
 - Disposition: MERGE `wiki/conventions/typescript-modules.md` "Implementation modules expose focused named functions" - added the tmux transport seam and the new test setters.
 - Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, and ran the memory safety scan.
 - Notes: `wiki/overview.md` stale tmux-only lines were corrected by the Implement completion step before this run, not by Dream. E2E harness mechanics stay episodic. No lint-queue entries.
+
+## [2026-11-25] update | Optional and required MCP servers in agent profiles
+
+- Trigger: implementation of `261125-1133-optional-and-required-mcp-servers-in-agent-profiles`.
+- Inputs: `pi-extension/subagents/{agents,mcp-config,index}.ts`, `test/test.ts`, `docs/agent-definitions.md`, the active plan.
+- Wiki pages changed: `wiki/conventions/agent-profiles.md` and `wiki/log.md`.
+- Verification: `npm test` passed; claims checked against the implementation working tree.
+- Notes: supersedes the statement that every missing or disabled MCP selection fails before pane creation; that now applies only to `required: true` entries.
+
+## [2026-11-25] dream | Gamemaster checkpoint 261125-1133 direct
+
+- Trigger: `/dream` run after Gamemaster checkpoint: 261125-1133-optional-and-required-mcp-servers-in-agent-profiles/direct.
+- Inputs: current conversation, `spec/archive/261125-1133-optional-and-required-mcp-servers-in-agent-profiles/{plan,verification,outcome}.md`, `pi-extension/subagents/{agents,mcp-config,index}.ts`, `test/test.ts`, `wiki/architecture.md`, `wiki/development.md`, `wiki/conventions/agent-profiles.md`.
+- Wiki pages changed: `wiki/architecture.md` and `wiki/log.md`. The run's episode is discoverable through `wiki/dreams/episodes.jsonl`.
+- Disposition: SUPERSEDE `wiki/architecture.md` "invalid/disabled selected MCP entries" - only missing or disabled `required: true` MCP entries now fail before pane creation; optional ones are skipped.
+- Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, ran memory safety scan.
+- Notes: optional and required MCP semantics were written to `wiki/conventions/agent-profiles.md` during implementation and were not duplicated. The child-env test leak is already covered by `wiki/development.md`. No lint-queue entries.

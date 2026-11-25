@@ -65,7 +65,10 @@ export interface ParsedAgentDefinition {
   description?: string;
   model?: string;
   builtinTools: string[];
+  /** Ordered MCP server names; optional unless also listed in `requiredMcpServers`. */
   mcpServers: string[];
+  /** Subset of `mcpServers` marked `required: true`. */
+  requiredMcpServers: string[];
   extensions: AgentExtensionSelector[];
   skills: string[];
   /** Pi-only: whether the child keeps native ambient skill discovery (default true). */
@@ -93,6 +96,8 @@ export interface AgentDefinition extends Omit<ParsedAgentDefinition, "modelChain
   skillPaths: string[];
   mcpServerReferences: McpServerReference[];
   mcpSupportTools: McpSupportTool[];
+  /** Optional MCP servers skipped because they are not configured or are disabled. */
+  mcpServersUnavailable: string[];
   modelChain?: AgentModelChainTarget[];
 }
 
@@ -348,6 +353,129 @@ function stringList(
   }
 
   return [...new Set(raw.map((entry) => entry.trim()).filter(Boolean))];
+}
+
+const MCP_SERVER_NAME = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Parses `mcp-servers` into ordered names plus the names marked
+ * `required: true`. Plain names, comma-delimited entries, and mappings without
+ * `required` are optional. Same-name entries with the same required-ness
+ * collapse into the first occurrence; conflicting required-ness is invalid.
+ */
+function mcpServerList(
+  frontmatter: AgentFrontmatter,
+  filePath: string,
+  diagnostics: AgentDiagnostic[],
+): { names: string[]; required: string[] } {
+  const field = "mcp-servers";
+  const value = frontmatter[field];
+  const empty = { names: [], required: [] };
+  if (value === undefined) return empty;
+  if (value === null) {
+    diagnostics.push(diagnostic(
+      filePath,
+      field,
+      "must be a comma-delimited string or an array of server names or { name, required } mappings",
+    ));
+    return empty;
+  }
+
+  const entries: Array<{ name: string; required: boolean }> = [];
+  if (typeof value === "string") {
+    for (const raw of value.split(",")) {
+      const name = raw.trim();
+      if (name) entries.push({ name, required: false });
+    }
+  } else if (Array.isArray(value)) {
+    let valid = true;
+    for (const [index, entry] of value.entries()) {
+      if (typeof entry === "string") {
+        if (entry.includes(",")) {
+          diagnostics.push(diagnostic(filePath, field, "YAML array entries must not contain commas"));
+          valid = false;
+          continue;
+        }
+        const name = entry.trim();
+        if (name) entries.push({ name, required: false });
+        continue;
+      }
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        diagnostics.push(diagnostic(
+          filePath,
+          field,
+          `entry ${index} must be a server name or a { name, required } mapping`,
+        ));
+        valid = false;
+        continue;
+      }
+      const record = entry as AgentFrontmatter;
+      let entryValid = true;
+      for (const key of Object.keys(record)) {
+        if (key === "name" || key === "required") continue;
+        diagnostics.push(diagnostic(
+          filePath,
+          field,
+          `entry ${index} has unsupported key "${key}"; supported keys: name, required`,
+        ));
+        entryValid = false;
+      }
+      const name = typeof record.name === "string" ? record.name.trim() : "";
+      if (!name) {
+        diagnostics.push(diagnostic(filePath, field, `entry ${index} must have a non-empty string name`));
+        entryValid = false;
+      }
+      if (hasOwn(record, "required") && typeof record.required !== "boolean") {
+        diagnostics.push(diagnostic(
+          filePath,
+          field,
+          `entry ${index} required must be a YAML boolean (true or false)`,
+        ));
+        entryValid = false;
+      }
+      if (!entryValid) {
+        valid = false;
+        continue;
+      }
+      entries.push({ name, required: record.required === true });
+    }
+    if (!valid) return empty;
+  } else {
+    diagnostics.push(diagnostic(
+      filePath,
+      field,
+      "must be a comma-delimited string or an array of server names or { name, required } mappings",
+    ));
+    return empty;
+  }
+
+  const requiredByName = new Map<string, boolean>();
+  let valid = true;
+  for (const { name, required } of entries) {
+    if (!MCP_SERVER_NAME.test(name)) {
+      diagnostics.push(diagnostic(
+        filePath,
+        field,
+        `entry "${name}" must contain only letters, digits, '_' and '-'`,
+      ));
+      valid = false;
+      continue;
+    }
+    const prior = requiredByName.get(name);
+    if (prior === undefined) {
+      requiredByName.set(name, required);
+    } else if (prior !== required) {
+      diagnostics.push(diagnostic(
+        filePath,
+        field,
+        `server "${name}" is listed with conflicting required values`,
+      ));
+      valid = false;
+    }
+  }
+  if (!valid) return empty;
+  const names = [...requiredByName.keys()];
+  return { names, required: names.filter((name) => requiredByName.get(name)) };
 }
 
 function builtinToolList(
@@ -642,18 +770,11 @@ export function parseAgentDefinition(
   }
   const skillsField = hasOwn(frontmatter, "skill") ? "skill" : "skills";
   const builtinTools = builtinToolList(frontmatter, filePath, diagnostics);
-  const mcpServers = stringList(frontmatter, "mcp-servers", filePath, diagnostics);
-  for (const name of mcpServers) {
-    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
-      diagnostics.push(
-        diagnostic(
-          filePath,
-          "mcp-servers",
-          `entry "${name}" must contain only letters, digits, '_' and '-'`,
-        ),
-      );
-    }
-  }
+  const { names: mcpServers, required: requiredMcpServers } = mcpServerList(
+    frontmatter,
+    filePath,
+    diagnostics,
+  );
   const extensions = extensionSelectors(frontmatter, filePath, diagnostics);
   const modelChain = modelChainTargets(frontmatter, filePath, diagnostics);
   const skills = stringList(frontmatter, skillsField, filePath, diagnostics);
@@ -738,6 +859,7 @@ export function parseAgentDefinition(
     model: optionalString(frontmatter, "model", filePath, diagnostics),
     builtinTools,
     mcpServers,
+    requiredMcpServers,
     extensions,
     skills,
     ...(inheritSkills !== undefined ? { inheritSkills } : {}),
@@ -1547,7 +1669,14 @@ async function resolveAgentExtensions(
 
   return {
     agent: diagnostics.length === 0
-      ? { ...agent, extensionPaths, skillPaths: [], mcpServerReferences: [], mcpSupportTools: [] }
+      ? {
+        ...agent,
+        extensionPaths,
+        skillPaths: [],
+        mcpServerReferences: [],
+        mcpSupportTools: [],
+        mcpServersUnavailable: [],
+      }
       : null,
     diagnostics,
   };
@@ -1582,7 +1711,7 @@ async function resolveCompleteAgentExtensions(
 
   return {
     agent: diagnostics.length === 0 && resolvedTargets.length === agent.modelChain.length
-      ? { ...agent, extensionPaths: [], skillPaths: [], modelChain: resolvedTargets }
+      ? { ...agent, extensionPaths: [], skillPaths: [], mcpServersUnavailable: [], modelChain: resolvedTargets }
       : null,
     diagnostics,
   };
@@ -1840,6 +1969,7 @@ export async function discoverAgentDefinitions(
       skillPaths: [],
       mcpServerReferences: [],
       mcpSupportTools: [],
+      mcpServersUnavailable: [],
       ...(agent.modelChain
         ? { modelChain: agent.modelChain.map((target) => ({ ...target, extensionPaths: [] })) }
         : {}),
@@ -1878,10 +2008,12 @@ export async function discoverAgentDefinitions(
     };
     const resolvedMcpAgents: AgentDefinition[] = [];
     for (const agent of discovered) {
-      const resolution = resolveMcpServerReferences(agent.mcpServers, {
-        ...catalog,
-        registries: registriesFor(agent, registrySources),
-      });
+      const required = new Set(agent.requiredMcpServers);
+      const resolution = resolveMcpServerReferences(
+        agent.mcpServers,
+        { ...catalog, registries: registriesFor(agent, registrySources) },
+        { optional: agent.mcpServers.filter((name) => !required.has(name)) },
+      );
       if ("errors" in resolution) {
         diagnostics.push(...resolution.errors.map((message) =>
           diagnostic(agent.filePath, "mcp-servers", message)
@@ -1892,6 +2024,7 @@ export async function discoverAgentDefinitions(
         ...agent,
         mcpServerReferences: resolution.serverReferences,
         mcpSupportTools: resolution.supportTools,
+        mcpServersUnavailable: resolution.skippedOptional,
       });
     }
     discovered = resolvedMcpAgents;

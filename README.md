@@ -119,16 +119,21 @@ See [Agent definitions](docs/agent-definitions.md) for the complete contract, in
 
 ### Codemode and MCP server grants
 
-Flat Pi profiles may list `codemode` in `builtin-tools` and exact configured server names in `mcp-servers`. Both fields accept comma-delimited strings or YAML string arrays. Missing or empty values grant nothing; wildcards and per-tool grants are not supported.
+Flat Pi profiles may list `codemode` in `builtin-tools` and exact configured server names in `mcp-servers`. Both fields accept comma-delimited strings or YAML arrays; `mcp-servers` arrays may also contain `{ name, required }` mappings. Missing or empty values grant nothing; wildcards and per-tool grants are not supported.
 
 ```yaml
 builtin-tools: [read, grep, codemode]
-mcp-servers: [project-docs, issue-tracker]
+mcp-servers:
+  - project-docs                # optional (the default)
+  - name: issue-tracker
+    required: true              # the profile fails without it
 ```
+
+**MCP servers are optional by default.** An optional server that no permitted source defines, or whose first defining source has `enabled: false`, is left out of the grant and the child still launches without it. `subagents_list` marks the profile with `(optional MCP unavailable: <names>)`. A server marked `required: true` keeps the fail-closed behavior: when it is missing or disabled, the profile is excluded with a diagnostic and a spawn fails before pane creation. Breaking change: earlier versions treated every listed server as required, so add `required: true` where a profile depends on a server. See [Optional and required MCP servers](docs/agent-definitions.md#optional-and-required-mcp-servers).
 
 An MCP name grants the complete configured server while preserving Pi's `direct`, `codemode`, `deferred`, and `hidden` server/per-tool exposure and resource tools. The extension automatically loads `codemode` and `tool_search` support required by the selected exposures. Codemode can execute model-authored JavaScript and call its reachable tools, so grant it only when that authority is intended.
 
-Server names resolve from the profile's [registries](#subagent-only-capability-registries) first, then from the global Pi `mcp.json` and, only in a trusted active project, that project's `.pi/mcp.json`. A project entry replaces a same-named global entry, including when the replacement is invalid or disabled; a runtime child `cwd` override does not change this source decision. Malformed source files, missing or disabled selections, invalid selected entries, and selected namespace collisions exclude the profile before pane creation. Once identity passes, connection and sign-in failures use Pi's normal MCP diagnostics and do not create a package-specific terminal startup failure.
+Server names resolve from the profile's [registries](#subagent-only-capability-registries) first, then from the global Pi `mcp.json` and, only in a trusted active project, that project's `.pi/mcp.json`. A project entry replaces a same-named global entry, including when the replacement is invalid or disabled; a runtime child `cwd` override does not change this source decision. Malformed source files, invalid selected entries, and selected namespace collisions exclude the profile before pane creation for every listed server; a missing or disabled server excludes it only when marked `required: true`. Once identity passes, connection and sign-in failures use Pi's normal MCP diagnostics and do not create a package-specific terminal startup failure.
 
 Restricted children keep `--no-extensions --no-builtin-tools` and never load ambient `builtin:mcp`. A protected controller re-reads only selected entries, verifies their source and semantic SHA-256 digest, and gives them to Pi's MCP runtime with ambient loading empty. Snapshots retain only ordered server name, canonical source path, scope, and digest--not config bodies, resolved environment values, headers, OAuth tokens, or provider credentials. Resume refuses changed, missing, disabled, invalid, or source-mismatched entries before pane creation and asks for a fresh spawn.
 

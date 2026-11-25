@@ -31,6 +31,8 @@ import {
 } from "../pi-extension/subagents/agents.ts";
 import {
   digestNormalizedMcpConfig,
+  loadMcpConfigCatalog,
+  resolveMcpServerReferences,
   validateAndNormalizeMcpServerConfig,
   verifyMcpServerReferences,
 } from "../pi-extension/subagents/mcp-config.ts";
@@ -1788,10 +1790,75 @@ describe("subagent discovery", () => {
     ));
   });
 
+  it("parses optional and required MCP entries with strict mappings and duplicate rules", () => {
+    const parse = (fields: string) => parseAgentDefinition(
+      `---\nname: mcp-profile\n${fields}---\nbody`,
+      "/tmp/mcp-profile.md",
+      "global",
+    );
+    const mcpDiagnostic = (result: ReturnType<typeof parse>, pattern: RegExp) =>
+      result.agent === null &&
+      result.diagnostics.some((entry) => entry.field === "mcp-servers" && pattern.test(entry.message));
+
+    // Plain and comma-delimited entries are optional by default.
+    const comma = parse("mcp-servers: docs, local-tools\n");
+    assert.deepEqual(comma.agent?.mcpServers, ["docs", "local-tools"]);
+    assert.deepEqual(comma.agent?.requiredMcpServers, []);
+    assert.deepEqual(parse("").agent?.requiredMcpServers, []);
+
+    const mixed = parse([
+      "mcp-servers:",
+      "  - docs",
+      "  - name: github",
+      "    required: true",
+      "  - { name: notes, required: false }",
+      "  - { name: search }",
+      "  - docs",
+      "  - { name: github, required: true }",
+      "",
+    ].join("\n"));
+    assert.deepEqual(mixed.diagnostics, []);
+    assert.deepEqual(mixed.agent?.mcpServers, ["docs", "github", "notes", "search"]);
+    assert.deepEqual(mixed.agent?.requiredMcpServers, ["github"]);
+
+    // Same name with explicit required: false collapses with a plain entry.
+    const sameOptional = parse("mcp-servers: [docs, { name: docs, required: false }]\n");
+    assert.deepEqual(sameOptional.agent?.mcpServers, ["docs"]);
+    assert.deepEqual(sameOptional.agent?.requiredMcpServers, []);
+
+    assert.ok(mcpDiagnostic(
+      parse("mcp-servers: [docs, { name: docs, required: true }]\n"),
+      /conflicting required values/,
+    ));
+    assert.ok(mcpDiagnostic(
+      parse("mcp-servers: [{ name: docs, required: true, exposure: direct }]\n"),
+      /unsupported key "exposure"/,
+    ));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: [{ name: docs, required: \"yes\" }]\n"), /YAML boolean/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: [{ name: docs, required: 1 }]\n"), /YAML boolean/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: [{ required: true }]\n"), /non-empty string name/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: [{ name: 42 }]\n"), /non-empty string name/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: [{ name: 'bad.name' }]\n"), /letters, digits/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: [docs, 7]\n"), /server name or a \{ name, required \} mapping/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: [[docs]]\n"), /server name or a \{ name, required \} mapping/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: ['docs,notes']\n"), /must not contain commas/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers:\n"), /comma-delimited string or an array/));
+    assert.ok(mcpDiagnostic(parse("mcp-servers: { name: docs }\n"), /comma-delimited string or an array/));
+  });
+
   it("rejects MCP grants on Claude, AGY, and model-chain profiles even when empty", () => {
     const cases = [
       "name: claude-mcp\ncli: claude\nmcp-servers: []",
       "name: agy-mcp\ncli: agy\nmcp-servers: ''",
+      "name: claude-mcp-required\ncli: claude\nmcp-servers: [{ name: docs, required: true }]",
+      "name: agy-mcp-optional\ncli: agy\nmcp-servers: [{ name: docs }]",
+      [
+        "name: chain-mcp-mapping",
+        "mcp-servers: [{ name: docs, required: false }]",
+        "model-chain:",
+        "  - { cli: agy, model: first }",
+        "  - { cli: pi, model: second }",
+      ].join("\n"),
       [
         "name: chain-mcp",
         "mcp-servers: []",
@@ -2103,7 +2170,7 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("fails MCP discovery closed for project tombstones, source errors, missing names, and namespace collisions", async () => {
+  it("fails MCP discovery closed for required tombstones and missing names, and for every source error and namespace collision", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, globalDir, globalAgentsDir }) => {
       const globalConfig = join(globalDir, "mcp.json");
       const projectConfig = join(projectDir, ".pi", "mcp.json");
@@ -2115,9 +2182,10 @@ describe("subagent discovery", () => {
         },
       }));
       for (const [name, selection] of [
-        ["shadowed", "shared"],
-        ["missing", "absent"],
+        ["shadowed", "{ name: shared, required: true }"],
+        ["missing", "{ name: absent, required: true }"],
         ["collision", "name-clash"],
+        ["shadowed-optional", "shared"],
       ] as const) {
         writeAgentFile(globalAgentsDir, name, `name: ${name}\nmcp-servers: [${selection}]`);
       }
@@ -2133,22 +2201,102 @@ describe("subagent discovery", () => {
         /disabled/.test(entry.message)
       ));
       assert.equal(disabled.agents.some((entry) => entry.name === "missing"), false);
+      assert.ok(disabled.diagnostics.some((entry) =>
+        entry.filePath.endsWith("missing.md") && /not configured/.test(entry.message)
+      ));
       assert.equal(disabled.agents.some((entry) => entry.name === "collision"), false);
-      assert.ok(disabled.diagnostics.some((entry) => /namespace normalization/.test(entry.message)));
+      assert.ok(disabled.diagnostics.some((entry) =>
+        entry.filePath.endsWith("collision.md") && /namespace normalization/.test(entry.message)
+      ));
+      // An optional project tombstone is skipped without falling through to the global entry.
+      const tombstoned = disabled.agents.find((entry) => entry.name === "shadowed-optional");
+      assert.ok(tombstoned, JSON.stringify(disabled.diagnostics));
+      assert.deepEqual(tombstoned.mcpServerReferences, []);
+      assert.deepEqual(tombstoned.mcpSupportTools, []);
+      assert.deepEqual(tombstoned.mcpServersUnavailable, ["shared"]);
+      assert.equal(
+        disabled.diagnostics.some((entry) => entry.filePath.endsWith("shadowed-optional.md")),
+        false,
+      );
 
       writeFileSync(projectConfig, JSON.stringify({ mcpServers: { shared: { command: 42 } } }));
       const invalidOverride = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
-      assert.equal(invalidOverride.agents.some((entry) => entry.name === "shadowed"), false);
-      assert.ok(invalidOverride.diagnostics.some((entry) =>
-        entry.filePath.endsWith("shadowed.md") && /needs "command"/.test(entry.message)
-      ));
+      for (const name of ["shadowed", "shadowed-optional"]) {
+        assert.equal(invalidOverride.agents.some((entry) => entry.name === name), false, name);
+        assert.ok(invalidOverride.diagnostics.some((entry) =>
+          entry.filePath.endsWith(`${name}.md`) && /needs "command"/.test(entry.message)
+        ), name);
+      }
 
       writeFileSync(projectConfig, "{ not-json");
       const malformed = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
-      assert.equal(malformed.agents.some((entry) => entry.name === "shadowed"), false);
-      assert.ok(malformed.diagnostics.some((entry) =>
-        entry.field === "mcp-servers" && /invalid JSON/.test(entry.message)
-      ));
+      for (const name of ["shadowed", "shadowed-optional"]) {
+        assert.equal(malformed.agents.some((entry) => entry.name === name), false, name);
+        assert.ok(malformed.diagnostics.some((entry) =>
+          entry.filePath.endsWith(`${name}.md`) &&
+          entry.field === "mcp-servers" &&
+          /invalid JSON/.test(entry.message)
+        ), name);
+      }
+    });
+  });
+
+  it("skips optional MCP servers that are missing or disabled and derives support tools only from grants", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir, globalAgentsDir }) => {
+      writeFileSync(join(globalDir, "mcp.json"), JSON.stringify({
+        mcpServers: {
+          directOnly: { command: "direct", exposure: "direct" },
+          off: { command: "off", exposure: "deferred", enabled: false },
+        },
+      }));
+      writeAgentFile(
+        globalAgentsDir,
+        "optional-mix",
+        "name: optional-mix\nmcp-servers: [absent, directOnly, off, { name: gone, required: false }]",
+      );
+      writeAgentFile(globalAgentsDir, "optional-absent", "name: optional-absent\nmcp-servers: [absent]");
+      writeAgentFile(globalAgentsDir, "plain", "name: plain\nbuiltin-tools: [read]");
+
+      const discovery = await discoverAgentDefinitions({ cwd: projectDir, projectTrusted: true });
+      assert.deepEqual(discovery.diagnostics, []);
+      const mix = discovery.agents.find((entry) => entry.name === "optional-mix");
+      assert.ok(mix);
+      assert.deepEqual(mix.mcpServerReferences.map(({ name }) => name), ["directOnly"]);
+      assert.deepEqual(mix.mcpSupportTools, [], "skipped servers contribute no support tools");
+      assert.deepEqual(mix.mcpServersUnavailable, ["absent", "off", "gone"]);
+
+      const absent = discovery.agents.find((entry) => entry.name === "optional-absent");
+      assert.ok(absent);
+      assert.deepEqual(absent.mcpServerReferences, []);
+      assert.deepEqual(absent.mcpSupportTools, []);
+      assert.deepEqual(absent.mcpServersUnavailable, ["absent"]);
+      assert.deepEqual(discovery.agents.find((entry) => entry.name === "plain")?.mcpServersUnavailable, []);
+
+      const sandbox = testApi.prepareAgentSandbox(absent);
+      assert.ok("sandbox" in sandbox, JSON.stringify(sandbox));
+      const prepared = testApi.prepareAgentLaunch(
+        { agent: "optional-absent", task: "Inspect" },
+        absent,
+        sandbox.sandbox,
+        projectDir,
+      );
+      assert.ok("launch" in prepared, JSON.stringify(prepared));
+    });
+  });
+
+  it("keeps the resolver fail-closed unless names are explicitly optional", () => {
+    withTempDir((dir) => {
+      const source = join(dir, "mcp.json");
+      writeFileSync(source, JSON.stringify({ mcpServers: { off: { command: "off", enabled: false } } }));
+      const catalog = loadMcpConfigCatalog({ cwd: dir, projectTrusted: false, agentDir: dir });
+      const strict = resolveMcpServerReferences(["absent", "off"], catalog);
+      assert.ok("errors" in strict);
+      assert.match(strict.errors.join("\n"), /not configured/);
+      assert.match(strict.errors.join("\n"), /disabled/);
+      const lenient = resolveMcpServerReferences(["absent", "off"], catalog, { optional: ["absent", "off"] });
+      assert.ok(!("errors" in lenient));
+      assert.deepEqual(lenient.skippedOptional, ["absent", "off"]);
+      assert.deepEqual(lenient.serverReferences, []);
     });
   });
 
@@ -4787,6 +4935,49 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("notes unavailable optional MCP servers in list content and rendered output", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir, globalAgentsDir }) => {
+      writeFileSync(join(globalDir, "mcp.json"), JSON.stringify({
+        mcpServers: { present: { command: "present" }, off: { command: "off", enabled: false } },
+      }));
+      writeAgentFile(
+        globalAgentsDir,
+        "mcp-partial",
+        "name: mcp-partial\ndescription: Partial MCP\nmcp-servers: [absent, present, off]",
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "mcp-complete",
+        "name: mcp-complete\ndescription: Complete MCP\nmcp-servers: [present]",
+      );
+
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const tool = registeredTools.find((tool) => tool.name === "subagents_list");
+      assert.ok(tool, "expected subagents_list to be registered");
+
+      const result = await tool.execute("list-mcp", {}, undefined, undefined, createMockContext(projectDir, true));
+      const lines = result.content[0].text.split("\n");
+      assert.ok(
+        lines.includes("• mcp-partial — Partial MCP (optional MCP unavailable: absent, off)"),
+        result.content[0].text,
+      );
+      assert.ok(lines.includes("• mcp-complete — Complete MCP"), result.content[0].text);
+      assert.doesNotMatch(result.content[0].text, /Invalid definitions/);
+
+      const theme = {
+        fg(_color: string, text: string) { return text; },
+        bold(text: string) { return text; },
+      };
+      const rendered = tool.renderResult(result, {}, theme).render(200).map((line: string) => line.trimEnd());
+      assert.ok(
+        rendered.some((line: string) => line.endsWith("mcp-partial — Partial MCP (optional MCP unavailable: absent, off)")),
+        rendered.join("\n"),
+      );
+      assert.ok(rendered.some((line: string) => line.endsWith("mcp-complete — Complete MCP")), rendered.join("\n"));
+    });
+  });
+
   it("hides disable-model-invocation agents from listings but keeps direct loading", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
       writeAgentFile(
@@ -5102,7 +5293,7 @@ describe("subagent capability registries", () => {
     });
   });
 
-  it("rejects disabled, missing, colliding, provider-auth, and unreadable registry MCP entries", async () => {
+  it("rejects required disabled or missing, and any colliding, provider-auth, or unreadable registry MCP entries", async () => {
     await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalDir, globalAgentsDir }) => {
       const globalRegistry = join(globalAgentsDir, ".pi");
       const projectRegistry = join(projectAgentsDir, ".pi");
@@ -5119,10 +5310,12 @@ describe("subagent capability registries", () => {
         },
       }));
       for (const [name, selection] of [
-        ["disabled", "tombstoned"],
-        ["missing", "absent"],
+        ["disabled", "{ name: tombstoned, required: true }"],
+        ["missing", "{ name: absent, required: true }"],
         ["collision", "name-clash"],
         ["auth", "provider"],
+        ["disabled-optional", "tombstoned"],
+        ["missing-optional", "absent"],
       ] as const) {
         writeAgentFile(globalAgentsDir, name, `name: ${name}\nmcp-servers: [${selection}]`);
       }
@@ -5146,6 +5339,20 @@ describe("subagent capability registries", () => {
         "global profiles never consult the project registry",
       );
       assert.ok(names.includes("project-plain"));
+
+      // Optional registry tombstones and missing names are skipped; the
+      // disabled registry entry never falls through to the ambient entry.
+      const disabledOptional = discovery.agents.find((agent) => agent.name === "disabled-optional");
+      assert.ok(disabledOptional, JSON.stringify(discovery.diagnostics));
+      assert.deepEqual(disabledOptional.mcpServerReferences, []);
+      assert.deepEqual(disabledOptional.mcpServersUnavailable, ["tombstoned"]);
+      const missingOptional = discovery.agents.find((agent) => agent.name === "missing-optional");
+      assert.ok(missingOptional);
+      assert.deepEqual(missingOptional.mcpServerReferences, []);
+      assert.deepEqual(missingOptional.mcpServersUnavailable, ["absent"]);
+      for (const optional of ["disabled-optional.md", "missing-optional.md"]) {
+        assert.equal(discovery.diagnostics.some((entry) => entry.filePath.endsWith(optional)), false, optional);
+      }
     });
   });
 

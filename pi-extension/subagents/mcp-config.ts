@@ -29,6 +29,17 @@ export interface McpServerReference {
 export interface McpCapabilityResolution {
   serverReferences: McpServerReference[];
   supportTools: McpSupportTool[];
+  /** Optional selected names left out because they are not configured or are disabled. */
+  skippedOptional: string[];
+}
+
+export interface ResolveMcpServerReferencesOptions {
+  /**
+   * Selected names that may be skipped when no permitted source defines them,
+   * or when the first defining source disables them. Every other name is
+   * required. All other resolution errors stay fatal for every name.
+   */
+  optional?: readonly string[];
 }
 
 export interface VerifiedMcpServer {
@@ -541,8 +552,11 @@ function effectiveNames(sources: readonly ConfigSource[]): string[] {
 export function resolveMcpServerReferences(
   selectedNames: readonly string[],
   catalog: McpConfigCatalog,
+  options: ResolveMcpServerReferencesOptions = {},
 ): McpCapabilityResolution | { errors: string[] } {
-  if (selectedNames.length === 0) return { serverReferences: [], supportTools: [] };
+  if (selectedNames.length === 0) return { serverReferences: [], supportTools: [], skippedOptional: [] };
+  const optional = new Set(options.optional ?? []);
+  const skippedOptional: string[] = [];
   const errors: string[] = [];
   const sources = orderedSources(catalog);
   for (const source of sources) {
@@ -582,7 +596,8 @@ export function resolveMcpServerReferences(
       candidate.entries && Object.prototype.hasOwnProperty.call(candidate.entries, name)
     );
     if (!source?.entries) {
-      errors.push(`server "${name}" is not configured in the permitted MCP sources`);
+      if (optional.has(name)) skippedOptional.push(name);
+      else errors.push(`server "${name}" is not configured in the permitted MCP sources`);
       continue;
     }
 
@@ -592,7 +607,9 @@ export function resolveMcpServerReferences(
       continue;
     }
     if (validated.config.enabled === false) {
-      errors.push(`${source.path}: server "${name}" is disabled`);
+      // A disabled first source is a tombstone: never fall through.
+      if (optional.has(name)) skippedOptional.push(name);
+      else errors.push(`${source.path}: server "${name}" is disabled`);
       continue;
     }
 
@@ -617,5 +634,6 @@ export function resolveMcpServerReferences(
       ...(needsCodemode ? ["codemode" as const] : []),
       ...(needsToolSearch ? ["tool-search" as const] : []),
     ],
+    skippedOptional,
   };
 }

@@ -27,7 +27,7 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 - A registry holds packages, MCP servers, and skills that only subagents use; the parent session never reads it. Global: `<global agents dir>/.pi/` (always trusted). Project: `<project>/.pi/agents/.pi/` (trusted projects only).
 - It uses Pi's project layout (`settings.json`, `mcp.json`, `skills/`). Manage it from the agents directory with `pi install -l`, `pi config --local`, `pi mcp add -l`, `pi mcp login`, and `pi update`, after starting `pi` there once and trusting the directory.
 - Name registry entries in the normal `extensions`, `mcp-servers`, and `skills` fields. A project profile checks its project registry, then the global registry; a global profile checks the global registry. The first registry hit wins over ambient settings; otherwise ambient rules apply unchanged.
-- Registry `mcp.json` entries cannot use `auth: { provider }`. A disabled registry entry invalidates the profile rather than falling back.
+- Registry `mcp.json` entries cannot use `auth: { provider }`. A disabled registry entry never falls back to an ambient entry: a `required: true` server invalidates the profile, and an optional one is skipped.
 
 ## Fields
 
@@ -38,7 +38,7 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 | `model` | Pi or AGY configured default | The role needs a specific model. Forbidden with `model-chain`. |
 | `thinking` | none | The role needs a reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
 | `builtin-tools` | empty (no tools) | Always list the needed tools. Pi: `read`, `write`, `edit`, `bash`, `powershell`, `grep`, `find`, `ls`, `codemode`. Omitted means no built-ins, not Pi's default set. |
-| `mcp-servers` | empty | A flat Pi profile needs exact configured MCP servers; each grants the complete server. |
+| `mcp-servers` | empty | A flat Pi profile needs exact configured MCP servers; each grants the complete server. Entries are optional unless written as `- { name: <server>, required: true }` (see below). |
 | `extensions` | empty | The role needs tools from a configured Pi package: `- package: <exact source>` with optional `paths: [...]`. Extensions run as trusted code. |
 | `skills` (alias `skill`) | empty | The child should be able to discover specific skills (registry first, then ambient). Each is passed with `--skill`; nothing is invoked at startup. Unknown names invalidate the profile. Use one alias, not both. |
 | `inherit-skills` | `true` | Set `false` so a Pi child loads only the listed skills (`--no-skills`). With `true`, a same-named ambient skill wins over a registry skill. Flat Pi profiles only. |
@@ -52,6 +52,21 @@ Write and edit profile files for the `subagent` tool correctly. The complete, au
 | `cli` | `pi` | Use `agy` or `claude` for those harnesses (see restrictions). |
 | `disable-model-invocation` | `false` | Set `true` to hide the profile from `subagents_list`; an exact permitted name can still be spawned directly. |
 | `model-chain` | none | A read-only role should fall back across ordered AGY/Pi targets on provider exhaustion. |
+
+### MCP servers are optional by default
+
+`mcp-servers` takes plain names and `{ name, required }` mappings in one YAML array (comma strings still work; every comma entry is optional):
+
+```yaml
+mcp-servers:
+  - project-docs                  # optional
+  - { name: issue-tracker, required: true }
+```
+
+- An optional server that is not configured anywhere permitted, or whose first defining source sets `enabled: false`, is skipped. The child launches without it, and `subagents_list` adds `(optional MCP unavailable: <names>)` to the profile line.
+- A `required: true` server that is missing or disabled invalidates the profile, so spawns fail before a pane opens. Use it when the role cannot work without the server; earlier releases treated every server this way.
+- Invalid server config, a malformed `mcp.json`, a `-`/`_` name collision, a registry `auth` provider, and invalid names stay fatal for optional servers too.
+- Mapping keys are only `name` and `required` (a real YAML boolean). The same name listed as both required and optional is invalid.
 
 ### Skills changed
 

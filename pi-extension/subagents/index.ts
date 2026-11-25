@@ -271,6 +271,12 @@ function formatDiscoveryDiagnostics(
   return `\nInvalid definitions:\n${discovery.diagnostics.map(formatAgentDiagnostic).join("\n")}`;
 }
 
+/** `subagents_list` note for optional MCP servers skipped at discovery. */
+function unavailableMcpSuffix(agent: { mcpServersUnavailable?: readonly string[] }): string {
+  const names = agent.mcpServersUnavailable ?? [];
+  return names.length > 0 ? ` (optional MCP unavailable: ${names.join(", ")})` : "";
+}
+
 function resolveSubagentPaths(
   params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
@@ -3780,7 +3786,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             : a.model
               ? ` [${a.model}]`
               : "";
-          return `• ${a.name}${badge}${model}${desc}`;
+          return `• ${a.name}${badge}${model}${desc}${unavailableMcpSuffix(a)}`;
         });
 
         return {
@@ -3805,7 +3811,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             ? a.modelChain.map((target: AgentModelChainTarget) => `${target.cli}:${target.model}`).join(" → ")
             : a.model;
           const model = modelText ? theme.fg("dim", ` [${modelText}]`) : "";
-          return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
+          const unavailableText = unavailableMcpSuffix(a);
+          const unavailable = unavailableText ? theme.fg("dim", unavailableText) : "";
+          return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}${unavailable}`;
         });
         return new Text(lines.join("\n"), 0, 0);
       },
