@@ -41,14 +41,16 @@ A live subagent spawned from the current Pi session exercises the package copy t
 
 ## Change workflow
 
-1. Read `README.md`, `docs/agent-definitions.md`, `package.json`, and the focused source module identified in [Repository Map](./map.md).
+1. Read `README.md`, `docs/agent-definitions.md`, `package.json`, and the focused source module identified in [Repository Map](../map.md).
 2. Preserve canonical discovery and runtime safety invariants unless the change intentionally updates their documented contract.
 3. Add focused regression coverage to `test/test.ts`; update integration fixtures when an external lifecycle contract changes.
 4. Run unit and package checks. Run the non-model MCP lifecycle check for capability/filtering changes and tmux-only checks when tmux is available.
 5. Run model-consuming lifecycle tests only with explicit approval for external calls, time, and cost.
 6. Compare package dry-run contents with the allowlist before publishing.
+7. Validate changes with the narrowest relevant checks permitted by the task; integration checks require explicit awareness of tmux, LLM, filesystem, time, and cost effects (`package.json`, `test/integration/`).
 
 ## Current limitations
 
 - There is no tracked CI, release automation, formatter, linter, or non-emitting type-check configuration.
 - General stop/interrupt controls, correlation-safe acknowledgment for active Pi or Claude input, cross-provider conversation transfer, chain crash recovery, shell-readiness redesign, broader configuration, further orchestration modularization, and unrelated dead-code cleanup remain deferred. Waiting Pi input has bounded activity-based confirmation, while ambiguous timeout recovery remains explicit and operator-controlled.
+- The child tool widget can omit tools registered by later profile `session_start` or dynamic handlers: `subagent-runtime-control.ts` snapshots `pi.getAllTools()` once at its `session_start`, while activation by the trailing control is unaffected; refresh the widget after activation if exact dynamic display becomes required (`pi-extension/subagents/subagent-runtime-control.ts`, [02.01 focused review](../../spec/archive/260909-1952-profile-extension-loading/implementation/02-01-child-capability-launch.md)).

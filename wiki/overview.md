@@ -11,7 +11,7 @@ The repository ships an ESM Pi package whose registered extension entry point is
 ## Stack and runtime
 
 - TypeScript is executed directly by Pi/Node; local imports retain `.ts` extensions (`package.json`, `pi-extension/subagents/*.ts`).
-- Runtime APIs use a verified Pi 0.87.0 development baseline through `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and matching `typebox`; public peer ranges remain wildcard (`package.json`, `package-lock.json`).
+- Runtime APIs require Pi 1.0+ through `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` (`>=1.0.0` peer ranges; `typebox` peer range stays wildcard), with the lockfile currently resolving Pi 1.1.x (`package.json`, `package-lock.json`, `README.md`).
 - tmux is the only supported pane backend; only the `tmux` executable is required. With `$TMUX` set children split the parent's window; without it they run on the private detached server (`README.md`, `pi-extension/subagents/tmux.ts`).
 - Runtime state is file-backed under Pi session and artifact directories, not in a project database (`pi-extension/subagents/index.ts`, `pi-extension/subagents/session.ts`).
 
@@ -21,7 +21,3 @@ The repository ships an ESM Pi package whose registered extension entry point is
 - `test/` contains local unit tests and side-effecting integration tests.
 - `spec/` is the planning protocol, while `wiki/` is durable current-state knowledge (`AGENTS.md`).
 - There is no tracked CI, deployment configuration, build pipeline, or application server.
-
-## Needs review
-
-- No tracked CI, release, formatter, linter, or non-emitting type-check configuration exists.
